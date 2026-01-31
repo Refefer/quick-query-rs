@@ -1,0 +1,122 @@
+//! qq-tools: Built-in tools for quick-query
+//!
+//! This crate provides the default tools available to LLM agents:
+//! - Filesystem: read, write, list, and search files
+//! - Web: fetch and parse webpages
+//! - Memory: persistent key-value storage
+
+pub mod filesystem;
+pub mod memory;
+pub mod web;
+
+pub use filesystem::{create_filesystem_tools, FileSystemConfig};
+pub use memory::{create_memory_tools, MemoryStore};
+pub use web::create_web_tools;
+
+use qq_core::{Tool, ToolRegistry};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Configuration for the default tool set
+#[derive(Clone)]
+pub struct ToolsConfig {
+    /// Root directory for filesystem operations
+    pub root: PathBuf,
+    /// Whether to allow write operations
+    pub allow_write: bool,
+    /// Path to memory database (None for in-memory)
+    pub memory_db: Option<PathBuf>,
+    /// Enable web tools
+    pub enable_web: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            allow_write: false,
+            memory_db: None,
+            enable_web: true,
+        }
+    }
+}
+
+impl ToolsConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = root.into();
+        self
+    }
+
+    pub fn with_write(mut self, allow: bool) -> Self {
+        self.allow_write = allow;
+        self
+    }
+
+    pub fn with_memory_db(mut self, path: impl Into<PathBuf>) -> Self {
+        self.memory_db = Some(path.into());
+        self
+    }
+
+    pub fn with_web(mut self, enable: bool) -> Self {
+        self.enable_web = enable;
+        self
+    }
+}
+
+/// Create a registry with all default tools
+pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_core::Error> {
+    let mut registry = ToolRegistry::new();
+
+    // Filesystem tools
+    let fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    for tool in create_filesystem_tools(fs_config) {
+        registry.register(tool);
+    }
+
+    // Memory tools
+    let store = if let Some(db_path) = &config.memory_db {
+        Arc::new(MemoryStore::new(db_path)?)
+    } else {
+        Arc::new(MemoryStore::in_memory()?)
+    };
+    for tool in create_memory_tools(store) {
+        registry.register(tool);
+    }
+
+    // Web tools
+    if config.enable_web {
+        for tool in create_web_tools() {
+            registry.register(tool);
+        }
+    }
+
+    Ok(registry)
+}
+
+/// Create individual tools for custom registries
+pub fn create_all_tools(config: ToolsConfig) -> Result<Vec<Box<dyn Tool>>, qq_core::Error> {
+    let mut tools = Vec::new();
+
+    // Filesystem tools
+    let fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    tools.extend(create_filesystem_tools(fs_config));
+
+    // Memory tools
+    let store = if let Some(db_path) = &config.memory_db {
+        Arc::new(MemoryStore::new(db_path)?)
+    } else {
+        Arc::new(MemoryStore::in_memory()?)
+    };
+    tools.extend(create_memory_tools(store));
+
+    // Web tools
+    if config.enable_web {
+        tools.extend(create_web_tools());
+    }
+
+    Ok(tools)
+}

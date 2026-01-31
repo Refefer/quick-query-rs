@@ -50,3 +50,4 @@ crossterm = "0.28"
 qq-core = { path = "crates/qq-core" }
 qq-cli = { path = "crates/qq-cli" }
 qq-providers = { path = "crates/qq-providers" }
+qq-tools = { path = "crates/qq-tools" }

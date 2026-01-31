@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-use qq_core::{CompletionRequest, Message, Provider, StreamChunk};
+use qq_core::{CompletionRequest, Message, Provider, StreamChunk, ToolCall, ToolRegistry};
 use qq_providers::openai::OpenAIProvider;
+use qq_tools::{create_default_registry, ToolsConfig};
 
 mod config;
 
@@ -50,6 +52,14 @@ struct Cli {
     /// Disable streaming output
     #[arg(long)]
     no_stream: bool,
+
+    /// Enable tools (filesystem, web, memory)
+    #[arg(long)]
+    tools: bool,
+
+    /// Allow write operations (requires --tools)
+    #[arg(long)]
+    allow_write: bool,
 
     /// Enable debug output
     #[arg(short, long)]
@@ -114,6 +124,28 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     let settings = resolve_settings(cli, config)?;
     let provider = create_provider_from_settings(&settings)?;
 
+    // Set up tools if enabled
+    let tools_registry = if cli.tools {
+        let memory_db = Config::config_dir()
+            .ok()
+            .map(|d| d.join("memory.db"));
+
+        let tools_config = ToolsConfig::new()
+            .with_root(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .with_write(cli.allow_write)
+            .with_web(true);
+
+        let tools_config = if let Some(db) = memory_db {
+            tools_config.with_memory_db(db)
+        } else {
+            tools_config
+        };
+
+        Some(create_default_registry(tools_config)?)
+    } else {
+        None
+    };
+
     let mut messages = Vec::new();
 
     // Add system prompt (CLI overrides profile)
@@ -123,59 +155,145 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
 
     messages.push(Message::user(prompt));
 
-    let mut request = CompletionRequest::new(messages);
+    // Agentic loop - keep going while LLM returns tool calls
+    let max_iterations = 20;
+    for iteration in 0..max_iterations {
+        let mut request = CompletionRequest::new(messages.clone());
 
-    // Apply model (CLI overrides profile overrides provider default)
-    if let Some(model) = &settings.model {
-        request = request.with_model(model.as_str());
-    }
+        // Apply model
+        if let Some(model) = &settings.model {
+            request = request.with_model(model.as_str());
+        }
 
-    if let Some(temp) = cli.temperature {
-        request = request.with_temperature(temp);
-    }
+        if let Some(temp) = cli.temperature {
+            request = request.with_temperature(temp);
+        }
 
-    if let Some(max_tokens) = cli.max_tokens {
-        request = request.with_max_tokens(max_tokens);
-    }
+        if let Some(max_tokens) = cli.max_tokens {
+            request = request.with_max_tokens(max_tokens);
+        }
 
-    // Add merged parameters
-    if !settings.parameters.is_empty() {
-        request = request.with_extra(settings.parameters.clone());
-    }
+        // Add merged parameters
+        if !settings.parameters.is_empty() {
+            request = request.with_extra(settings.parameters.clone());
+        }
 
-    if cli.no_stream {
-        let response = provider.complete(request).await?;
-        println!("{}", response.message.content.to_string_lossy());
-    } else {
-        let mut stream = provider.stream(request).await?;
-        let mut stdout = io::stdout();
+        // Add tool definitions
+        if let Some(registry) = &tools_registry {
+            request = request.with_tools(registry.definitions());
+        }
 
-        while let Some(chunk) = stream.next().await {
-            match chunk? {
-                StreamChunk::Delta { content } => {
-                    print!("{}", content);
-                    stdout.flush()?;
+        // If tools are enabled, use non-streaming for simpler tool handling
+        if tools_registry.is_some() || cli.no_stream {
+            let response = provider.complete(request).await?;
+
+            // Check if we have tool calls
+            if !response.message.tool_calls.is_empty() {
+                // Print assistant message if any
+                let content = response.message.content.to_string_lossy();
+                if !content.is_empty() {
+                    println!("{}", content);
                 }
-                StreamChunk::Done { usage } => {
-                    println!();
+
+                // Add assistant message to history
+                messages.push(response.message.clone());
+
+                // Execute each tool call
+                let tool_calls = response.message.tool_calls.clone();
+                for tool_call in tool_calls {
                     if cli.debug {
-                        if let Some(usage) = usage {
-                            eprintln!(
-                                "[tokens: {} prompt, {} completion, {} total]",
-                                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
-                            );
+                        eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
+                    }
+
+                    let result = execute_tool_call(&tools_registry, &tool_call).await;
+
+                    if cli.debug {
+                        let preview = if result.len() > 200 {
+                            format!("{}...", &result[..200])
+                        } else {
+                            result.clone()
+                        };
+                        eprintln!("[tool result] {}", preview);
+                    }
+
+                    // Add tool result to messages
+                    messages.push(Message::tool_result(&tool_call.id, result));
+                }
+
+                // Continue loop to get next response
+                continue;
+            }
+
+            // No tool calls - print final response and exit
+            println!("{}", response.message.content.to_string_lossy());
+
+            if cli.debug {
+                eprintln!(
+                    "[tokens: {} prompt, {} completion, {} total | iterations: {}]",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    response.usage.total_tokens,
+                    iteration + 1
+                );
+            }
+
+            return Ok(());
+        } else {
+            // Streaming mode (no tools)
+            let mut stream = provider.stream(request).await?;
+            let mut stdout = io::stdout();
+
+            while let Some(chunk) = stream.next().await {
+                match chunk? {
+                    StreamChunk::Delta { content } => {
+                        print!("{}", content);
+                        stdout.flush()?;
+                    }
+                    StreamChunk::Done { usage } => {
+                        println!();
+                        if cli.debug {
+                            if let Some(usage) = usage {
+                                eprintln!(
+                                    "[tokens: {} prompt, {} completion, {} total]",
+                                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                                );
+                            }
                         }
                     }
+                    StreamChunk::Error { message } => {
+                        eprintln!("\nError: {}", message);
+                    }
+                    _ => {}
                 }
-                StreamChunk::Error { message } => {
-                    eprintln!("\nError: {}", message);
-                }
-                _ => {}
             }
+
+            return Ok(());
         }
     }
 
+    eprintln!("Warning: Max iterations ({}) reached", max_iterations);
     Ok(())
+}
+
+async fn execute_tool_call(registry: &Option<ToolRegistry>, tool_call: &ToolCall) -> String {
+    let Some(registry) = registry else {
+        return format!("Error: Tools not available");
+    };
+
+    let Some(tool) = registry.get(&tool_call.name) else {
+        return format!("Error: Unknown tool '{}'", tool_call.name);
+    };
+
+    match tool.execute(tool_call.arguments.clone()).await {
+        Ok(output) => {
+            if output.is_error {
+                format!("Error: {}", output.content)
+            } else {
+                output.content
+            }
+        }
+        Err(e) => format!("Error executing tool: {}", e),
+    }
 }
 
 async fn chat_mode(_cli: &Cli, _config: &Config, _system: Option<String>) -> Result<()> {
