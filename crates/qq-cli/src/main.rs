@@ -9,6 +9,7 @@ use qq_core::{CompletionRequest, Message, Provider, StreamChunk, ToolCall, ToolR
 use qq_providers::openai::OpenAIProvider;
 use qq_tools::{create_default_registry, ToolsConfig};
 
+mod chat;
 mod config;
 
 use config::Config;
@@ -16,54 +17,54 @@ use config::Config;
 #[derive(Parser)]
 #[command(name = "qq")]
 #[command(author, version, about = "Quick-query: A fast LLM CLI tool", long_about = None)]
-struct Cli {
+pub struct Cli {
     /// Prompt to send (for quick completion mode)
     #[arg(short, long)]
-    prompt: Option<String>,
+    pub prompt: Option<String>,
 
     /// Profile to use (bundles provider, prompt, model, parameters)
     #[arg(short = 'P', long)]
-    profile: Option<String>,
+    pub profile: Option<String>,
 
     /// Model to use (overrides config/profile default)
     #[arg(short, long)]
-    model: Option<String>,
+    pub model: Option<String>,
 
     /// Provider to use (overrides profile)
     #[arg(long)]
-    provider: Option<String>,
+    pub provider: Option<String>,
 
     /// Base URL for the API (overrides config)
     #[arg(long)]
-    base_url: Option<String>,
+    pub base_url: Option<String>,
 
     /// System prompt (overrides profile)
     #[arg(short, long)]
-    system: Option<String>,
+    pub system: Option<String>,
 
     /// Temperature (0.0-2.0)
     #[arg(short, long)]
-    temperature: Option<f32>,
+    pub temperature: Option<f32>,
 
     /// Maximum tokens to generate
     #[arg(long)]
-    max_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,
 
     /// Disable streaming output
     #[arg(long)]
-    no_stream: bool,
+    pub no_stream: bool,
 
     /// Enable tools (filesystem, web, memory)
     #[arg(long)]
-    tools: bool,
+    pub tools: bool,
 
     /// Allow write operations (requires --tools)
     #[arg(long)]
-    allow_write: bool,
+    pub allow_write: bool,
 
     /// Enable debug output
     #[arg(short, long)]
-    debug: bool,
+    pub debug: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -296,9 +297,48 @@ async fn execute_tool_call(registry: &Option<ToolRegistry>, tool_call: &ToolCall
     }
 }
 
-async fn chat_mode(_cli: &Cli, _config: &Config, _system: Option<String>) -> Result<()> {
-    println!("Chat mode not yet implemented. Use -p/--prompt for quick queries.");
-    Ok(())
+async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result<()> {
+    // Resolve settings from profile, CLI, and config
+    let settings = resolve_settings(cli, config)?;
+    let provider = create_provider_from_settings(&settings)?;
+
+    // Determine system prompt: explicit arg > CLI > profile
+    let system_prompt = system
+        .or_else(|| cli.system.clone())
+        .or(settings.system_prompt);
+
+    // Set up tools if enabled
+    let tools_registry = if cli.tools {
+        let memory_db = Config::config_dir()
+            .ok()
+            .map(|d| d.join("memory.db"));
+
+        let tools_config = ToolsConfig::new()
+            .with_root(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .with_write(cli.allow_write)
+            .with_web(true);
+
+        let tools_config = if let Some(db) = memory_db {
+            tools_config.with_memory_db(db)
+        } else {
+            tools_config
+        };
+
+        Some(create_default_registry(tools_config)?)
+    } else {
+        None
+    };
+
+    chat::run_chat(
+        cli,
+        config,
+        provider,
+        system_prompt,
+        tools_registry,
+        settings.parameters,
+        settings.model,
+    )
+    .await
 }
 
 async fn list_models(cli: &Cli, config: &Config) -> Result<()> {
