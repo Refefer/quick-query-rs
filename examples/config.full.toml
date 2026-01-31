@@ -1,0 +1,37 @@
+# Full Configuration Example
+# Copy to: ~/.config/qq/config.toml
+#
+# This shows all available configuration options.
+
+# Global defaults (apply to all providers unless overridden)
+default_provider = "openai"
+default_model = "gpt-4o"
+temperature = 0.7
+max_tokens = 4096
+
+# OpenAI Configuration
+[providers.openai]
+api_key = "sk-your-openai-api-key-here"
+base_url = "https://api.openai.com/v1"  # Optional, this is the default
+default_model = "gpt-4o"                # Override global default for this provider
+
+# Extra parameters passed to the API (provider-specific)
+[providers.openai.parameters]
+# Examples of custom parameters:
+# reasoning_effort = "medium"                    # For o1/reasoning models
+# chat_template_kwargs = { reasoning_effort = "high" }  # For custom templates
+
+# Anthropic Configuration (for future use)
+[providers.anthropic]
+api_key = "sk-ant-your-anthropic-key-here"
+default_model = "claude-3-5-sonnet-20241022"
+
+# Google Gemini Configuration (for future use)
+[providers.gemini]
+api_key = "your-gemini-api-key-here"
+default_model = "gemini-1.5-pro"
+
+# Mistral Configuration (for future use)
+[providers.mistral]
+api_key = "your-mistral-api-key-here"
+default_model = "mistral-large-latest"

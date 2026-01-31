@@ -1,0 +1,94 @@
+# Profile-Based Configuration
+# Copy to: ~/.config/qq/config.toml
+#
+# Profiles bundle together:
+# - provider: which API endpoint to use
+# - prompt: system prompt (named or inline)
+# - model: model override
+# - parameters: extra API parameters
+
+default_provider = "openai"
+default_profile = "default"
+
+# =============================================================================
+# PROFILES
+# =============================================================================
+
+# Default profile - balanced reasoning
+[profiles.default]
+provider = "openai"
+prompt = "assistant"
+
+[profiles.default.parameters]
+chat_template_kwargs = { reasoning_effort = "medium" }
+
+# Coding assistant with high reasoning
+[profiles.coding]
+provider = "openai"
+prompt = "coding"
+
+[profiles.coding.parameters]
+chat_template_kwargs = { reasoning_effort = "high" }
+
+# Quick answers with low reasoning
+[profiles.quick]
+provider = "openai"
+prompt = "minimal"
+
+[profiles.quick.parameters]
+chat_template_kwargs = { reasoning_effort = "low" }
+
+# Use a specific cloud provider
+[profiles.cloud]
+provider = "openai-cloud"
+model = "gpt-4o"
+
+# =============================================================================
+# PROMPTS
+# =============================================================================
+
+[prompts.assistant]
+prompt = "You are a helpful assistant."
+
+[prompts.minimal]
+prompt = "Be concise. Answer in as few words as possible."
+
+[prompts.coding]
+prompt = """
+You are an expert programmer. Help users write clean, efficient code.
+
+Guidelines:
+- Ask clarifying questions before writing code
+- Show diffs for file changes
+- Explain your reasoning
+- Follow best practices for the language
+"""
+
+# =============================================================================
+# PROVIDERS
+# =============================================================================
+
+[providers.openai]
+api_key = "none"
+base_url = "http://localhost:8000/v1"
+
+[providers.openai-cloud]
+api_key = "sk-your-key-here"
+base_url = "https://api.openai.com/v1"
+default_model = "gpt-4o"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+#
+# Use default profile:
+#   qq -p "Hello"
+#
+# Use a specific profile:
+#   qq -P coding -p "Write a sort function"
+#   qq -P quick -p "What is 2+2?"
+#   qq -P cloud -p "Hello from OpenAI"
+#
+# Override profile settings:
+#   qq -P coding -s "Be brief" -p "Write a sort function"
+#   qq -P coding --provider openai-cloud -p "Use cloud instead"

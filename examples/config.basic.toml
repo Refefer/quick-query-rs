@@ -1,0 +1,10 @@
+# Basic Configuration
+# Copy to: ~/.config/qq/config.toml
+#
+# This is the simplest setup - just configure your OpenAI API key.
+# You can also set the OPENAI_API_KEY environment variable instead.
+
+default_provider = "openai"
+
+[providers.openai]
+api_key = "sk-your-openai-api-key-here"

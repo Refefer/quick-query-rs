@@ -1,0 +1,97 @@
+# Local LLM Configuration
+# Copy to: ~/.config/qq/config.toml
+#
+# Run LLMs locally using tools like Ollama, LM Studio, LocalAI, or llama.cpp.
+# These typically expose an OpenAI-compatible API on localhost.
+
+default_provider = "openai"
+
+# ============================================================================
+# Ollama (https://ollama.ai)
+# ============================================================================
+# 1. Install: curl -fsSL https://ollama.ai/install.sh | sh
+# 2. Pull a model: ollama pull llama3.1
+# 3. Ollama runs automatically on port 11434
+
+# [providers.openai]
+# api_key = "ollama"  # Ollama doesn't require a real key, but field is required
+# base_url = "http://localhost:11434/v1"
+# default_model = "llama3.1"
+
+# ============================================================================
+# LM Studio (https://lmstudio.ai)
+# ============================================================================
+# 1. Download and install LM Studio
+# 2. Download a model from the Discover tab
+# 3. Go to Local Server tab and click "Start Server"
+# 4. Default port is 1234
+
+# [providers.openai]
+# api_key = "lm-studio"
+# base_url = "http://localhost:1234/v1"
+# default_model = "local-model"
+
+# ============================================================================
+# LocalAI (https://localai.io)
+# ============================================================================
+# 1. docker run -p 8080:8080 --name local-ai -ti localai/localai:latest-aio-cpu
+# 2. Or with GPU: localai/localai:latest-aio-gpu-nvidia-cuda-12
+
+# [providers.openai]
+# api_key = "local-ai"
+# base_url = "http://localhost:8080/v1"
+# default_model = "gpt-4"
+
+# ============================================================================
+# llama.cpp server
+# ============================================================================
+# 1. Build llama.cpp: https://github.com/ggerganov/llama.cpp
+# 2. Run server: ./server -m model.gguf --port 8080
+
+# [providers.openai]
+# api_key = "llama-cpp"
+# base_url = "http://localhost:8080/v1"
+# default_model = "local"
+
+# ============================================================================
+# vLLM (https://vllm.ai)
+# ============================================================================
+# 1. pip install vllm
+# 2. python -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-3.1-8B-Instruct
+
+[providers.openai]
+api_key = "vllm"
+base_url = "http://localhost:8000/v1"
+default_model = "meta-llama/Llama-3.1-8B-Instruct"
+
+# ============================================================================
+# Reasoning Models with Custom Parameters
+# ============================================================================
+# Some models support custom parameters like reasoning_effort for thinking time.
+# Use multiple provider configs for different reasoning levels:
+
+# Default reasoning (medium)
+# [providers.openai]
+# api_key = "none"
+# base_url = "http://localhost:8000/v1"
+#
+# [providers.openai.parameters]
+# chat_template_kwargs = { reasoning_effort = "medium" }
+
+# High reasoning (more thinking time)
+# [providers.high]
+# api_key = "none"
+# base_url = "http://localhost:8000/v1"
+#
+# [providers.high.parameters]
+# chat_template_kwargs = { reasoning_effort = "high" }
+
+# Low reasoning (faster responses)
+# [providers.low]
+# api_key = "none"
+# base_url = "http://localhost:8000/v1"
+#
+# [providers.low.parameters]
+# chat_template_kwargs = { reasoning_effort = "low" }
+#
+# Usage: qq --provider high -p "Complex problem..."

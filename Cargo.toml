@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrew"]
+license = "MIT"
+repository = "https://github.com/andrew/quick-query-rs"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# HTTP & networking
+reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest-eventsource = "0.6"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Configuration
+figment = { version = "0.10", features = ["toml", "env"] }
+toml = "0.8"
+dirs = "5.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async traits
+async-trait = "0.1"
+
+# Terminal/readline
+rustyline = "14.0"
+crossterm = "0.28"
+
+# Internal crates
+qq-core = { path = "crates/qq-core" }
+qq-cli = { path = "crates/qq-cli" }
+qq-providers = { path = "crates/qq-providers" }

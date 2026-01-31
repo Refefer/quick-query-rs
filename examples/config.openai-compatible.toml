@@ -1,0 +1,37 @@
+# OpenAI-Compatible API Configuration
+# Copy to: ~/.config/qq/config.toml
+#
+# Many providers offer OpenAI-compatible APIs. You can use them by
+# setting a custom base_url with the openai provider.
+
+default_provider = "openai"
+
+# Example: Azure OpenAI
+# [providers.openai]
+# api_key = "your-azure-api-key"
+# base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment"
+# default_model = "gpt-4"
+
+# Example: Together AI
+# [providers.openai]
+# api_key = "your-together-api-key"
+# base_url = "https://api.together.xyz/v1"
+# default_model = "meta-llama/Llama-3-70b-chat-hf"
+
+# Example: Groq
+# [providers.openai]
+# api_key = "your-groq-api-key"
+# base_url = "https://api.groq.com/openai/v1"
+# default_model = "llama-3.1-70b-versatile"
+
+# Example: OpenRouter
+# [providers.openai]
+# api_key = "your-openrouter-api-key"
+# base_url = "https://openrouter.ai/api/v1"
+# default_model = "anthropic/claude-3.5-sonnet"
+
+# Example: Fireworks AI
+[providers.openai]
+api_key = "your-fireworks-api-key"
+base_url = "https://api.fireworks.ai/inference/v1"
+default_model = "accounts/fireworks/models/llama-v3p1-70b-instruct"
