@@ -1,4 +1,4 @@
-//! Status bar widget showing model, tokens, and status information.
+//! Status bar widget showing profile, activity, tokens, and streaming status.
 
 use ratatui::{
     buffer::Buffer,
@@ -18,6 +18,7 @@ pub struct StatusBar<'a> {
     is_streaming: bool,
     status_message: Option<&'a str>,
     execution_context: Option<&'a ExecutionContext>,
+    tool_iteration: u32,
 }
 
 impl<'a> StatusBar<'a> {
@@ -29,6 +30,7 @@ impl<'a> StatusBar<'a> {
             is_streaming: false,
             status_message: None,
             execution_context: None,
+            tool_iteration: 0,
         }
     }
 
@@ -52,79 +54,98 @@ impl<'a> StatusBar<'a> {
         self.execution_context = Some(context);
         self
     }
+
+    pub fn iteration(mut self, iteration: u32) -> Self {
+        self.tool_iteration = iteration;
+        self
+    }
 }
 
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let style_label = Style::default().fg(Color::DarkGray);
-        let style_value = Style::default().fg(Color::White);
+        let style_dim = Style::default().fg(Color::DarkGray);
+        let style_profile = Style::default().fg(Color::Cyan);
+        let style_activity = Style::default().fg(Color::Yellow);
+        let style_tokens = Style::default().fg(Color::White);
         let style_streaming = Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD);
-        let style_context = Style::default().fg(Color::Cyan);
-        let style_context_separator = Style::default().fg(Color::DarkGray);
 
         let mut spans = Vec::new();
 
-        // Track if context is active (showing tool/agent info)
-        let context_is_active = self.execution_context.map(|ctx| ctx.is_active()).unwrap_or(false);
+        // Always show profile first
+        spans.push(Span::styled(" ", style_dim));
+        spans.push(Span::styled(self.profile, style_profile));
 
-        // Show execution context if active (more than just Chat)
-        if let Some(ctx) = self.execution_context {
-            if ctx.is_active() {
-                // Format context stack with colored separators
-                let context_str = ctx.format_blocking();
-                spans.push(Span::styled(" ", style_label));
-
-                // Split and colorize the context - collect into owned Strings
-                let parts: Vec<String> = context_str.split(" > ").map(|s| s.to_string()).collect();
-                for (i, part) in parts.iter().enumerate() {
-                    if i > 0 {
-                        spans.push(Span::styled(" > ", style_context_separator));
-                    }
-                    spans.push(Span::styled(part.clone(), style_context));
-                }
-            } else {
-                // Just show profile when idle
-                spans.push(Span::styled(" Profile: ", style_label));
-                spans.push(Span::styled(self.profile, style_value));
-            }
-        } else {
-            spans.push(Span::styled(" Profile: ", style_label));
-            spans.push(Span::styled(self.profile, style_value));
+        // Show activity: either from execution context or status message
+        let activity = self.get_activity();
+        if let Some(activity) = activity {
+            spans.push(Span::styled(" › ", style_dim));
+            spans.push(Span::styled(activity, style_activity));
         }
 
-        // Show tokens if any
+        // Show iteration count if in a tool loop
+        if self.tool_iteration > 1 {
+            spans.push(Span::styled(format!(" (turn {})", self.tool_iteration), style_dim));
+        }
+
+        // Streaming indicator
+        if self.is_streaming {
+            spans.push(Span::styled(" ", style_dim));
+            spans.push(Span::styled("●", style_streaming));
+        }
+
+        // Push tokens to the right side
         let total = self.prompt_tokens + self.completion_tokens;
         if total > 0 {
-            spans.push(Span::styled(" | Tokens: ", style_label));
-            spans.push(Span::styled(format!("{}", total), style_value));
-            spans.push(Span::styled(
-                format!(" ({}p/{}c)", self.prompt_tokens, self.completion_tokens),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+            // Calculate space needed for right-aligned tokens
+            let tokens_text = format!("{}t", total);
+            let tokens_detail = format!(" ({}p/{}c)", self.prompt_tokens, self.completion_tokens);
 
-        // Show streaming indicator
-        if self.is_streaming {
-            spans.push(Span::styled(" | ", style_label));
-            spans.push(Span::styled("STREAMING", style_streaming));
-        }
+            // Add flexible space before tokens
+            let current_len: usize = spans.iter().map(|s| s.content.len()).sum();
+            let tokens_len = tokens_text.len() + tokens_detail.len() + 2; // +2 for padding
+            let available = area.width as usize;
 
-        // Show status message only if context is NOT active
-        // (context already shows what's running, so "Running: X" would be redundant)
-        if !context_is_active {
-            if let Some(msg) = self.status_message {
-                spans.push(Span::styled(" | ", style_label));
-                spans.push(Span::styled(msg, Style::default().fg(Color::Yellow)));
+            if current_len + tokens_len < available {
+                let padding = available - current_len - tokens_len;
+                spans.push(Span::styled(" ".repeat(padding), style_dim));
+            } else {
+                spans.push(Span::styled(" | ", style_dim));
             }
+
+            spans.push(Span::styled(tokens_text, style_tokens));
+            spans.push(Span::styled(tokens_detail, style_dim));
+            spans.push(Span::styled(" ", style_dim));
         }
 
         let paragraph = Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::BOTTOM).border_style(
-                Style::default().fg(Color::DarkGray),
-            ));
+            .block(Block::default().borders(Borders::BOTTOM).border_style(style_dim));
 
         paragraph.render(area, buf);
+    }
+}
+
+impl StatusBar<'_> {
+    /// Get the current activity description
+    fn get_activity(&self) -> Option<String> {
+        // First check execution context for the current activity
+        if let Some(ctx) = self.execution_context {
+            if let Some(activity) = ctx.current_activity_blocking() {
+                return Some(activity);
+            }
+        }
+
+        // Fall back to status message (e.g., "Tool: list_files")
+        if let Some(msg) = self.status_message {
+            // Clean up common prefixes
+            let cleaned = msg
+                .strip_prefix("Tool: ")
+                .or_else(|| msg.strip_prefix("Running: "))
+                .unwrap_or(msg);
+            return Some(cleaned.to_string());
+        }
+
+        None
     }
 }

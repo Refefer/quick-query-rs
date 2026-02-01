@@ -21,16 +21,15 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     let chunks = create_layout(area, app);
 
     // Status bar at top
-    let status_bar = StatusBar::new(&app.profile)
+    let mut status_bar = StatusBar::new(&app.profile)
         .tokens(app.prompt_tokens, app.completion_tokens)
         .streaming(app.is_streaming)
-        .execution_context(&app.execution_context);
+        .execution_context(&app.execution_context)
+        .iteration(app.tool_iteration);
 
-    let status_bar = if let Some(ref msg) = app.status_message {
-        status_bar.status(msg)
-    } else {
-        status_bar
-    };
+    if let Some(ref msg) = app.status_message {
+        status_bar = status_bar.status(msg);
+    }
 
     frame.render_widget(status_bar, chunks.status);
 

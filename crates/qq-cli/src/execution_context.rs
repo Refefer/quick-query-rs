@@ -141,6 +141,31 @@ impl ExecutionContext {
             false
         }
     }
+
+    /// Get the current activity description (innermost non-Chat entry)
+    /// Returns a human-readable string like "list_files" or "explore › list_files"
+    pub fn current_activity_blocking(&self) -> Option<String> {
+        if let Ok(stack) = self.stack.try_read() {
+            if stack.len() <= 1 {
+                return None; // Only Chat, no activity
+            }
+
+            // Build activity string from non-Chat entries
+            let activities: Vec<&str> = stack
+                .iter()
+                .skip(1) // Skip "Chat"
+                .map(|entry| entry.name.as_str())
+                .collect();
+
+            if activities.is_empty() {
+                None
+            } else {
+                Some(activities.join(" › "))
+            }
+        } else {
+            None
+        }
+    }
 }
 
 /// RAII guard for context entries - automatically pops when dropped
