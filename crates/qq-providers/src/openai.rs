@@ -275,6 +275,15 @@ impl Provider for OpenAIProvider {
                         match serde_json::from_str::<OpenAIStreamResponse>(&msg.data) {
                             Ok(response) => {
                                 for choice in response.choices {
+                                    // Handle reasoning/thinking content (o1 models)
+                                    if let Some(reasoning) = choice.delta.reasoning_content {
+                                        if !reasoning.is_empty() {
+                                            let _ = tx
+                                                .send(Ok(StreamChunk::ThinkingDelta { content: reasoning }))
+                                                .await;
+                                        }
+                                    }
+
                                     if let Some(content) = choice.delta.content {
                                         if !content.is_empty() {
                                             let _ = tx
@@ -495,6 +504,8 @@ struct OpenAIStreamChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamDelta {
     content: Option<String>,
+    /// Reasoning/thinking content from o1/reasoning models
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAIStreamToolCall>>,
 }
 

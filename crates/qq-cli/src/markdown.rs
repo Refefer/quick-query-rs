@@ -7,7 +7,7 @@ use std::io::{self, Write};
 
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
-    style::{Color, SetForegroundColor, ResetColor},
+    style::Color,
     terminal::{Clear, ClearType},
     ExecutableCommand,
 };
@@ -23,8 +23,6 @@ pub struct MarkdownRenderer {
     skin: MadSkin,
     /// Terminal width
     term_width: usize,
-    /// Whether we've started rendering
-    started: bool,
 }
 
 impl MarkdownRenderer {
@@ -38,19 +36,7 @@ impl MarkdownRenderer {
             rendered_lines: 0,
             skin: create_skin(),
             term_width,
-            started: false,
         }
-    }
-
-    /// Print the "assistant>" prefix before content.
-    pub fn print_prefix(&mut self) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        stdout.execute(SetForegroundColor(Color::Cyan))?;
-        print!("assistant> ");
-        stdout.execute(ResetColor)?;
-        stdout.flush()?;
-        self.started = true;
-        Ok(())
     }
 
     /// Add content and re-render.

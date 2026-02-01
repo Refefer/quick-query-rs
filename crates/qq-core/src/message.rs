@@ -219,6 +219,9 @@ pub enum StreamChunk {
     Delta {
         content: String,
     },
+    ThinkingDelta {
+        content: String,
+    },
     ToolCallStart {
         id: String,
         name: String,

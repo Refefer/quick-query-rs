@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use crossterm::ExecutableCommand;
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
@@ -127,6 +128,120 @@ Tips:
     );
 }
 
+/// Print a section header with styling (full-width horizontal rule with centered title)
+fn print_section_header(title: &str) -> std::io::Result<()> {
+    use crossterm::style::{Color, SetForegroundColor, ResetColor};
+    use crossterm::terminal::size;
+    use std::io::Write;
+
+    let width = size().map(|(w, _)| w as usize).unwrap_or(80);
+    let title_len = title.len() + 2; // title + spaces on each side
+    let remaining = width.saturating_sub(title_len).saturating_sub(1);
+    let left_len = remaining / 2;
+    let right_len = remaining - left_len;
+
+    let left_rule = "─".repeat(left_len);
+    let right_rule = "─".repeat(right_len);
+
+    let mut stdout = std::io::stdout();
+    stdout.execute(SetForegroundColor(Color::DarkGrey))?;
+    print!("{} ", left_rule);
+    stdout.execute(SetForegroundColor(Color::Cyan))?;
+    print!("{}", title);
+    stdout.execute(SetForegroundColor(Color::DarkGrey))?;
+    println!(" {}", right_rule);
+    stdout.execute(ResetColor)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Format tool call arguments for display, truncating long values
+fn format_tool_args(args: &serde_json::Value) -> String {
+    match args {
+        serde_json::Value::Object(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        serde_json::Value::String(s) => {
+                            if s.len() > 50 {
+                                format!("\"{}...\"", &s[..47])
+                            } else {
+                                format!("\"{}\"", s)
+                            }
+                        }
+                        serde_json::Value::Array(arr) => {
+                            if arr.len() > 3 {
+                                format!("[{} items]", arr.len())
+                            } else {
+                                let items: Vec<String> = arr.iter().map(|v| {
+                                    let s = v.to_string();
+                                    if s.len() > 20 { format!("{}...", &s[..17]) } else { s }
+                                }).collect();
+                                format!("[{}]", items.join(", "))
+                            }
+                        }
+                        other => {
+                            let s = other.to_string();
+                            if s.len() > 50 {
+                                format!("{}...", &s[..47])
+                            } else {
+                                s
+                            }
+                        }
+                    };
+                    format!("{}={}", k, val)
+                })
+                .collect();
+            parts.join(", ")
+        }
+        serde_json::Value::Null => String::new(),
+        other => {
+            let s = other.to_string();
+            if s.len() > 100 {
+                format!("{}...", &s[..97])
+            } else {
+                s
+            }
+        }
+    }
+}
+
+/// Print a tool call notification
+fn print_tool_call(name: &str, args: &serde_json::Value) -> std::io::Result<()> {
+    use crossterm::style::{Color, SetForegroundColor, ResetColor};
+    use std::io::Write;
+
+    let formatted_args = format_tool_args(args);
+
+    let mut stdout = std::io::stdout();
+    stdout.execute(SetForegroundColor(Color::DarkGrey))?;
+    print!("▶ ");
+    stdout.execute(SetForegroundColor(Color::Yellow))?;
+    print!("{}", name);
+    if !formatted_args.is_empty() {
+        stdout.execute(SetForegroundColor(Color::DarkGrey))?;
+        print!(" {}", formatted_args);
+    }
+    println!();
+    stdout.execute(ResetColor)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Print prompt hint showing available commands
+fn print_prompt_hint() -> std::io::Result<()> {
+    use crossterm::style::{Color, SetForegroundColor, ResetColor};
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout();
+    stdout.execute(SetForegroundColor(Color::DarkGrey))?;
+    println!("/help · /quit or Ctrl+D · Ctrl+C to interrupt");
+    stdout.execute(ResetColor)?;
+    stdout.flush()?;
+    Ok(())
+}
+
 /// Run interactive chat mode
 pub async fn run_chat(
     cli: &Cli,
@@ -153,12 +268,11 @@ pub async fn run_chat(
 
     let mut session = ChatSession::new(system_prompt);
 
-    println!("Chat mode started. Type /help for commands, /quit to exit.\n");
-
     loop {
-        let prompt = format!("you> ");
+        // Print hint line before prompt
+        print_prompt_hint()?;
 
-        match rl.readline(&prompt) {
+        match rl.readline("you> ") {
             Ok(line) => {
                 // Add to readline history
                 let _ = rl.add_history_entry(&line);
@@ -286,19 +400,36 @@ async fn run_completion(
         // Stream the response
         let mut stream = provider.stream(request).await?;
 
-        // Set up markdown renderer for streaming output
-        let mut renderer = MarkdownRenderer::new();
+        // Set up markdown renderers for thinking and content
+        let mut thinking_renderer = MarkdownRenderer::new();
+        let mut content_renderer = MarkdownRenderer::new();
+        let mut in_thinking = false;
+        let mut in_content = false;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None; // (id, name, arguments)
 
         while let Some(chunk) = stream.next().await {
             match chunk? {
                 StreamChunk::Start { .. } => {}
-                StreamChunk::Delta { content: delta } => {
-                    if renderer.is_empty() && !delta.trim().is_empty() {
-                        renderer.print_prefix()?;
+                StreamChunk::ThinkingDelta { content: delta } => {
+                    if !in_thinking {
+                        // Print thinking header
+                        print_section_header("Thinking")?;
+                        in_thinking = true;
                     }
-                    renderer.push(&delta)?;
+                    thinking_renderer.push(&delta)?;
+                }
+                StreamChunk::Delta { content: delta } => {
+                    if !in_content {
+                        // Finish thinking section if we were in it
+                        if in_thinking {
+                            thinking_renderer.finish()?;
+                        }
+                        // Print content header
+                        print_section_header("Response")?;
+                        in_content = true;
+                    }
+                    content_renderer.push(&delta)?;
                 }
                 StreamChunk::ToolCallStart { id, name } => {
                     // Finish any pending tool call
@@ -339,11 +470,11 @@ async fn run_completion(
             }
         }
 
-        let content = renderer.content().to_string();
+        let content = content_renderer.content().to_string();
 
         // Handle tool calls if any
         if !tool_calls.is_empty() {
-            if !renderer.is_empty() {
+            if !content_renderer.is_empty() {
                 println!(); // Newline after any content
             }
 
@@ -352,10 +483,9 @@ async fn run_completion(
                 Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
             session.add_assistant_with_tools(assistant_msg);
 
-            if cli.debug {
-                for tool_call in &tool_calls {
-                    eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
-                }
+            // Show tool calls to user
+            for tool_call in &tool_calls {
+                print_tool_call(&tool_call.name, &tool_call.arguments)?;
             }
 
             let results = execute_tools_parallel(tools_registry, tool_calls).await;
@@ -367,7 +497,7 @@ async fn run_completion(
                     } else {
                         result.content.clone()
                     };
-                    eprintln!("[result] {}", preview);
+                    eprintln!("[debug] result: {}", preview);
                 }
 
                 session.add_tool_result(&result.tool_call_id, &result.content);
@@ -378,7 +508,12 @@ async fn run_completion(
         }
 
         // No tool calls - finish up
-        renderer.finish()?;
+        if in_thinking && !in_content {
+            // Only had thinking, no content
+            thinking_renderer.finish()?;
+        } else if in_content {
+            content_renderer.finish()?;
+        }
         session.add_assistant_message(&content);
 
         return Ok(());
