@@ -44,8 +44,11 @@ async-trait = "0.1"
 
 # Terminal/readline
 rustyline = "14.0"
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["event-stream"] }
 termimad = "0.30"
+ratatui = "0.29"
+tui-input = "0.11"
+atty = "0.2"
 
 # Internal crates
 qq-core = { path = "crates/qq-core" }

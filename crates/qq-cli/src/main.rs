@@ -12,6 +12,7 @@ mod chat;
 mod config;
 mod debug_log;
 mod markdown;
+mod tui;
 
 use agents::{create_agent_tools, AgentExecutor};
 use config::{expand_path, AgentsConfig, Config};
@@ -75,6 +76,14 @@ pub struct Cli {
     /// Minimal mode: no tools, no agents (for testing basic chat loop)
     #[arg(long)]
     pub minimal: bool,
+
+    /// Use TUI mode (default for chat)
+    #[arg(long, default_value = "true")]
+    pub tui: bool,
+
+    /// Disable TUI mode, use legacy readline interface
+    #[arg(long)]
+    pub no_tui: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -345,17 +354,34 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         Some(Arc::new(tokio::sync::RwLock::new(executor)))
     };
 
-    chat::run_chat(
-        cli,
-        config,
-        provider,
-        system_prompt,
-        tools_registry,
-        settings.parameters,
-        settings.model,
-        agent_executor,
-    )
-    .await
+    // Determine whether to use TUI mode
+    let use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout);
+
+    if use_tui {
+        tui::run_tui(
+            cli,
+            config,
+            provider,
+            system_prompt,
+            tools_registry,
+            settings.parameters,
+            settings.model,
+            agent_executor,
+        )
+        .await
+    } else {
+        chat::run_chat(
+            cli,
+            config,
+            provider,
+            system_prompt,
+            tools_registry,
+            settings.parameters,
+            settings.model,
+            agent_executor,
+        )
+        .await
+    }
 }
 
 fn list_profiles(config: &Config) -> Result<()> {
