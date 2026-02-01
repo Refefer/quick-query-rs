@@ -13,13 +13,12 @@ use qq_core::{
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_MODEL: &str = "gpt-4o";
 
 pub struct OpenAIProvider {
     client: Client,
     api_key: String,
     base_url: String,
-    default_model: String,
+    default_model: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -28,7 +27,7 @@ impl OpenAIProvider {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            default_model: DEFAULT_MODEL.to_string(),
+            default_model: None,
         }
     }
 
@@ -38,15 +37,17 @@ impl OpenAIProvider {
     }
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
-        self.default_model = model.into();
+        self.default_model = Some(model.into());
         self
     }
 
     fn build_request(&self, request: &CompletionRequest) -> OpenAIChatRequest {
+        // Model priority: request > provider default
+        // If neither is set, don't send model field (let API use its default)
         let model = request
             .model
             .clone()
-            .unwrap_or_else(|| self.default_model.clone());
+            .or_else(|| self.default_model.clone());
 
         let messages: Vec<OpenAIMessage> = request
             .messages
@@ -224,8 +225,8 @@ impl Provider for OpenAIProvider {
         "openai"
     }
 
-    fn default_model(&self) -> &str {
-        &self.default_model
+    fn default_model(&self) -> Option<&str> {
+        self.default_model.as_deref()
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {
@@ -424,7 +425,9 @@ impl OpenAIProvider {
 
 #[derive(Debug, Serialize)]
 struct OpenAIChatRequest {
-    model: String,
+    /// Model to use. Optional for servers that have a default model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -554,23 +557,33 @@ mod tests {
     fn test_provider_creation() {
         let provider = OpenAIProvider::new("test-key");
         assert_eq!(provider.name(), "openai");
-        assert_eq!(provider.default_model(), "gpt-4o");
+        assert_eq!(provider.default_model(), None);
     }
 
     #[test]
     fn test_provider_with_custom_model() {
         let provider = OpenAIProvider::new("test-key").with_default_model("gpt-4-turbo");
-        assert_eq!(provider.default_model(), "gpt-4-turbo");
+        assert_eq!(provider.default_model(), Some("gpt-4-turbo"));
     }
 
     #[test]
     fn test_build_request() {
+        let provider = OpenAIProvider::new("test-key").with_default_model("test-model");
+        let request = CompletionRequest::new(vec![Message::user("Hello")]);
+        let api_request = provider.build_request(&request);
+
+        assert_eq!(api_request.model, Some("test-model".to_string()));
+        assert_eq!(api_request.messages.len(), 1);
+        assert_eq!(api_request.messages[0].role, "user");
+    }
+
+    #[test]
+    fn test_build_request_no_model() {
         let provider = OpenAIProvider::new("test-key");
         let request = CompletionRequest::new(vec![Message::user("Hello")]);
         let api_request = provider.build_request(&request);
 
-        assert_eq!(api_request.model, "gpt-4o");
-        assert_eq!(api_request.messages.len(), 1);
-        assert_eq!(api_request.messages[0].role, "user");
+        // No model configured - field should be None (skipped in serialization)
+        assert_eq!(api_request.model, None);
     }
 }

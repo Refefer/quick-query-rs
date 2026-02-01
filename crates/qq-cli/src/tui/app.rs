@@ -72,7 +72,7 @@ pub struct TuiApp {
 
 impl Default for TuiApp {
     fn default() -> Self {
-        Self::new("gpt-4o")
+        Self::new("auto")
     }
 }
 
@@ -405,7 +405,7 @@ pub async fn run_tui(
     let mut session = ChatSession::new(system_prompt);
 
     // Create TUI app
-    let model_name = model.clone().unwrap_or_else(|| "gpt-4o".to_string());
+    let model_name = model.clone().unwrap_or_else(|| "auto".to_string());
     let mut app = TuiApp::new(&model_name);
 
     // Channel for stream events

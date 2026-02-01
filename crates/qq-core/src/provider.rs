@@ -156,7 +156,9 @@ impl ProviderConfig {
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
 
-    fn default_model(&self) -> &str;
+    /// Get the default model, if one is configured.
+    /// Returns None if no default model is set (API will use its own default).
+    fn default_model(&self) -> Option<&str>;
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error>;
 
@@ -171,7 +173,7 @@ pub trait Provider: Send + Sync {
     }
 
     fn available_models(&self) -> Vec<&str> {
-        vec![self.default_model()]
+        self.default_model().into_iter().collect()
     }
 }
 
