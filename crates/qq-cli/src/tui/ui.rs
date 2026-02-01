@@ -195,6 +195,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  /help        Show this help"),
         Line::from("  /quit        Exit the application"),
         Line::from("  /clear       Clear conversation"),
+        Line::from("  /reset       Reset session (clear + reset tokens)"),
         Line::from("  /tools       List available tools"),
         Line::from("  /agents      List available agents"),
         Line::from(""),

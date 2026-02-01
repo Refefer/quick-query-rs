@@ -170,8 +170,6 @@ struct ListFilesArgs {
     path: Option<String>,
     #[serde(default)]
     pattern: Option<String>,
-    #[serde(default)]
-    recursive: Option<bool>,
 }
 
 #[async_trait]
@@ -181,7 +179,7 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files in a directory. Can filter by glob pattern and search recursively."
+        "List files in a directory. Can filter by glob pattern."
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -194,12 +192,7 @@ impl Tool for ListFilesTool {
                 )
                 .add_property(
                     "pattern",
-                    PropertySchema::string("Glob pattern to filter files (e.g., '*.rs', '**/*.toml')"),
-                    false,
-                )
-                .add_property(
-                    "recursive",
-                    PropertySchema::boolean("Whether to search recursively"),
+                    PropertySchema::string("Glob pattern to filter files (e.g., '*.rs')"),
                     false,
                 ),
         )
@@ -216,13 +209,7 @@ impl Tool for ListFilesTool {
         };
 
         let pattern = args.pattern.as_deref().unwrap_or("*");
-        let recursive = args.recursive.unwrap_or(false);
-
-        let glob_pattern = if recursive && !pattern.starts_with("**/") {
-            format!("{}/**/{}", base_path.display(), pattern)
-        } else {
-            format!("{}/{}", base_path.display(), pattern)
-        };
+        let glob_pattern = format!("{}/{}", base_path.display(), pattern);
 
         let mut files = Vec::new();
         for entry in glob(&glob_pattern).map_err(|e| Error::tool("list_files", e.to_string()))? {
