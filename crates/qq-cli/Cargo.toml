@@ -29,3 +29,4 @@ futures = { workspace = true }
 tokio-stream = { workspace = true }
 rustyline = { workspace = true }
 crossterm = { workspace = true }
+regex = "1.11"

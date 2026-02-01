@@ -1,18 +1,15 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use futures::StreamExt;
-use std::io::{self, Write};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-use qq_core::{CompletionRequest, Message, Provider, StreamChunk, ToolCall, ToolRegistry};
+use qq_core::{CompletionRequest, Message, Provider, ToolCall, ToolRegistry};
 use qq_providers::openai::OpenAIProvider;
-use qq_tools::{create_default_registry, ToolsConfig};
 
 mod chat;
 mod config;
 
-use config::Config;
+use config::{expand_path, Config};
 
 #[derive(Parser)]
 #[command(name = "qq")]
@@ -53,14 +50,6 @@ pub struct Cli {
     /// Disable streaming output
     #[arg(long)]
     pub no_stream: bool,
-
-    /// Enable tools (filesystem, web, memory)
-    #[arg(long)]
-    pub tools: bool,
-
-    /// Allow write operations (requires --tools)
-    #[arg(long)]
-    pub allow_write: bool,
 
     /// Enable debug output
     #[arg(short, long)]
@@ -120,32 +109,57 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Build tools registry from config
+fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
+    // Resolve root directory: config > $PWD
+    let root = config.tools.root.as_ref()
+        .map(|s| expand_path(s))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Resolve memory db: config > default
+    let memory_db = config.tools.memory_db.as_ref()
+        .map(|s| expand_path(s))
+        .or_else(|| Config::config_dir().ok().map(|d| d.join("memory.db")));
+
+    let mut registry = ToolRegistry::new();
+
+    // Filesystem tools
+    if config.tools.enable_filesystem {
+        let fs_config = qq_tools::FileSystemConfig::new(&root).with_write(config.tools.allow_write);
+        for tool in qq_tools::create_filesystem_tools(fs_config) {
+            registry.register(tool);
+        }
+    }
+
+    // Memory tools
+    if config.tools.enable_memory {
+        let store = if let Some(db_path) = &memory_db {
+            std::sync::Arc::new(qq_tools::MemoryStore::new(db_path)?)
+        } else {
+            std::sync::Arc::new(qq_tools::MemoryStore::in_memory()?)
+        };
+        for tool in qq_tools::create_memory_tools(store) {
+            registry.register(tool);
+        }
+    }
+
+    // Web tools
+    if config.tools.enable_web {
+        for tool in qq_tools::create_web_tools() {
+            registry.register(tool);
+        }
+    }
+
+    Ok(registry)
+}
+
 async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()> {
     // Resolve settings from profile, CLI, and config
     let settings = resolve_settings(cli, config)?;
     let provider = create_provider_from_settings(&settings)?;
 
-    // Set up tools if enabled
-    let tools_registry = if cli.tools {
-        let memory_db = Config::config_dir()
-            .ok()
-            .map(|d| d.join("memory.db"));
-
-        let tools_config = ToolsConfig::new()
-            .with_root(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-            .with_write(cli.allow_write)
-            .with_web(true);
-
-        let tools_config = if let Some(db) = memory_db {
-            tools_config.with_memory_db(db)
-        } else {
-            tools_config
-        };
-
-        Some(create_default_registry(tools_config)?)
-    } else {
-        None
-    };
+    // Set up tools
+    let tools_registry = build_tools_registry(config)?;
 
     let mut messages = Vec::new();
 
@@ -180,107 +194,69 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
         }
 
         // Add tool definitions
-        if let Some(registry) = &tools_registry {
-            request = request.with_tools(registry.definitions());
+        request = request.with_tools(tools_registry.definitions());
+
+        // Non-streaming mode for tool handling
+        let response = provider.complete(request).await?;
+
+        // Check if we have tool calls
+        if !response.message.tool_calls.is_empty() {
+            // Print assistant message if any
+            let content = response.message.content.to_string_lossy();
+            if !content.is_empty() {
+                println!("{}", content);
+            }
+
+            // Add assistant message to history
+            messages.push(response.message.clone());
+
+            // Execute each tool call
+            let tool_calls = response.message.tool_calls.clone();
+            for tool_call in tool_calls {
+                if cli.debug {
+                    eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
+                }
+
+                let result = execute_tool_call(&tools_registry, &tool_call).await;
+
+                if cli.debug {
+                    let preview = if result.len() > 200 {
+                        format!("{}...", &result[..200])
+                    } else {
+                        result.clone()
+                    };
+                    eprintln!("[tool result] {}", preview);
+                }
+
+                // Add tool result to messages
+                messages.push(Message::tool_result(&tool_call.id, result));
+            }
+
+            // Continue loop to get next response
+            continue;
         }
 
-        // If tools are enabled, use non-streaming for simpler tool handling
-        if tools_registry.is_some() || cli.no_stream {
-            let response = provider.complete(request).await?;
+        // No tool calls - print final response and exit
+        println!("{}", response.message.content.to_string_lossy());
 
-            // Check if we have tool calls
-            if !response.message.tool_calls.is_empty() {
-                // Print assistant message if any
-                let content = response.message.content.to_string_lossy();
-                if !content.is_empty() {
-                    println!("{}", content);
-                }
-
-                // Add assistant message to history
-                messages.push(response.message.clone());
-
-                // Execute each tool call
-                let tool_calls = response.message.tool_calls.clone();
-                for tool_call in tool_calls {
-                    if cli.debug {
-                        eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
-                    }
-
-                    let result = execute_tool_call(&tools_registry, &tool_call).await;
-
-                    if cli.debug {
-                        let preview = if result.len() > 200 {
-                            format!("{}...", &result[..200])
-                        } else {
-                            result.clone()
-                        };
-                        eprintln!("[tool result] {}", preview);
-                    }
-
-                    // Add tool result to messages
-                    messages.push(Message::tool_result(&tool_call.id, result));
-                }
-
-                // Continue loop to get next response
-                continue;
-            }
-
-            // No tool calls - print final response and exit
-            println!("{}", response.message.content.to_string_lossy());
-
-            if cli.debug {
-                eprintln!(
-                    "[tokens: {} prompt, {} completion, {} total | iterations: {}]",
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                    response.usage.total_tokens,
-                    iteration + 1
-                );
-            }
-
-            return Ok(());
-        } else {
-            // Streaming mode (no tools)
-            let mut stream = provider.stream(request).await?;
-            let mut stdout = io::stdout();
-
-            while let Some(chunk) = stream.next().await {
-                match chunk? {
-                    StreamChunk::Delta { content } => {
-                        print!("{}", content);
-                        stdout.flush()?;
-                    }
-                    StreamChunk::Done { usage } => {
-                        println!();
-                        if cli.debug {
-                            if let Some(usage) = usage {
-                                eprintln!(
-                                    "[tokens: {} prompt, {} completion, {} total]",
-                                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
-                                );
-                            }
-                        }
-                    }
-                    StreamChunk::Error { message } => {
-                        eprintln!("\nError: {}", message);
-                    }
-                    _ => {}
-                }
-            }
-
-            return Ok(());
+        if cli.debug {
+            eprintln!(
+                "[tokens: {} prompt, {} completion, {} total | iterations: {}]",
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                response.usage.total_tokens,
+                iteration + 1
+            );
         }
+
+        return Ok(());
     }
 
     eprintln!("Warning: Max iterations ({}) reached", max_iterations);
     Ok(())
 }
 
-async fn execute_tool_call(registry: &Option<ToolRegistry>, tool_call: &ToolCall) -> String {
-    let Some(registry) = registry else {
-        return format!("Error: Tools not available");
-    };
-
+async fn execute_tool_call(registry: &ToolRegistry, tool_call: &ToolCall) -> String {
     let Some(tool) = registry.get(&tool_call.name) else {
         return format!("Error: Unknown tool '{}'", tool_call.name);
     };
@@ -307,27 +283,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         .or_else(|| cli.system.clone())
         .or(settings.system_prompt);
 
-    // Set up tools if enabled
-    let tools_registry = if cli.tools {
-        let memory_db = Config::config_dir()
-            .ok()
-            .map(|d| d.join("memory.db"));
-
-        let tools_config = ToolsConfig::new()
-            .with_root(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-            .with_write(cli.allow_write)
-            .with_web(true);
-
-        let tools_config = if let Some(db) = memory_db {
-            tools_config.with_memory_db(db)
-        } else {
-            tools_config
-        };
-
-        Some(create_default_registry(tools_config)?)
-    } else {
-        None
-    };
+    // Set up tools
+    let tools_registry = build_tools_registry(config)?;
 
     chat::run_chat(
         cli,
@@ -352,19 +309,7 @@ async fn list_models(cli: &Cli, config: &Config) -> Result<()> {
 
 fn show_config(config: &Config) -> Result<()> {
     println!("Configuration:");
-    println!("  Default provider: {}", config.default_provider);
-    if let Some(profile) = &config.default_profile {
-        println!("  Default profile: {}", profile);
-    }
-    if let Some(model) = &config.default_model {
-        println!("  Default model: {}", model);
-    }
-    if let Some(temp) = config.temperature {
-        println!("  Temperature: {}", temp);
-    }
-    if let Some(max_tokens) = config.max_tokens {
-        println!("  Max tokens: {}", max_tokens);
-    }
+    println!("  Default profile: {}", config.default_profile);
 
     if !config.profiles.is_empty() {
         println!("\nProfiles:");
@@ -437,20 +382,18 @@ struct ResolvedSettings {
 
 /// Resolve all settings from CLI args, profile, and config
 fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
-    // Determine which profile to use (CLI > config default > none)
-    let profile_name = cli.profile.clone().or_else(|| config.default_profile.clone());
+    // Determine which profile to use (CLI > config default)
+    let profile_name = cli.profile.clone().unwrap_or_else(|| config.default_profile.clone());
 
-    // Resolve profile if specified
-    let resolved_profile = profile_name
-        .as_ref()
-        .and_then(|name| config.resolve_profile(name));
+    // Resolve profile (required)
+    let resolved_profile = config.resolve_profile(&profile_name)
+        .with_context(|| format!("Profile '{}' not found or missing provider", profile_name))?;
 
-    // Determine provider name: CLI > profile > config default
+    // Provider comes from profile (CLI can override)
     let provider_name = cli
         .provider
         .clone()
-        .or_else(|| resolved_profile.as_ref().map(|p| p.provider_name.clone()))
-        .unwrap_or_else(|| config.default_provider.clone());
+        .unwrap_or(resolved_profile.provider_name.clone());
 
     // Get provider config
     let provider_config = config.providers.get(&provider_name);
@@ -461,13 +404,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         .as_ref()
         .and_then(|_| Some("none".to_string())) // If base_url provided via CLI, allow dummy key
         .or_else(|| provider_config.and_then(|p| p.api_key.clone()))
-        .or_else(|| {
-            if provider_name == "openai" {
-                std::env::var("OPENAI_API_KEY").ok()
-            } else {
-                None
-            }
-        })
+        .or_else(|| std::env::var(format!("{}_API_KEY", provider_name.to_uppercase())).ok())
         .with_context(|| {
             format!(
                 "API key not found for provider '{}'. Configure in ~/.config/qq/config.toml",
@@ -481,27 +418,24 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         .clone()
         .or_else(|| provider_config.and_then(|p| p.base_url.clone()));
 
-    // Resolve model: CLI > profile > provider > config default
+    // Resolve model: CLI > profile > provider default
     let model = cli
         .model
         .clone()
-        .or_else(|| resolved_profile.as_ref().and_then(|p| p.model.clone()))
-        .or_else(|| provider_config.and_then(|p| p.default_model.clone()))
-        .or_else(|| config.default_model.clone());
+        .or_else(|| resolved_profile.model.clone())
+        .or_else(|| provider_config.and_then(|p| p.default_model.clone()));
 
     // Resolve system prompt: CLI > profile
     let system_prompt = cli
         .system
         .clone()
-        .or_else(|| resolved_profile.as_ref().and_then(|p| p.system_prompt.clone()));
+        .or(resolved_profile.system_prompt.clone());
 
     // Merge parameters: provider + profile (profile wins on conflicts)
     let mut parameters = provider_config
         .map(|p| p.parameters.clone())
         .unwrap_or_default();
-    if let Some(profile) = &resolved_profile {
-        parameters.extend(profile.parameters.clone());
-    }
+    parameters.extend(resolved_profile.parameters.clone());
 
     Ok(ResolvedSettings {
         provider_name,

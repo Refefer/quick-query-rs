@@ -3,11 +3,12 @@
 #
 # This shows all available configuration options.
 
-# Global defaults (apply to all providers unless overridden)
-default_provider = "openai"
-default_model = "gpt-4o"
-temperature = 0.7
-max_tokens = 4096
+# Default profile to use (required)
+default_profile = "default"
+
+# =============================================================================
+# Providers - API credentials and settings
+# =============================================================================
 
 # OpenAI Configuration
 [providers.openai]
@@ -35,3 +36,57 @@ default_model = "gemini-1.5-pro"
 [providers.mistral]
 api_key = "your-mistral-api-key-here"
 default_model = "mistral-large-latest"
+
+# =============================================================================
+# Profiles - bundle provider + prompt + model + parameters
+# =============================================================================
+
+[profiles.default]
+provider = "openai"
+model = "gpt-4o"
+
+[profiles.coding]
+provider = "openai"
+prompt = "coder"  # References [prompts.coder]
+model = "gpt-4o"
+
+[profiles.reasoning]
+provider = "openai"
+model = "o1"
+[profiles.reasoning.parameters]
+reasoning_effort = "high"
+
+# =============================================================================
+# Prompts - reusable system prompts
+# =============================================================================
+
+[prompts.coder]
+prompt = "You are an expert programmer. Write clean, efficient code with clear explanations."
+
+[prompts.concise]
+prompt = "Be concise and direct. No unnecessary explanations."
+
+# =============================================================================
+# Tools Configuration
+# =============================================================================
+# Configure the built-in tools (filesystem, memory, web)
+# Tools are always enabled
+
+[tools]
+# Root directory for filesystem operations
+# Supports: $PWD, $HOME, ~, ${VAR}
+# Default: current working directory ($PWD)
+root = "$PWD"
+
+# Path to SQLite database for persistent memory
+# Default: ~/.config/qq/memory.db
+memory_db = "$HOME/.config/qq/memory.db"
+
+# Allow write operations (write_file, delete_file, etc.)
+# Default: false (read-only)
+allow_write = false
+
+# Enable/disable specific tool categories
+enable_web = true
+enable_filesystem = true
+enable_memory = true

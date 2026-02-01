@@ -1,15 +1,13 @@
 //! Interactive chat mode with readline support.
 
-use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use futures::StreamExt;
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
 
-use qq_core::{CompletionRequest, Message, Provider, StreamChunk, ToolCall, ToolRegistry};
+use qq_core::{CompletionRequest, Message, Provider, ToolCall, ToolRegistry};
 
 use crate::config::Config as AppConfig;
 use crate::Cli;
@@ -129,7 +127,7 @@ pub async fn run_chat(
     _config: &AppConfig,
     provider: Box<dyn Provider>,
     system_prompt: Option<String>,
-    tools_registry: Option<ToolRegistry>,
+    tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     model: Option<String>,
 ) -> Result<()> {
@@ -179,15 +177,11 @@ pub async fn run_chat(
                         print_help();
                     }
                     ChatCommand::Tools => {
-                        if let Some(registry) = &tools_registry {
-                            println!("\nAvailable tools:");
-                            for def in registry.definitions() {
-                                println!("  {} - {}", def.name, def.description);
-                            }
-                            println!();
-                        } else {
-                            println!("No tools enabled. Start chat with --tools to enable.\n");
+                        println!("\nAvailable tools:");
+                        for def in tools_registry.definitions() {
+                            println!("  {} - {}", def.name, def.description);
                         }
+                        println!();
                     }
                     ChatCommand::System(new_system) => {
                         if new_system.is_empty() {
@@ -256,7 +250,7 @@ async fn run_completion(
     cli: &Cli,
     provider: &Box<dyn Provider>,
     session: &mut ChatSession,
-    tools_registry: &Option<ToolRegistry>,
+    tools_registry: &ToolRegistry,
     extra_params: &std::collections::HashMap<String, serde_json::Value>,
     model: &Option<String>,
 ) -> Result<()> {
@@ -281,111 +275,68 @@ async fn run_completion(
             request = request.with_extra(extra_params.clone());
         }
 
-        if let Some(registry) = tools_registry {
-            request = request.with_tools(registry.definitions());
-        }
+        request = request.with_tools(tools_registry.definitions());
 
-        // Use non-streaming when tools are enabled, streaming otherwise
-        if tools_registry.is_some() {
-            let response = provider.complete(request).await?;
+        // Non-streaming mode for tool handling
+        let response = provider.complete(request).await?;
 
-            if !response.message.tool_calls.is_empty() {
-                // Print any text content
-                let content = response.message.content.to_string_lossy();
-                if !content.is_empty() {
-                    println!("assistant> {}", content);
-                }
-
-                // Add to session
-                session.add_assistant_with_tools(response.message.clone());
-
-                // Execute tools
-                let tool_calls = response.message.tool_calls.clone();
-                for tool_call in tool_calls {
-                    if cli.debug {
-                        eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
-                    }
-
-                    let result = execute_tool_call(tools_registry, &tool_call).await;
-
-                    if cli.debug {
-                        let preview = if result.len() > 100 {
-                            format!("{}...", &result[..100])
-                        } else {
-                            result.clone()
-                        };
-                        eprintln!("[result] {}", preview);
-                    }
-
-                    session.add_tool_result(&tool_call.id, &result);
-                }
-
-                // Continue to get next response
-                continue;
-            }
-
-            // No tool calls - print and save response
+        if !response.message.tool_calls.is_empty() {
+            // Print any text content
             let content = response.message.content.to_string_lossy();
-            println!("assistant> {}\n", content);
-            session.add_assistant_message(&content);
-
-            if cli.debug {
-                eprintln!(
-                    "[tokens: {} prompt, {} completion | iterations: {}]",
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                    iteration + 1
-                );
+            if !content.is_empty() {
+                println!("assistant> {}", content);
             }
 
-            return Ok(());
-        } else {
-            // Streaming mode
-            print!("assistant> ");
-            io::stdout().flush()?;
+            // Add to session
+            session.add_assistant_with_tools(response.message.clone());
 
-            let mut stream = provider.stream(request).await?;
-            let mut full_response = String::new();
-
-            while let Some(chunk) = stream.next().await {
-                match chunk? {
-                    StreamChunk::Delta { content } => {
-                        print!("{}", content);
-                        io::stdout().flush()?;
-                        full_response.push_str(&content);
-                    }
-                    StreamChunk::Done { usage } => {
-                        println!("\n");
-                        if cli.debug {
-                            if let Some(u) = usage {
-                                eprintln!(
-                                    "[tokens: {} prompt, {} completion]",
-                                    u.prompt_tokens, u.completion_tokens
-                                );
-                            }
-                        }
-                    }
-                    StreamChunk::Error { message } => {
-                        eprintln!("\nError: {}", message);
-                    }
-                    _ => {}
+            // Execute tools
+            let tool_calls = response.message.tool_calls.clone();
+            for tool_call in tool_calls {
+                if cli.debug {
+                    eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
                 }
+
+                let result = execute_tool_call(tools_registry, &tool_call).await;
+
+                if cli.debug {
+                    let preview = if result.len() > 100 {
+                        format!("{}...", &result[..100])
+                    } else {
+                        result.clone()
+                    };
+                    eprintln!("[result] {}", preview);
+                }
+
+                session.add_tool_result(&tool_call.id, &result);
             }
 
-            session.add_assistant_message(&full_response);
-            return Ok(());
+            // Continue to get next response
+            continue;
         }
+
+        // No tool calls - print and save response
+        let content = response.message.content.to_string_lossy();
+        println!("assistant> {}\n", content);
+        session.add_assistant_message(&content);
+
+        if cli.debug {
+            eprintln!(
+                "[tokens: {} prompt, {} completion | iterations: {}]",
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                iteration + 1
+            );
+        }
+
+        return Ok(());
     }
 
     eprintln!("Warning: Max iterations ({}) reached", max_iterations);
     Ok(())
 }
 
-async fn execute_tool_call(registry: &Option<ToolRegistry>, tool_call: &ToolCall) -> String {
-    let Some(registry) = registry else {
-        return "Error: Tools not available".to_string();
-    };
-
+async fn execute_tool_call(registry: &ToolRegistry, tool_call: &ToolCall) -> String {
     let Some(tool) = registry.get(&tool_call.name) else {
         return format!("Error: Unknown tool '{}'", tool_call.name);
     };
