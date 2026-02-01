@@ -60,7 +60,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     let input_hint = if app.is_streaming {
         "Press Ctrl+C to cancel"
     } else {
-        "/help | /quit | PgUp/PgDn scroll | 't' toggle thinking"
+        "/help | /quit | PgUp/PgDn scroll | Ctrl+T toggle thinking"
     };
 
     let input = InputArea::new(&app.input)
@@ -188,7 +188,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("Navigation:", Style::default().fg(Color::Cyan))),
         Line::from("  PgUp/PgDn    Scroll content"),
         Line::from("  Home/End     Scroll to top/bottom"),
-        Line::from("  t            Toggle thinking panel"),
+        Line::from("  Ctrl+T       Toggle thinking panel"),
         Line::from(""),
         Line::from(Span::styled("Commands:", Style::default().fg(Color::Cyan))),
         Line::from("  /help        Show this help"),

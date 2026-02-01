@@ -58,7 +58,7 @@ impl Widget for ThinkingPanel<'_> {
 
         if self.is_collapsed {
             // Just render the block with collapsed indicator
-            let collapsed_text = format!("({} chars) Press 't' to expand", self.content.len());
+            let collapsed_text = format!("({} chars) Press Ctrl+T to expand", self.content.len());
             let paragraph = Paragraph::new(Line::from(Span::styled(
                 collapsed_text,
                 Style::default().fg(Color::DarkGray),

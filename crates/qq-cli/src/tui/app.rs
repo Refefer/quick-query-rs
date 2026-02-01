@@ -612,10 +612,8 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
         (KeyCode::Delete, KeyModifiers::NONE) => Some(InputAction::Delete),
         (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(InputAction::DeleteWord),
 
-        // Toggle thinking
-        (KeyCode::Char('t'), KeyModifiers::NONE) if !is_streaming => {
-            Some(InputAction::ToggleThinking)
-        }
+        // Toggle thinking (Ctrl+T)
+        (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(InputAction::ToggleThinking),
 
         // Characters (only when not streaming)
         (KeyCode::Char(c), KeyModifiers::NONE) if !is_streaming => Some(InputAction::Char(c)),
