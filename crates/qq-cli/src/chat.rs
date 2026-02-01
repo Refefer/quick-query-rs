@@ -7,7 +7,14 @@ use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
 
-use qq_core::{execute_tools_parallel, CompletionRequest, Message, Provider, ToolRegistry};
+use std::io::{self, Write};
+
+use futures::StreamExt;
+
+use qq_core::{
+    execute_tools_parallel, CompletionRequest, Message, Provider, StreamChunk, ToolCall,
+    ToolRegistry,
+};
 
 use crate::config::Config as AppConfig;
 use crate::Cli;
@@ -277,21 +284,77 @@ async fn run_completion(
 
         request = request.with_tools(tools_registry.definitions());
 
-        // Non-streaming mode for tool handling
-        let response = provider.complete(request).await?;
+        // Stream the response
+        let mut stream = provider.stream(request).await?;
 
-        if !response.message.tool_calls.is_empty() {
-            // Print any text content
-            let content = response.message.content.to_string_lossy();
-            if !content.is_empty() {
-                println!("assistant> {}", content);
+        // Collect response while streaming
+        let mut content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut current_tool_call: Option<(String, String, String)> = None; // (id, name, arguments)
+        let mut printed_prefix = false;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk? {
+                StreamChunk::Start { .. } => {}
+                StreamChunk::Delta { content: delta } => {
+                    if !printed_prefix {
+                        print!("assistant> ");
+                        let _ = io::stdout().flush();
+                        printed_prefix = true;
+                    }
+                    print!("{}", delta);
+                    let _ = io::stdout().flush();
+                    content.push_str(&delta);
+                }
+                StreamChunk::ToolCallStart { id, name } => {
+                    // Finish any pending tool call
+                    if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                        tool_calls.push(ToolCall::new(tc_id, tc_name, args));
+                    }
+                    current_tool_call = Some((id, name, String::new()));
+                }
+                StreamChunk::ToolCallDelta { arguments } => {
+                    if let Some((_, _, ref mut args)) = current_tool_call {
+                        args.push_str(&arguments);
+                    }
+                }
+                StreamChunk::Done { usage } => {
+                    // Finish any pending tool call
+                    if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                        tool_calls.push(ToolCall::new(tc_id, tc_name, args));
+                    }
+
+                    if cli.debug {
+                        if let Some(u) = usage {
+                            eprintln!(
+                                "\n[tokens: {} prompt, {} completion | iterations: {}]",
+                                u.prompt_tokens,
+                                u.completion_tokens,
+                                iteration + 1
+                            );
+                        }
+                    }
+                }
+                StreamChunk::Error { message } => {
+                    return Err(anyhow::anyhow!("Stream error: {}", message));
+                }
+            }
+        }
+
+        // Handle tool calls if any
+        if !tool_calls.is_empty() {
+            if printed_prefix {
+                println!(); // Newline after any content
             }
 
-            // Add to session
-            session.add_assistant_with_tools(response.message.clone());
-
-            // Execute tools in parallel
-            let tool_calls = response.message.tool_calls.clone();
+            // Add assistant message with tool calls to session
+            let assistant_msg =
+                Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+            session.add_assistant_with_tools(assistant_msg);
 
             if cli.debug {
                 for tool_call in &tool_calls {
@@ -318,19 +381,11 @@ async fn run_completion(
             continue;
         }
 
-        // No tool calls - print and save response
-        let content = response.message.content.to_string_lossy();
-        println!("assistant> {}\n", content);
-        session.add_assistant_message(&content);
-
-        if cli.debug {
-            eprintln!(
-                "[tokens: {} prompt, {} completion | iterations: {}]",
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
-                iteration + 1
-            );
+        // No tool calls - finish up
+        if printed_prefix {
+            println!("\n"); // Newlines after content
         }
+        session.add_assistant_message(&content);
 
         return Ok(());
     }
