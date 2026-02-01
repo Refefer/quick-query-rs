@@ -67,8 +67,8 @@ enum Commands {
         #[arg(short, long)]
         system: Option<String>,
     },
-    /// List available models for a provider
-    Models,
+    /// List available profiles and their settings
+    Profiles,
     /// Show current configuration
     Config,
 }
@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
         Some(Commands::Chat { system }) => {
             chat_mode(&cli, &config, system.clone()).await
         }
-        Some(Commands::Models) => {
-            list_models(&cli, &config).await
+        Some(Commands::Profiles) => {
+            list_profiles(&config)
         }
         Some(Commands::Config) => {
             show_config(&config)
@@ -284,12 +284,78 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     .await
 }
 
-async fn list_models(cli: &Cli, config: &Config) -> Result<()> {
-    let provider = create_provider(cli, config)?;
-    println!("Available models for {}:", provider.name());
-    for model in provider.available_models() {
-        println!("  - {}", model);
+fn list_profiles(config: &Config) -> Result<()> {
+    if config.profiles.is_empty() {
+        println!("No profiles configured.");
+        return Ok(());
     }
+
+    println!("Available profiles:\n");
+
+    // Sort profile names, but put default first
+    let mut profile_names: Vec<_> = config.profiles.keys().collect();
+    profile_names.sort();
+
+    for name in profile_names {
+        let is_default = name == &config.default_profile;
+        let marker = if is_default { " (default)" } else { "" };
+
+        println!("  {}{}", name, marker);
+
+        if let Some(resolved) = config.resolve_profile(name) {
+            // Provider and model
+            let model_info = resolved
+                .model
+                .or_else(|| {
+                    resolved
+                        .provider_config
+                        .as_ref()
+                        .and_then(|p| p.default_model.clone())
+                })
+                .unwrap_or_else(|| "default".to_string());
+
+            println!("    Provider: {}", resolved.provider_name);
+            println!("    Model: {}", model_info);
+
+            // Base URL if custom
+            if let Some(ref pc) = resolved.provider_config {
+                if let Some(ref url) = pc.base_url {
+                    println!("    Base URL: {}", url);
+                }
+            }
+
+            // System prompt (truncated)
+            if let Some(ref prompt) = resolved.system_prompt {
+                let preview = if prompt.len() > 60 {
+                    format!("{}...", prompt[..60].replace('\n', " "))
+                } else {
+                    prompt.replace('\n', " ")
+                };
+                println!("    System: {}", preview);
+            }
+
+            // Parameters (if any)
+            if !resolved.parameters.is_empty() {
+                let params: Vec<String> = resolved
+                    .parameters
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        };
+                        format!("{}={}", k, val)
+                    })
+                    .collect();
+                println!("    Parameters: {}", params.join(", "));
+            }
+        } else {
+            println!("    (invalid - missing provider)");
+        }
+
+        println!();
+    }
+
     Ok(())
 }
 
@@ -446,8 +512,3 @@ fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn 
     Ok(Box::new(provider))
 }
 
-// Keep old function for backwards compatibility with list_models
-fn create_provider(cli: &Cli, config: &Config) -> Result<Box<dyn Provider>> {
-    let settings = resolve_settings(cli, config)?;
-    create_provider_from_settings(&settings)
-}
