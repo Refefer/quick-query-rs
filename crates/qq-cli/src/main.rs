@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
-use qq_core::{execute_tools_parallel, CompletionRequest, Message, Provider, ToolRegistry};
+use qq_core::{
+    execute_tools_parallel_with_chunker, ChunkProcessor, CompletionRequest, Message, Provider,
+    ToolRegistry,
+};
 use qq_providers::openai::OpenAIProvider;
 
 mod agents;
@@ -189,10 +192,22 @@ fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
 async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()> {
     // Resolve settings from profile, CLI, and config
     let settings = resolve_settings(cli, config)?;
-    let provider = create_provider_from_settings(&settings)?;
+    let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let tools_registry = build_tools_registry(config)?;
+    let mut tools_registry = build_tools_registry(config)?;
+
+    // Set up chunk processor for large tool outputs
+    let chunker_config = config.tools.chunker.to_chunker_config();
+    let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config.clone());
+
+    // Add process_large_data tool (requires provider)
+    if chunker_config.enabled {
+        tools_registry.register(qq_tools::create_process_data_tool_arc(
+            Arc::clone(&provider),
+            chunker_config,
+        ));
+    }
 
     let mut messages = Vec::new();
 
@@ -245,7 +260,7 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
             let assistant_msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
             messages.push(assistant_msg);
 
-            // Execute tools in parallel
+            // Execute tools in parallel with chunking support
             let tool_calls = response.message.tool_calls.clone();
 
             if cli.debug {
@@ -254,7 +269,13 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
                 }
             }
 
-            let results = execute_tools_parallel(&tools_registry, tool_calls).await;
+            let results = execute_tools_parallel_with_chunker(
+                &tools_registry,
+                tool_calls,
+                Some(&chunk_processor),
+                Some(prompt),
+            )
+            .await;
 
             for result in results {
                 if cli.debug {
@@ -348,6 +369,17 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         tools_registry.register(tool);
     }
 
+    // Set up chunker config
+    let chunker_config = config.tools.chunker.to_chunker_config();
+
+    // Add process_large_data tool (requires provider)
+    if chunker_config.enabled && !disable_tools {
+        tools_registry.register(qq_tools::create_process_data_tool_arc(
+            Arc::clone(&provider),
+            chunker_config.clone(),
+        ));
+    }
+
     // Create executor for manual agent commands (@agent, /delegate)
     // Uses base_tools so manual commands also can't recurse
     let agent_executor = if disable_agents {
@@ -377,6 +409,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             settings.profile_name,
             agent_executor,
             execution_context,
+            chunker_config,
         )
         .await
     } else {
@@ -389,6 +422,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             settings.parameters,
             settings.model,
             agent_executor,
+            chunker_config,
         )
         .await
     }

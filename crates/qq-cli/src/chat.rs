@@ -13,8 +13,8 @@ use tokio::sync::RwLock;
 use futures::StreamExt;
 
 use qq_core::{
-    execute_tools_parallel, CompletionRequest, Message, Provider, StreamChunk, ToolCall,
-    ToolRegistry,
+    execute_tools_parallel_with_chunker, ChunkProcessor, ChunkerConfig, CompletionRequest,
+    Message, Provider, StreamChunk, ToolCall, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -379,7 +379,10 @@ pub async fn run_chat(
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     model: Option<String>,
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
+    chunker_config: ChunkerConfig,
 ) -> Result<()> {
+    // Create chunk processor for large tool outputs
+    let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
     // Set up debug logger if requested
     let debug_logger: Option<Arc<DebugLogger>> = if let Some(ref path) = cli.debug_file {
         match DebugLogger::new(path) {
@@ -525,6 +528,8 @@ pub async fn run_chat(
                             &extra_params,
                             &model,
                             debug_logger.as_ref(),
+                            &chunk_processor,
+                            &text,
                         )
                         .await
                         {
@@ -569,6 +574,8 @@ async fn run_completion(
     extra_params: &std::collections::HashMap<String, serde_json::Value>,
     model: &Option<String>,
     debug_logger: Option<&Arc<DebugLogger>>,
+    chunk_processor: &ChunkProcessor,
+    original_query: &str,
 ) -> Result<()> {
     let max_iterations = 100;
 
@@ -723,7 +730,13 @@ async fn run_completion(
                 }
             }
 
-            let results = execute_tools_parallel(tools_registry, tool_calls).await;
+            let results = execute_tools_parallel_with_chunker(
+                tools_registry,
+                tool_calls,
+                Some(chunk_processor),
+                Some(original_query),
+            )
+            .await;
 
             for result in results {
                 if cli.debug {

@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use tui_input::Input;
 
 use qq_core::{
-    execute_tools_parallel, CompletionRequest, Message, Provider, StreamChunk, ToolCall,
-    ToolRegistry,
+    execute_tools_parallel_with_chunker, ChunkProcessor, ChunkerConfig, CompletionRequest,
+    Message, Provider, StreamChunk, ToolCall, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -386,6 +386,7 @@ pub async fn run_tui(
     profile_name: String,
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
     execution_context: ExecutionContext,
+    chunker_config: ChunkerConfig,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -506,6 +507,15 @@ pub async fn run_tui(
                                             app.tool_calls.clear();
                                             app.status_message = Some("Cleared".to_string());
                                         }
+                                        TuiCommand::Reset => {
+                                            session.clear();
+                                            app.content.clear();
+                                            app.thinking_content.clear();
+                                            app.tool_calls.clear();
+                                            app.prompt_tokens = 0;
+                                            app.completion_tokens = 0;
+                                            app.status_message = Some("Session reset".to_string());
+                                        }
                                         TuiCommand::Help => {
                                             app.show_help = true;
                                         }
@@ -544,12 +554,14 @@ pub async fn run_tui(
                                     let temp = cli.temperature;
                                     let max_tok = cli.max_tokens;
                                     let exec_ctx = execution_context.clone();
+                                    let chunker_cfg = chunker_config.clone();
+                                    let original_query = input.clone();
 
                                     // Spawn streaming task
                                     tokio::spawn(async move {
                                         run_streaming_completion(
                                             provider, tools, params, model, messages, tx, debug,
-                                            temp, max_tok, exec_ctx,
+                                            temp, max_tok, exec_ctx, chunker_cfg, original_query,
                                         )
                                         .await
                                     });
@@ -633,6 +645,7 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
 enum TuiCommand {
     Quit,
     Clear,
+    Reset,
     Help,
     Tools,
     Agents,
@@ -645,6 +658,7 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
     match trimmed {
         "/quit" | "/exit" | "/q" => Some(TuiCommand::Quit),
         "/clear" | "/c" => Some(TuiCommand::Clear),
+        "/reset" => Some(TuiCommand::Reset),
         "/help" | "/?" => Some(TuiCommand::Help),
         "/tools" | "/t" => Some(TuiCommand::Tools),
         "/agents" | "/a" => Some(TuiCommand::Agents),
@@ -696,7 +710,11 @@ async fn run_streaming_completion(
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     execution_context: ExecutionContext,
+    chunker_config: ChunkerConfig,
+    original_query: String,
 ) {
+    // Create chunk processor for large tool outputs
+    let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
     let max_iterations = 100u32;
 
     for iteration in 0..max_iterations {
@@ -814,7 +832,13 @@ async fn run_streaming_completion(
                 let _ = tx.send(StreamEvent::ToolExecuting { name: tool_call.name.clone() }).await;
             }
 
-            let results = execute_tools_parallel(&tools_registry, tool_calls.clone()).await;
+            let results = execute_tools_parallel_with_chunker(
+                &tools_registry,
+                tool_calls.clone(),
+                Some(&chunk_processor),
+                Some(&original_query),
+            )
+            .await;
 
             let mut tool_result_messages = Vec::new();
             for result in results {

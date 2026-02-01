@@ -98,6 +98,71 @@ pub struct ToolsConfigEntry {
     /// Enable memory tools
     #[serde(default = "default_true")]
     pub enable_memory: bool,
+
+    /// Chunker configuration for large tool outputs
+    #[serde(default)]
+    pub chunker: ChunkerConfigEntry,
+}
+
+/// Chunker configuration for processing large tool outputs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkerConfigEntry {
+    /// Enable automatic chunking of large tool outputs
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Size threshold (in bytes) to trigger chunking (default: 50KB)
+    #[serde(default = "default_threshold_bytes")]
+    pub threshold_bytes: usize,
+
+    /// Target size for each chunk in bytes (default: 10KB)
+    #[serde(default = "default_chunk_size_bytes")]
+    pub chunk_size_bytes: usize,
+
+    /// Maximum number of chunks to process (default: 20)
+    #[serde(default = "default_max_chunks")]
+    pub max_chunks: usize,
+
+    /// Process chunks in parallel (default: true)
+    #[serde(default = "default_true")]
+    pub parallel: bool,
+}
+
+fn default_threshold_bytes() -> usize {
+    50_000 // 50KB
+}
+
+fn default_chunk_size_bytes() -> usize {
+    10_000 // 10KB
+}
+
+fn default_max_chunks() -> usize {
+    20
+}
+
+impl Default for ChunkerConfigEntry {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold_bytes: default_threshold_bytes(),
+            chunk_size_bytes: default_chunk_size_bytes(),
+            max_chunks: default_max_chunks(),
+            parallel: true,
+        }
+    }
+}
+
+impl ChunkerConfigEntry {
+    /// Convert to qq_core::ChunkerConfig
+    pub fn to_chunker_config(&self) -> qq_core::ChunkerConfig {
+        qq_core::ChunkerConfig {
+            enabled: self.enabled,
+            threshold_bytes: self.threshold_bytes,
+            chunk_size_bytes: self.chunk_size_bytes,
+            max_chunks: self.max_chunks,
+            parallel: self.parallel,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -113,6 +178,7 @@ impl Default for ToolsConfigEntry {
             enable_web: true,
             enable_filesystem: true,
             enable_memory: true,
+            chunker: ChunkerConfigEntry::default(),
         }
     }
 }

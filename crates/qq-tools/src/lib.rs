@@ -4,13 +4,16 @@
 //! - Filesystem: read, write, list, and search files
 //! - Web: fetch and parse webpages
 //! - Memory: persistent key-value storage
+//! - Process data: chunk and summarize large content
 
 pub mod filesystem;
 pub mod memory;
+pub mod process_data;
 pub mod web;
 
 pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig};
 pub use memory::{create_memory_tools, create_memory_tools_arc, MemoryStore};
+pub use process_data::{create_process_data_tool, create_process_data_tool_arc, ProcessLargeDataTool};
 pub use web::{create_web_tools, create_web_tools_arc};
 
 use qq_core::{Tool, ToolRegistry};

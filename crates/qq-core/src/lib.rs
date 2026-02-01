@@ -4,6 +4,7 @@
 //! the quick-query LLM CLI tool.
 
 pub mod agent;
+pub mod chunker;
 pub mod error;
 pub mod message;
 pub mod provider;
@@ -19,9 +20,10 @@ pub use provider::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderConfig, StreamResult,
 };
 pub use task::{
-    complete_parallel, execute_tools_parallel, TaskHandle, TaskId, TaskInfo, TaskManager,
-    TaskState, ToolExecutionResult,
+    complete_parallel, execute_tools_parallel, execute_tools_parallel_with_chunker,
+    TaskHandle, TaskId, TaskInfo, TaskManager, TaskState, ToolExecutionResult,
 };
 pub use tool::{PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
+pub use chunker::{ChunkProcessor, ChunkerConfig};
 
 pub type Result<T> = std::result::Result<T, Error>;

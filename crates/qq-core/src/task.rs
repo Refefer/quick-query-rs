@@ -14,6 +14,7 @@ use std::time::Instant;
 use tokio::sync::{oneshot, watch, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::chunker::ChunkProcessor;
 use crate::error::Error;
 use crate::message::ToolCall;
 use crate::provider::{CompletionRequest, CompletionResponse, Provider};
@@ -317,9 +318,27 @@ pub struct ToolExecutionResult {
 /// Execute multiple tool calls in parallel.
 ///
 /// Returns results in the same order as the input tool calls.
+///
+/// If a `chunk_processor` is provided and tool output exceeds the configured
+/// threshold, the content will be automatically chunked and summarized.
 pub async fn execute_tools_parallel(
     registry: &ToolRegistry,
     tool_calls: Vec<ToolCall>,
+) -> Vec<ToolExecutionResult> {
+    execute_tools_parallel_with_chunker(registry, tool_calls, None, None).await
+}
+
+/// Execute multiple tool calls in parallel with optional chunking support.
+///
+/// Returns results in the same order as the input tool calls.
+///
+/// If a `chunk_processor` is provided and tool output exceeds the configured
+/// threshold, the content will be automatically chunked and summarized.
+pub async fn execute_tools_parallel_with_chunker(
+    registry: &ToolRegistry,
+    tool_calls: Vec<ToolCall>,
+    chunk_processor: Option<&ChunkProcessor>,
+    original_query: Option<&str>,
 ) -> Vec<ToolExecutionResult> {
     use futures::future::join_all;
 
@@ -359,7 +378,48 @@ pub async fn execute_tools_parallel(
         })
         .collect();
 
-    join_all(futures).await
+    let mut results = join_all(futures).await;
+
+    // Apply chunking to large outputs if processor is provided
+    if let Some(processor) = chunk_processor {
+        for result in &mut results {
+            // Skip error results - keep them readable
+            if result.is_error {
+                continue;
+            }
+
+            // Check if content should be chunked
+            if processor.should_chunk(&result.content) {
+                match processor
+                    .process_large_content(&result.content, original_query)
+                    .await
+                {
+                    Ok(processed) => {
+                        result.content = processed;
+                    }
+                    Err(e) => {
+                        // Log warning but keep original content
+                        tracing::warn!(
+                            "Failed to process large content for chunking: {}",
+                            e
+                        );
+                        // Truncate with a note instead
+                        let truncate_at = processor.config().threshold_bytes;
+                        if result.content.len() > truncate_at {
+                            result.content = format!(
+                                "[Large output: {} bytes, showing first {} bytes]\n\n{}",
+                                result.content.len(),
+                                truncate_at,
+                                &result.content[..truncate_at]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// Execute multiple LLM completion requests in parallel.
