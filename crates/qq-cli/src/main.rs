@@ -83,6 +83,14 @@ pub struct Cli {
     #[arg(long)]
     pub minimal: bool,
 
+    /// Agents-only mode: Chat can only call agents, not tools directly (default: true)
+    #[arg(long, default_value = "true")]
+    pub agents_only: bool,
+
+    /// Allow Chat to call tools directly (disables agents-only mode)
+    #[arg(long)]
+    pub direct_tools: bool,
+
     /// Use TUI mode (default for chat)
     #[arg(long, default_value = "true")]
     pub tui: bool,
@@ -363,8 +371,21 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         )
     };
 
-    // Build the full tools registry with both base tools and agent tools
-    let mut tools_registry = base_tools.clone();
+    // Build the tools registry
+    // In agents-only mode (default), Chat can only call agents (no direct tool access)
+    // Use --direct-tools to allow Chat to call tools directly
+    let agents_only = cli.agents_only && !cli.direct_tools;
+    let mut tools_registry = if agents_only {
+        if cli.debug {
+            eprintln!("[debug] Agents-only mode: Chat cannot call tools directly");
+        }
+        ToolRegistry::new() // Start empty - only agent tools will be added
+    } else {
+        if cli.debug {
+            eprintln!("[debug] Direct tools mode: Chat can call tools directly");
+        }
+        base_tools.clone() // Direct tools mode: include base tools
+    };
     for tool in agent_tools {
         tools_registry.register(tool);
     }
@@ -373,7 +394,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     let chunker_config = config.tools.chunker.to_chunker_config();
 
     // Add process_large_data tool (requires provider)
-    if chunker_config.enabled && !disable_tools {
+    // Skip in agents-only mode since this is a direct tool
+    if chunker_config.enabled && !disable_tools && !agents_only {
         tools_registry.register(qq_tools::create_process_data_tool_arc(
             Arc::clone(&provider),
             chunker_config.clone(),
