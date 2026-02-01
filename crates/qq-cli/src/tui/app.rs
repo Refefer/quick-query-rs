@@ -26,6 +26,7 @@ use crate::agents::AgentExecutor;
 use crate::chat::ChatSession;
 use crate::config::Config as AppConfig;
 use crate::debug_log::DebugLogger;
+use crate::execution_context::ExecutionContext;
 use crate::Cli;
 
 use super::events::{InputAction, StreamEvent};
@@ -35,7 +36,7 @@ use super::widgets::{InputHistory, ToolCallInfo, ToolStatus};
 /// TUI Application state
 pub struct TuiApp {
     // Display state
-    pub model: String,
+    pub profile: String,
     pub content: String,
     pub thinking_content: String,
     pub show_thinking: bool,
@@ -68,18 +69,21 @@ pub struct TuiApp {
     // UI state
     pub show_help: bool,
     pub should_quit: bool,
+
+    // Execution context (for displaying call stack)
+    pub execution_context: ExecutionContext,
 }
 
 impl Default for TuiApp {
     fn default() -> Self {
-        Self::new("auto")
+        Self::new("auto", ExecutionContext::new())
     }
 }
 
 impl TuiApp {
-    pub fn new(model: &str) -> Self {
+    pub fn new(profile: &str, execution_context: ExecutionContext) -> Self {
         Self {
-            model: model.to_string(),
+            profile: profile.to_string(),
             content: String::new(),
             thinking_content: String::new(),
             show_thinking: true,
@@ -98,6 +102,7 @@ impl TuiApp {
             input_history: InputHistory::new(),
             show_help: false,
             should_quit: false,
+            execution_context,
         }
     }
 
@@ -116,8 +121,8 @@ impl TuiApp {
     /// Handle a stream event
     pub fn handle_stream_event(&mut self, event: StreamEvent) {
         match event {
-            StreamEvent::Start { model } => {
-                self.model = model;
+            StreamEvent::Start { model: _ } => {
+                // Model info is available but we display profile name
             }
             StreamEvent::ThinkingDelta(delta) => {
                 self.thinking_content.push_str(&delta);
@@ -378,8 +383,9 @@ pub async fn run_tui(
     system_prompt: Option<String>,
     tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
-    model: Option<String>,
+    profile_name: String,
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
+    execution_context: ExecutionContext,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -405,8 +411,7 @@ pub async fn run_tui(
     let mut session = ChatSession::new(system_prompt);
 
     // Create TUI app
-    let model_name = model.clone().unwrap_or_else(|| "auto".to_string());
-    let mut app = TuiApp::new(&model_name);
+    let mut app = TuiApp::new(&profile_name, execution_context.clone());
 
     // Channel for stream events
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(100);
@@ -532,18 +537,19 @@ pub async fn run_tui(
                                     let provider = Arc::clone(&provider);
                                     let tools = tools_registry.clone();
                                     let params = extra_params.clone();
-                                    let model = model.clone();
+                                    let model = provider.default_model().map(|s| s.to_string());
                                     let tx = stream_tx.clone();
                                     let messages = session.build_messages();
                                     let debug = debug_logger.clone();
                                     let temp = cli.temperature;
                                     let max_tok = cli.max_tokens;
+                                    let exec_ctx = execution_context.clone();
 
                                     // Spawn streaming task
                                     tokio::spawn(async move {
                                         run_streaming_completion(
                                             provider, tools, params, model, messages, tx, debug,
-                                            temp, max_tok,
+                                            temp, max_tok, exec_ctx,
                                         )
                                         .await
                                     });
@@ -689,8 +695,9 @@ async fn run_streaming_completion(
     debug_logger: Option<Arc<DebugLogger>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    execution_context: ExecutionContext,
 ) {
-    let max_iterations = 10u32;
+    let max_iterations = 100u32;
 
     for iteration in 0..max_iterations {
         let _ = tx.send(StreamEvent::IterationStart { iteration: iteration + 1 }).await;
@@ -724,6 +731,7 @@ async fn run_streaming_completion(
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
+                execution_context.reset().await;
                 let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
                 return;
             }
@@ -771,15 +779,18 @@ async fn run_streaming_completion(
 
                     if tool_calls.is_empty() {
                         // No tool calls - we're done, send final content for session
+                        execution_context.reset().await;
                         let _ = tx.send(StreamEvent::Done { usage, content: content.clone() }).await;
                         return;
                     }
                 }
                 Ok(StreamChunk::Error { message }) => {
+                    execution_context.reset().await;
                     let _ = tx.send(StreamEvent::Error { message }).await;
                     return;
                 }
                 Err(e) => {
+                    execution_context.reset().await;
                     let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
                     return;
                 }
@@ -797,8 +808,9 @@ async fn run_streaming_completion(
                 messages: vec![assistant_msg],
             }).await;
 
-            // Execute tools
+            // Execute tools - push context for each tool as it starts
             for tool_call in &tool_calls {
+                execution_context.push_tool(&tool_call.name).await;
                 let _ = tx.send(StreamEvent::ToolExecuting { name: tool_call.name.clone() }).await;
             }
 
@@ -811,6 +823,9 @@ async fn run_streaming_completion(
                     .find(|tc| tc.id == result.tool_call_id)
                     .map(|tc| tc.name.clone())
                     .unwrap_or_default();
+
+                // Pop the tool context
+                execution_context.pop().await;
 
                 let _ = tx.send(StreamEvent::ToolComplete {
                     id: result.tool_call_id.clone(),
@@ -834,11 +849,13 @@ async fn run_streaming_completion(
         }
 
         // No tool calls, we're done - send final content
+        execution_context.reset().await;
         let _ = tx.send(StreamEvent::Done { usage: None, content: content.clone() }).await;
         return;
     }
 
     // Max iterations reached
+    execution_context.reset().await;
     let _ = tx.send(StreamEvent::Error {
         message: format!("Max iterations ({}) reached", max_iterations),
     }).await;

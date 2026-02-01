@@ -8,23 +8,27 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
+use crate::execution_context::ExecutionContext;
+
 /// Status bar display state
 pub struct StatusBar<'a> {
-    model: &'a str,
+    profile: &'a str,
     prompt_tokens: u32,
     completion_tokens: u32,
     is_streaming: bool,
     status_message: Option<&'a str>,
+    execution_context: Option<&'a ExecutionContext>,
 }
 
 impl<'a> StatusBar<'a> {
-    pub fn new(model: &'a str) -> Self {
+    pub fn new(profile: &'a str) -> Self {
         Self {
-            model,
+            profile,
             prompt_tokens: 0,
             completion_tokens: 0,
             is_streaming: false,
             status_message: None,
+            execution_context: None,
         }
     }
 
@@ -43,6 +47,11 @@ impl<'a> StatusBar<'a> {
         self.status_message = Some(message);
         self
     }
+
+    pub fn execution_context(mut self, context: &'a ExecutionContext) -> Self {
+        self.execution_context = Some(context);
+        self
+    }
 }
 
 impl Widget for StatusBar<'_> {
@@ -52,11 +61,38 @@ impl Widget for StatusBar<'_> {
         let style_streaming = Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD);
+        let style_context = Style::default().fg(Color::Cyan);
+        let style_context_separator = Style::default().fg(Color::DarkGray);
 
-        let mut spans = vec![
-            Span::styled(" Model: ", style_label),
-            Span::styled(self.model, style_value),
-        ];
+        let mut spans = Vec::new();
+
+        // Track if context is active (showing tool/agent info)
+        let context_is_active = self.execution_context.map(|ctx| ctx.is_active()).unwrap_or(false);
+
+        // Show execution context if active (more than just Chat)
+        if let Some(ctx) = self.execution_context {
+            if ctx.is_active() {
+                // Format context stack with colored separators
+                let context_str = ctx.format_blocking();
+                spans.push(Span::styled(" ", style_label));
+
+                // Split and colorize the context - collect into owned Strings
+                let parts: Vec<String> = context_str.split(" > ").map(|s| s.to_string()).collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(Span::styled(" > ", style_context_separator));
+                    }
+                    spans.push(Span::styled(part.clone(), style_context));
+                }
+            } else {
+                // Just show profile when idle
+                spans.push(Span::styled(" Profile: ", style_label));
+                spans.push(Span::styled(self.profile, style_value));
+            }
+        } else {
+            spans.push(Span::styled(" Profile: ", style_label));
+            spans.push(Span::styled(self.profile, style_value));
+        }
 
         // Show tokens if any
         let total = self.prompt_tokens + self.completion_tokens;
@@ -75,10 +111,13 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled("STREAMING", style_streaming));
         }
 
-        // Show status message if present
-        if let Some(msg) = self.status_message {
-            spans.push(Span::styled(" | ", style_label));
-            spans.push(Span::styled(msg, Style::default().fg(Color::Yellow)));
+        // Show status message only if context is NOT active
+        // (context already shows what's running, so "Running: X" would be redundant)
+        if !context_is_active {
+            if let Some(msg) = self.status_message {
+                spans.push(Span::styled(" | ", style_label));
+                spans.push(Span::styled(msg, Style::default().fg(Color::Yellow)));
+            }
         }
 
         let paragraph = Paragraph::new(Line::from(spans))

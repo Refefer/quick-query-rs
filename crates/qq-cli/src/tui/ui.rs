@@ -21,9 +21,10 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     let chunks = create_layout(area, app);
 
     // Status bar at top
-    let status_bar = StatusBar::new(&app.model)
+    let status_bar = StatusBar::new(&app.profile)
         .tokens(app.prompt_tokens, app.completion_tokens)
-        .streaming(app.is_streaming);
+        .streaming(app.is_streaming)
+        .execution_context(&app.execution_context);
 
     let status_bar = if let Some(ref msg) = app.status_message {
         status_bar.status(msg)

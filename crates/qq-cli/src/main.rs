@@ -11,8 +11,11 @@ mod agents;
 mod chat;
 mod config;
 mod debug_log;
+mod execution_context;
 mod markdown;
 mod tui;
+
+pub use execution_context::ExecutionContext;
 
 use agents::{create_agent_tools, AgentExecutor, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
@@ -201,7 +204,7 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     messages.push(Message::user(prompt));
 
     // Agentic loop - keep going while LLM returns tool calls
-    let max_iterations = 20;
+    let max_iterations = 100;
     for iteration in 0..max_iterations {
         let mut request = CompletionRequest::new(messages.clone());
 
@@ -318,6 +321,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Load agents config
     let agents_config = AgentsConfig::load().unwrap_or_default();
 
+    // Create execution context for tracking agent/tool call stack
+    let execution_context = ExecutionContext::new();
+
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
         if cli.debug && disable_agents {
@@ -332,6 +338,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             &settings.agents,
             0, // Start at depth 0
             DEFAULT_MAX_AGENT_DEPTH,
+            Some(execution_context.clone()),
         )
     };
 
@@ -367,8 +374,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             system_prompt,
             tools_registry,
             settings.parameters,
-            settings.model,
+            settings.profile_name,
             agent_executor,
+            execution_context,
         )
         .await
     } else {
@@ -526,6 +534,7 @@ fn show_config(config: &Config) -> Result<()> {
 /// Resolved settings from CLI, profile, and config
 #[allow(dead_code)]
 struct ResolvedSettings {
+    profile_name: String,
     provider_name: String,
     api_key: String,
     base_url: Option<String>,
@@ -593,6 +602,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
     parameters.extend(resolved_profile.parameters.clone());
 
     Ok(ResolvedSettings {
+        profile_name,
         provider_name,
         api_key,
         base_url,

@@ -13,6 +13,7 @@ use qq_core::{Agent, AgentConfig, Error, PropertySchema, Provider, Tool, ToolDef
 
 use super::InternalAgent;
 use crate::config::{AgentDefinition, AgentsConfig};
+use crate::ExecutionContext;
 
 /// Maximum nesting depth for agent calls.
 /// At depth 0, agents can call other agents. At max_depth, they only get base tools.
@@ -36,6 +37,8 @@ pub struct InternalAgentTool {
     current_depth: u32,
     /// Maximum allowed depth
     max_depth: u32,
+    /// Execution context for tracking the call stack
+    execution_context: Option<ExecutionContext>,
 }
 
 impl InternalAgentTool {
@@ -47,6 +50,7 @@ impl InternalAgentTool {
         enabled_agents: Option<Vec<String>>,
         current_depth: u32,
         max_depth: u32,
+        execution_context: Option<ExecutionContext>,
     ) -> Self {
         let tool_name = format!("ask_{}", agent.name());
 
@@ -59,6 +63,7 @@ impl InternalAgentTool {
             enabled_agents,
             current_depth,
             max_depth,
+            execution_context,
         }
     }
 }
@@ -104,6 +109,11 @@ impl Tool for InternalAgentTool {
         let args: AgentArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool(&self.tool_name, format!("Invalid arguments: {}", e)))?;
 
+        // Push agent context
+        if let Some(ref ctx) = self.execution_context {
+            ctx.push_agent(self.agent.name()).await;
+        }
+
         // Build tools for this agent: start with base tools it needs
         let mut agent_tools = self.base_tools.subset_from_strs(self.agent.tool_names());
 
@@ -117,6 +127,7 @@ impl Tool for InternalAgentTool {
                 &self.enabled_agents,
                 next_depth,
                 self.max_depth,
+                self.execution_context.clone(),
             );
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
@@ -125,15 +136,6 @@ impl Tool for InternalAgentTool {
 
         let agent_tools = Arc::new(agent_tools);
 
-        // Show agent execution start with depth info
-        eprintln!(
-            "[Agent '{}' (depth {}/{}) running with tools: {}]",
-            self.agent.name(),
-            self.current_depth,
-            self.max_depth,
-            agent_tools.names().join(", ")
-        );
-
         let config = AgentConfig::new(self.agent.name())
             .with_system_prompt(self.agent.system_prompt())
             .with_max_iterations(self.agent.max_iterations());
@@ -141,7 +143,7 @@ impl Tool for InternalAgentTool {
         // Context is ONLY the task - no chat history, no chat system prompt
         let context = vec![qq_core::Message::user(args.task.as_str())];
 
-        match Agent::run_once(
+        let result = match Agent::run_once(
             Arc::clone(&self.provider),
             agent_tools,
             config,
@@ -149,7 +151,14 @@ impl Tool for InternalAgentTool {
         ).await {
             Ok(result) => Ok(ToolOutput::success(result)),
             Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
+        };
+
+        // Pop agent context
+        if let Some(ref ctx) = self.execution_context {
+            ctx.pop().await;
         }
+
+        result
     }
 }
 
@@ -173,6 +182,8 @@ pub struct ExternalAgentTool {
     current_depth: u32,
     /// Maximum allowed depth
     max_depth: u32,
+    /// Execution context for tracking the call stack
+    execution_context: Option<ExecutionContext>,
 }
 
 impl ExternalAgentTool {
@@ -185,6 +196,7 @@ impl ExternalAgentTool {
         enabled_agents: Option<Vec<String>>,
         current_depth: u32,
         max_depth: u32,
+        execution_context: Option<ExecutionContext>,
     ) -> Self {
         let tool_name = format!("ask_{}", name);
 
@@ -198,6 +210,7 @@ impl ExternalAgentTool {
             enabled_agents,
             current_depth,
             max_depth,
+            execution_context,
         }
     }
 }
@@ -227,6 +240,11 @@ impl Tool for ExternalAgentTool {
         let args: AgentArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool(&self.tool_name, format!("Invalid arguments: {}", e)))?;
 
+        // Push agent context
+        if let Some(ref ctx) = self.execution_context {
+            ctx.push_agent(&self.agent_name).await;
+        }
+
         // Build tools for this agent: start with base tools it needs
         let mut agent_tools = self.base_tools.subset(&self.definition.tools);
 
@@ -240,6 +258,7 @@ impl Tool for ExternalAgentTool {
                 &self.enabled_agents,
                 next_depth,
                 self.max_depth,
+                self.execution_context.clone(),
             );
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
@@ -248,15 +267,6 @@ impl Tool for ExternalAgentTool {
 
         let agent_tools = Arc::new(agent_tools);
 
-        // Show agent execution start with depth info
-        eprintln!(
-            "[Agent '{}' (depth {}/{}) running with tools: {}]",
-            self.agent_name,
-            self.current_depth,
-            self.max_depth,
-            agent_tools.names().join(", ")
-        );
-
         let config = AgentConfig::new(self.agent_name.as_str())
             .with_system_prompt(&self.definition.system_prompt)
             .with_max_iterations(self.definition.max_iterations);
@@ -264,7 +274,7 @@ impl Tool for ExternalAgentTool {
         // Context is ONLY the task - no chat history, no chat system prompt
         let context = vec![qq_core::Message::user(args.task.as_str())];
 
-        match Agent::run_once(
+        let result = match Agent::run_once(
             Arc::clone(&self.provider),
             agent_tools,
             config,
@@ -272,7 +282,14 @@ impl Tool for ExternalAgentTool {
         ).await {
             Ok(result) => Ok(ToolOutput::success(result)),
             Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
+        };
+
+        // Pop agent context
+        if let Some(ref ctx) = self.execution_context {
+            ctx.pop().await;
         }
+
+        result
     }
 }
 
@@ -287,6 +304,7 @@ impl Tool for ExternalAgentTool {
 /// * `enabled_agents` - Filter for which agents are enabled (None = all)
 /// * `current_depth` - Current nesting depth (0 = top level)
 /// * `max_depth` - Maximum allowed nesting depth
+/// * `execution_context` - Optional context for tracking execution stack
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
     provider: Arc<dyn Provider>,
@@ -294,6 +312,7 @@ pub fn create_agent_tools(
     enabled_agents: &Option<Vec<String>>,
     current_depth: u32,
     max_depth: u32,
+    execution_context: Option<ExecutionContext>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -318,6 +337,7 @@ pub fn create_agent_tools(
                 enabled_agents.clone(),
                 current_depth,
                 max_depth,
+                execution_context.clone(),
             )));
         }
     }
@@ -334,6 +354,7 @@ pub fn create_agent_tools(
                 enabled_agents.clone(),
                 current_depth,
                 max_depth,
+                execution_context.clone(),
             )));
         }
     }

@@ -570,7 +570,7 @@ async fn run_completion(
     model: &Option<String>,
     debug_logger: Option<&Arc<DebugLogger>>,
 ) -> Result<()> {
-    let max_iterations = 10;
+    let max_iterations = 100;
 
     for iteration in 0..max_iterations {
         // Log iteration start
