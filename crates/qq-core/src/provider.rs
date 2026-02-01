@@ -95,7 +95,11 @@ impl CompletionRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResponse {
+    /// The assistant's response message (content only, no thinking).
     pub message: Message,
+    /// Extracted thinking/reasoning content (displayed but never stored in history).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     pub usage: Usage,
     pub model: String,
     pub finish_reason: FinishReason,

@@ -205,12 +205,19 @@ fn clean_text(text: &str) -> String {
 }
 
 // =============================================================================
-// Factory function
+// Factory functions
 // =============================================================================
 
-/// Create all web tools
+use std::sync::Arc;
+
+/// Create all web tools (boxed version)
 pub fn create_web_tools() -> Vec<Box<dyn Tool>> {
     vec![Box::new(FetchWebpageTool::new())]
+}
+
+/// Create all web tools (Arc version)
+pub fn create_web_tools_arc() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(FetchWebpageTool::new())]
 }
 
 #[cfg(test)]

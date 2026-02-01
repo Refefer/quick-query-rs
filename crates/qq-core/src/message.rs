@@ -237,6 +237,57 @@ pub enum StreamChunk {
     },
 }
 
+/// Strip thinking tags from content for providers that embed thinking inline.
+///
+/// Handles common patterns:
+/// - `<think>...</think>` (DeepSeek and others)
+/// - `<reasoning>...</reasoning>` (some local models)
+///
+/// Returns (clean_content, extracted_thinking).
+pub fn strip_thinking_tags(content: &str) -> (String, Option<String>) {
+    // Try <think>...</think> pattern first (most common)
+    if let Some((clean, thinking)) = extract_tagged_content(content, "think") {
+        return (clean, Some(thinking));
+    }
+
+    // Try <reasoning>...</reasoning> pattern
+    if let Some((clean, thinking)) = extract_tagged_content(content, "reasoning") {
+        return (clean, Some(thinking));
+    }
+
+    // No thinking tags found
+    (content.to_string(), None)
+}
+
+/// Extract content between XML-like tags.
+fn extract_tagged_content(content: &str, tag: &str) -> Option<(String, String)> {
+    let open_tag = format!("<{}>", tag);
+    let close_tag = format!("</{}>", tag);
+
+    let start_idx = content.find(&open_tag)?;
+    let end_idx = content.find(&close_tag)?;
+
+    if end_idx <= start_idx {
+        return None;
+    }
+
+    let thinking_start = start_idx + open_tag.len();
+    let thinking = content[thinking_start..end_idx].trim().to_string();
+
+    // Build clean content by removing the tag section
+    let before = content[..start_idx].trim_end();
+    let after = content[end_idx + close_tag.len()..].trim_start();
+
+    // Join with a space if both parts are non-empty
+    let clean = if !before.is_empty() && !after.is_empty() {
+        format!("{} {}", before, after)
+    } else {
+        format!("{}{}", before, after)
+    };
+
+    Some((clean, thinking))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +315,38 @@ mod tests {
     fn test_role_display() {
         assert_eq!(Role::User.to_string(), "user");
         assert_eq!(Role::Assistant.to_string(), "assistant");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_with_think() {
+        let content = "<think>Let me analyze this...</think>The answer is 42.";
+        let (clean, thinking) = strip_thinking_tags(content);
+        assert_eq!(clean, "The answer is 42.");
+        assert_eq!(thinking, Some("Let me analyze this...".to_string()));
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_with_reasoning() {
+        let content = "<reasoning>Step 1, step 2...</reasoning>Final answer: yes.";
+        let (clean, thinking) = strip_thinking_tags(content);
+        assert_eq!(clean, "Final answer: yes.");
+        assert_eq!(thinking, Some("Step 1, step 2...".to_string()));
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_no_tags() {
+        let content = "Just a normal response.";
+        let (clean, thinking) = strip_thinking_tags(content);
+        assert_eq!(clean, "Just a normal response.");
+        assert_eq!(thinking, None);
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_preserves_content_before_and_after() {
+        let content = "Before <think>thinking here</think> After";
+        let (clean, thinking) = strip_thinking_tags(content);
+        // Content parts are joined with a space
+        assert_eq!(clean, "Before After");
+        assert_eq!(thinking, Some("thinking here".to_string()));
     }
 }

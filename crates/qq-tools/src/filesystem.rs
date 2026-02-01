@@ -421,10 +421,12 @@ impl Tool for WriteFileTool {
 }
 
 // =============================================================================
-// Factory function
+// Factory functions
 // =============================================================================
 
-/// Create all filesystem tools with the given configuration
+use std::sync::Arc;
+
+/// Create all filesystem tools with the given configuration (boxed version)
 pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadFileTool::new(config.clone())),
@@ -434,6 +436,21 @@ pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
 
     if config.allow_write {
         tools.push(Box::new(WriteFileTool::new(config)));
+    }
+
+    tools
+}
+
+/// Create all filesystem tools with the given configuration (Arc version)
+pub fn create_filesystem_tools_arc(config: FileSystemConfig) -> Vec<Arc<dyn Tool>> {
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(ReadFileTool::new(config.clone())),
+        Arc::new(ListFilesTool::new(config.clone())),
+        Arc::new(SearchFilesTool::new(config.clone())),
+    ];
+
+    if config.allow_write {
+        tools.push(Arc::new(WriteFileTool::new(config)));
     }
 
     tools

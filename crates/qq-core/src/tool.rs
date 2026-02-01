@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::error::Error;
 
@@ -183,8 +184,9 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, Error>;
 }
 
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: std::collections::HashMap<String, Box<dyn Tool>>,
+    tools: std::collections::HashMap<String, Arc<dyn Tool>>,
 }
 
 impl Default for ToolRegistry {
@@ -200,12 +202,23 @@ impl ToolRegistry {
         }
     }
 
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Register a boxed tool (convenience for backward compatibility)
+    pub fn register_boxed(&mut self, tool: Box<dyn Tool>) {
+        let arc: Arc<dyn Tool> = Arc::from(tool);
+        self.tools.insert(arc.name().to_string(), arc);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
+    }
+
+    /// Get a cloned Arc reference to a tool
+    pub fn get_arc(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -222,6 +235,25 @@ impl ToolRegistry {
 
     pub fn len(&self) -> usize {
         self.tools.len()
+    }
+
+    /// Create a subset registry containing only the specified tools.
+    ///
+    /// Tools not found in the registry are silently ignored.
+    pub fn subset(&self, tool_names: &[String]) -> Self {
+        let mut new_registry = Self::new();
+        for name in tool_names {
+            if let Some(tool) = self.tools.get(name) {
+                new_registry.tools.insert(name.clone(), Arc::clone(tool));
+            }
+        }
+        new_registry
+    }
+
+    /// Create a subset registry from a slice of &str tool names.
+    pub fn subset_from_strs(&self, tool_names: &[&str]) -> Self {
+        let owned: Vec<String> = tool_names.iter().map(|s| s.to_string()).collect();
+        self.subset(&owned)
     }
 }
 

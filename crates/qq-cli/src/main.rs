@@ -1,16 +1,20 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 use qq_core::{execute_tools_parallel, CompletionRequest, Message, Provider, ToolRegistry};
 use qq_providers::openai::OpenAIProvider;
 
+mod agents;
 mod chat;
 mod config;
+mod debug_log;
 mod markdown;
 
-use config::{expand_path, Config};
+use agents::{create_agent_tools, AgentExecutor};
+use config::{expand_path, AgentsConfig, Config};
 
 #[derive(Parser)]
 #[command(name = "qq")]
@@ -55,6 +59,22 @@ pub struct Cli {
     /// Enable debug output
     #[arg(short, long)]
     pub debug: bool,
+
+    /// Write debug log to file (JSON lines format)
+    #[arg(long)]
+    pub debug_file: Option<std::path::PathBuf>,
+
+    /// Disable all tools (for testing)
+    #[arg(long)]
+    pub no_tools: bool,
+
+    /// Disable all agents (for testing)
+    #[arg(long)]
+    pub no_agents: bool,
+
+    /// Minimal mode: no tools, no agents (for testing basic chat loop)
+    #[arg(long)]
+    pub minimal: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -127,7 +147,7 @@ fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
     // Filesystem tools
     if config.tools.enable_filesystem {
         let fs_config = qq_tools::FileSystemConfig::new(&root).with_write(config.tools.allow_write);
-        for tool in qq_tools::create_filesystem_tools(fs_config) {
+        for tool in qq_tools::create_filesystem_tools_arc(fs_config) {
             registry.register(tool);
         }
     }
@@ -139,14 +159,14 @@ fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
         } else {
             std::sync::Arc::new(qq_tools::MemoryStore::in_memory()?)
         };
-        for tool in qq_tools::create_memory_tools(store) {
+        for tool in qq_tools::create_memory_tools_arc(store) {
             registry.register(tool);
         }
     }
 
     // Web tools
     if config.tools.enable_web {
-        for tool in qq_tools::create_web_tools() {
+        for tool in qq_tools::create_web_tools_arc() {
             registry.register(tool);
         }
     }
@@ -202,14 +222,16 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
 
         // Check if we have tool calls
         if !response.message.tool_calls.is_empty() {
-            // Print assistant message if any
+            // Print assistant message if any (content only, not thinking)
             let content = response.message.content.to_string_lossy();
             if !content.is_empty() {
                 println!("{}", content);
             }
 
-            // Add assistant message to history
-            messages.push(response.message.clone());
+            // Add assistant message to history with empty content (don't store potential thinking)
+            // Note: Some providers may leak thinking into content; we explicitly clear it
+            let assistant_msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
+            messages.push(assistant_msg);
 
             // Execute tools in parallel
             let tool_calls = response.message.tool_calls.clone();
@@ -263,15 +285,65 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
 async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result<()> {
     // Resolve settings from profile, CLI, and config
     let settings = resolve_settings(cli, config)?;
-    let provider = create_provider_from_settings(&settings)?;
+    let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Determine system prompt: explicit arg > CLI > profile
     let system_prompt = system
         .or_else(|| cli.system.clone())
-        .or(settings.system_prompt);
+        .or(settings.system_prompt.clone());
 
-    // Set up tools
-    let tools_registry = build_tools_registry(config)?;
+    // Check test mode flags
+    let disable_tools = cli.no_tools || cli.minimal;
+    let disable_agents = cli.no_agents || cli.minimal;
+
+    // Set up base tools (conditionally)
+    let base_tools = if disable_tools {
+        if cli.debug {
+            eprintln!("[debug] Tools disabled (--no-tools or --minimal)");
+        }
+        ToolRegistry::new()
+    } else {
+        build_tools_registry(config)?
+    };
+
+    // Load agents config
+    let agents_config = AgentsConfig::load().unwrap_or_default();
+
+    // Create agent tools (conditionally)
+    let agent_tools = if disable_agents || disable_tools {
+        if cli.debug && disable_agents {
+            eprintln!("[debug] Agents disabled (--no-agents or --minimal)");
+        }
+        vec![]
+    } else {
+        create_agent_tools(
+            &base_tools,
+            Arc::clone(&provider),
+            &agents_config,
+            &settings.agents,
+        )
+    };
+
+    // Build the full tools registry with both base tools and agent tools
+    let mut tools_registry = base_tools.clone();
+    for tool in agent_tools {
+        tools_registry.register(tool);
+    }
+
+    // Create executor for manual agent commands (@agent, /delegate)
+    // Uses base_tools so manual commands also can't recurse
+    let agent_executor = if disable_agents {
+        None
+    } else {
+        let executor = AgentExecutor::new(
+            Arc::clone(&provider),
+            base_tools,
+            agents_config,
+            settings.agents.clone(),
+            settings.model.clone(),
+        );
+        Some(Arc::new(tokio::sync::RwLock::new(executor)))
+    };
 
     chat::run_chat(
         cli,
@@ -281,6 +353,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         tools_registry,
         settings.parameters,
         settings.model,
+        agent_executor,
     )
     .await
 }
@@ -431,6 +504,7 @@ struct ResolvedSettings {
     model: Option<String>,
     system_prompt: Option<String>,
     parameters: std::collections::HashMap<String, serde_json::Value>,
+    agents: Option<Vec<String>>,
 }
 
 /// Resolve all settings from CLI args, profile, and config
@@ -497,6 +571,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         model,
         system_prompt,
         parameters,
+        agents: resolved_profile.agents.clone(),
     })
 }
 

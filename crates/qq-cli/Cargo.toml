@@ -15,6 +15,7 @@ qq-core = { workspace = true }
 qq-providers = { workspace = true }
 qq-tools = { workspace = true }
 
+async-trait = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -31,3 +32,8 @@ rustyline = { workspace = true }
 crossterm = { workspace = true }
 termimad = { workspace = true }
 regex = "1.11"
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = { version = "3.10", optional = true }
+
+[dev-dependencies]
+tempfile = "3.10"

@@ -14,7 +14,7 @@ pub use agent::{
     Agent, AgentChannel, AgentConfig, AgentId, AgentMessage, AgentRegistry, AgentSender,
 };
 pub use error::Error;
-pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage};
+pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags};
 pub use provider::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderConfig, StreamResult,
 };

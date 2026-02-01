@@ -1,12 +1,14 @@
 //! Interactive chat mode with readline support.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::ExecutableCommand;
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
+use tokio::sync::RwLock;
 
 use futures::StreamExt;
 
@@ -15,7 +17,9 @@ use qq_core::{
     ToolRegistry,
 };
 
+use crate::agents::AgentExecutor;
 use crate::config::Config as AppConfig;
+use crate::debug_log::DebugLogger;
 use crate::markdown::MarkdownRenderer;
 use crate::Cli;
 
@@ -76,8 +80,12 @@ enum ChatCommand {
     History,
     Help,
     Tools,
+    Agents,
+    Delegate { agent: String, task: String },
+    AgentCall { agent: String, task: String }, // @agent syntax
     System(String),
-    None(String), // Regular message
+    Debug(String), // /debug subcommand
+    None(String),  // Regular message
 }
 
 fn parse_command(input: &str) -> ChatCommand {
@@ -85,6 +93,20 @@ fn parse_command(input: &str) -> ChatCommand {
 
     if trimmed.is_empty() {
         return ChatCommand::None(String::new());
+    }
+
+    // Check for @agent syntax: @agent_name <task>
+    if trimmed.starts_with('@') {
+        let parts: Vec<&str> = trimmed[1..].splitn(2, char::is_whitespace).collect();
+        let agent = parts[0].to_string();
+        let task = parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default();
+
+        if task.is_empty() {
+            eprintln!("Usage: @{} <task>", agent);
+            return ChatCommand::None(String::new());
+        }
+
+        return ChatCommand::AgentCall { agent, task };
     }
 
     if !trimmed.starts_with('/') {
@@ -101,7 +123,27 @@ fn parse_command(input: &str) -> ChatCommand {
         "/history" | "/h" => ChatCommand::History,
         "/help" | "/?" => ChatCommand::Help,
         "/tools" | "/t" => ChatCommand::Tools,
+        "/agents" | "/a" => ChatCommand::Agents,
+        "/delegate" | "/d" => {
+            // Parse: /delegate agent_name <task>
+            let delegate_parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
+            if delegate_parts.is_empty() || delegate_parts[0].is_empty() {
+                eprintln!("Usage: /delegate <agent> <task>");
+                ChatCommand::None(String::new())
+            } else {
+                let agent = delegate_parts[0].to_string();
+                let task = delegate_parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default();
+
+                if task.is_empty() {
+                    eprintln!("Usage: /delegate {} <task>", agent);
+                    ChatCommand::None(String::new())
+                } else {
+                    ChatCommand::Delegate { agent, task }
+                }
+            }
+        }
         "/system" | "/sys" => ChatCommand::System(arg),
+        "/debug" => ChatCommand::Debug(arg),
         _ => {
             eprintln!("Unknown command: {}. Type /help for available commands.", cmd);
             ChatCommand::None(String::new())
@@ -113,17 +155,30 @@ fn print_help() {
     println!(
         r#"
 Chat Commands:
-  /help, /?      Show this help message
-  /quit, /exit   Exit chat mode
-  /clear, /c     Clear conversation history
-  /history, /h   Show message count
-  /tools, /t     List available tools
-  /system <msg>  Set a new system prompt
+  /help, /?           Show this help message
+  /quit, /exit        Exit chat mode
+  /clear, /c          Clear conversation history
+  /history, /h        Show message count
+  /tools, /t          List available tools
+  /agents, /a         List available agents
+  /delegate <a> <t>   Delegate task <t> to agent <a>
+  /system <msg>       Set a new system prompt
+  /debug <subcmd>     Debug commands (messages, count, dump)
+
+Agents:
+  @agent <task>       Quick agent invocation (e.g., @explore Find all tests)
+
+Debug subcommands:
+  /debug messages     Show all messages with role and content preview
+  /debug count        Show message counts by role
+  /debug dump <file>  Dump messages to a JSON file
 
 Tips:
   - Press Ctrl+C to cancel current generation
   - Press Ctrl+D to exit
   - Up/Down arrows navigate history
+  - Use --debug-file <path> to enable file logging
+  - Use --minimal for testing basic chat (no tools/agents)
 "#
     );
 }
@@ -242,16 +297,105 @@ fn print_prompt_hint() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Handle debug subcommands
+fn handle_debug_command(subcmd: &str, session: &ChatSession) {
+    let parts: Vec<&str> = subcmd.splitn(2, ' ').collect();
+    let cmd = parts.first().map(|s| s.trim()).unwrap_or("");
+    let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+    match cmd {
+        "messages" | "m" => {
+            println!("\n=== Message History ({} messages) ===\n", session.messages.len());
+            for (i, msg) in session.messages.iter().enumerate() {
+                let content = msg.content.to_string_lossy();
+                let preview = if content.len() > 80 {
+                    format!("{}...", &content[..80].replace('\n', " "))
+                } else {
+                    content.replace('\n', " ")
+                };
+                let tool_info = if !msg.tool_calls.is_empty() {
+                    format!(" [+{} tool calls]", msg.tool_calls.len())
+                } else if msg.tool_call_id.is_some() {
+                    " [tool result]".to_string()
+                } else {
+                    String::new()
+                };
+                println!("[{}] {} ({} chars){}: {}", i, msg.role, msg.content.to_string_lossy().len(), tool_info, preview);
+            }
+            println!();
+        }
+        "count" | "c" => {
+            let mut counts = std::collections::HashMap::new();
+            for msg in &session.messages {
+                *counts.entry(msg.role.to_string()).or_insert(0) += 1;
+            }
+            println!("\n=== Message Counts ===");
+            println!("  Total: {}", session.messages.len());
+            for (role, count) in &counts {
+                println!("  {}: {}", role, count);
+            }
+            println!();
+        }
+        "dump" => {
+            if arg.is_empty() {
+                eprintln!("Usage: /debug dump <filename>");
+                return;
+            }
+            match dump_messages_to_file(&session.messages, arg) {
+                Ok(_) => println!("Messages dumped to {}", arg),
+                Err(e) => eprintln!("Failed to dump messages: {}", e),
+            }
+        }
+        "" => {
+            eprintln!("Debug subcommands: messages, count, dump <file>");
+            eprintln!("Type /help for more information.");
+        }
+        _ => {
+            eprintln!("Unknown debug subcommand: {}. Use: messages, count, dump", cmd);
+        }
+    }
+}
+
+/// Dump messages to a JSON file for analysis
+fn dump_messages_to_file(messages: &[Message], filename: &str) -> std::io::Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+
+    let json = serde_json::to_string_pretty(messages)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let mut file = File::create(filename)?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
+}
+
 /// Run interactive chat mode
 pub async fn run_chat(
     cli: &Cli,
     _config: &AppConfig,
-    provider: Box<dyn Provider>,
+    provider: Arc<dyn Provider>,
     system_prompt: Option<String>,
     tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     model: Option<String>,
+    agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
 ) -> Result<()> {
+    // Set up debug logger if requested
+    let debug_logger: Option<Arc<DebugLogger>> = if let Some(ref path) = cli.debug_file {
+        match DebugLogger::new(path) {
+            Ok(logger) => {
+                eprintln!("[debug] Writing debug log to: {}", path.display());
+                Some(Arc::new(logger))
+            }
+            Err(e) => {
+                eprintln!("[warning] Failed to create debug log: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Set up readline with history
     let config = Config::builder()
         .history_ignore_space(true)
@@ -303,6 +447,53 @@ pub async fn run_chat(
                         }
                         println!();
                     }
+                    ChatCommand::Agents => {
+                        if let Some(ref executor) = agent_executor {
+                            let exec = executor.read().await;
+                            let agents = exec.list_agents();
+                            if agents.is_empty() {
+                                println!("\nNo agents available (all disabled in profile).\n");
+                            } else {
+                                println!("\nAvailable agents (LLM can use these automatically as tools):");
+                                for agent in agents {
+                                    let type_marker = if agent.is_internal { "(built-in)" } else { "(external)" };
+                                    println!("  ask_{} {} - {}", agent.name, type_marker, agent.description);
+                                    if !agent.tools.is_empty() {
+                                        println!("    Agent tools: {}", agent.tools.join(", "));
+                                    }
+                                }
+                                println!("\nManual invocation: @agent <task> or /delegate <agent> <task>\n");
+                            }
+                        } else {
+                            println!("\nAgents are not configured.\n");
+                        }
+                    }
+                    ChatCommand::Delegate { agent, task } | ChatCommand::AgentCall { agent, task } => {
+                        if let Some(ref executor) = agent_executor {
+                            let exec = executor.read().await;
+                            if !exec.has_agent(&agent) {
+                                eprintln!("Unknown or disabled agent: {}. Use /agents to list available agents.\n", agent);
+                                continue;
+                            }
+
+                            print_section_header(&format!("Agent: {}", agent))?;
+
+                            match exec.run(&agent, &task).await {
+                                Ok(response) => {
+                                    // Create a markdown renderer for the agent output
+                                    let mut renderer = MarkdownRenderer::new();
+                                    renderer.push(&response)?;
+                                    renderer.finish()?;
+                                    println!();
+                                }
+                                Err(e) => {
+                                    eprintln!("\nAgent error: {}\n", e);
+                                }
+                            }
+                        } else {
+                            eprintln!("\nAgents are not configured. Ensure your profile supports agents.\n");
+                        }
+                    }
                     ChatCommand::System(new_system) => {
                         if new_system.is_empty() {
                             if let Some(sys) = &session.system_prompt {
@@ -314,6 +505,9 @@ pub async fn run_chat(
                             session.system_prompt = Some(new_system.clone());
                             println!("System prompt updated.\n");
                         }
+                    }
+                    ChatCommand::Debug(subcmd) => {
+                        handle_debug_command(&subcmd, &session);
                     }
                     ChatCommand::None(text) => {
                         if text.is_empty() {
@@ -330,6 +524,7 @@ pub async fn run_chat(
                             &tools_registry,
                             &extra_params,
                             &model,
+                            debug_logger.as_ref(),
                         )
                         .await
                         {
@@ -368,16 +563,29 @@ pub async fn run_chat(
 
 async fn run_completion(
     cli: &Cli,
-    provider: &Box<dyn Provider>,
+    provider: &Arc<dyn Provider>,
     session: &mut ChatSession,
     tools_registry: &ToolRegistry,
     extra_params: &std::collections::HashMap<String, serde_json::Value>,
     model: &Option<String>,
+    debug_logger: Option<&Arc<DebugLogger>>,
 ) -> Result<()> {
-    let max_iterations = 20;
+    let max_iterations = 10;
 
     for iteration in 0..max_iterations {
-        let mut request = CompletionRequest::new(session.build_messages());
+        // Log iteration start
+        if let Some(logger) = debug_logger {
+            logger.log_iteration(iteration, "chat_completion");
+        }
+
+        let messages = session.build_messages();
+
+        // Log messages being sent
+        if let Some(logger) = debug_logger {
+            logger.log_messages_sent(&messages, model.as_deref());
+        }
+
+        let mut request = CompletionRequest::new(messages);
 
         if let Some(m) = model {
             request = request.with_model(m);
@@ -470,7 +678,25 @@ async fn run_completion(
             }
         }
 
+        // Get the actual content (not thinking) for storage
         let content = content_renderer.content().to_string();
+        let thinking_len = if in_thinking {
+            Some(thinking_renderer.content().len())
+        } else {
+            None
+        };
+
+        // Log response received
+        if let Some(logger) = debug_logger {
+            logger.log_response_received(
+                content.len(),
+                thinking_len,
+                tool_calls.len(),
+                if tool_calls.is_empty() { "stop" } else { "tool_calls" },
+            );
+        }
+
+        // Note: thinking_renderer content is displayed but NEVER stored in messages
 
         // Handle tool calls if any
         if !tool_calls.is_empty() {
@@ -478,14 +704,23 @@ async fn run_completion(
                 println!(); // Newline after any content
             }
 
-            // Add assistant message with tool calls to session
+            // Add assistant message with tool calls - only store actual content, not thinking
             let assistant_msg =
                 Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
             session.add_assistant_with_tools(assistant_msg);
 
-            // Show tool calls to user
+            // Log message stored
+            if let Some(logger) = debug_logger {
+                logger.log_message_stored("assistant", content.len(), true);
+            }
+
+            // Show tool calls to user and log them
             for tool_call in &tool_calls {
                 print_tool_call(&tool_call.name, &tool_call.arguments)?;
+                if let Some(logger) = debug_logger {
+                    let args_preview = format_tool_args(&tool_call.arguments);
+                    logger.log_tool_call(&tool_call.name, &args_preview);
+                }
             }
 
             let results = execute_tools_parallel(tools_registry, tool_calls).await;
@@ -498,6 +733,11 @@ async fn run_completion(
                         result.content.clone()
                     };
                     eprintln!("[debug] result: {}", preview);
+                }
+
+                // Log tool result
+                if let Some(logger) = debug_logger {
+                    logger.log_tool_result(&result.tool_call_id, result.content.len(), result.is_error);
                 }
 
                 session.add_tool_result(&result.tool_call_id, &result.content);
@@ -516,9 +756,18 @@ async fn run_completion(
         }
         session.add_assistant_message(&content);
 
+        // Log final message stored
+        if let Some(logger) = debug_logger {
+            logger.log_message_stored("assistant", content.len(), false);
+        }
+
         return Ok(());
     }
 
+    // Log warning for max iterations
+    if let Some(logger) = debug_logger {
+        logger.log_warning(&format!("Max iterations ({}) reached", max_iterations));
+    }
     eprintln!("Warning: Max iterations ({}) reached", max_iterations);
     Ok(())
 }

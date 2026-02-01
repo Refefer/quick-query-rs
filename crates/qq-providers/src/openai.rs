@@ -134,6 +134,7 @@ impl OpenAIProvider {
         OpenAIMessage {
             role: role.to_string(),
             content,
+            reasoning_content: None, // We never send reasoning content, only receive it
             name: message.name.clone(),
             tool_calls,
             tool_call_id: message.tool_call_id.clone(),
@@ -172,7 +173,24 @@ impl OpenAIProvider {
             })
             .collect();
 
-        let content = choice.message.content.unwrap_or_default();
+        // Extract thinking/reasoning content (for display only, never stored in message)
+        let mut thinking = choice.message.reasoning_content.clone();
+        if let Some(ref t) = thinking {
+            debug!("Extracted {} chars of reasoning_content from response", t.len());
+        }
+
+        // Get the actual content
+        let mut content = choice.message.content.unwrap_or_default();
+
+        // Some providers embed thinking in content with tags - extract it
+        if thinking.is_none() && !content.is_empty() {
+            let (clean, extracted) = qq_core::strip_thinking_tags(&content);
+            if extracted.is_some() {
+                debug!("Extracted thinking from content tags");
+                thinking = extracted;
+                content = clean;
+            }
+        }
 
         let message = if tool_calls.is_empty() {
             Message::assistant(content)
@@ -192,6 +210,7 @@ impl OpenAIProvider {
 
         Ok(CompletionResponse {
             message,
+            thinking,
             usage: usage.unwrap_or_default(),
             model: response.model,
             finish_reason,
@@ -434,6 +453,9 @@ struct OpenAIMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    /// Reasoning/thinking content from o1/reasoning models (non-streaming response).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

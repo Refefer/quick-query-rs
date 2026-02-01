@@ -9,9 +9,9 @@ pub mod filesystem;
 pub mod memory;
 pub mod web;
 
-pub use filesystem::{create_filesystem_tools, FileSystemConfig};
-pub use memory::{create_memory_tools, MemoryStore};
-pub use web::create_web_tools;
+pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig};
+pub use memory::{create_memory_tools, create_memory_tools_arc, MemoryStore};
+pub use web::{create_web_tools, create_web_tools_arc};
 
 use qq_core::{Tool, ToolRegistry};
 use std::path::PathBuf;
@@ -73,7 +73,7 @@ pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_c
 
     // Filesystem tools
     let fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
-    for tool in create_filesystem_tools(fs_config) {
+    for tool in create_filesystem_tools_arc(fs_config) {
         registry.register(tool);
     }
 
@@ -83,13 +83,13 @@ pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_c
     } else {
         Arc::new(MemoryStore::in_memory()?)
     };
-    for tool in create_memory_tools(store) {
+    for tool in create_memory_tools_arc(store) {
         registry.register(tool);
     }
 
     // Web tools
     if config.enable_web {
-        for tool in create_web_tools() {
+        for tool in create_web_tools_arc() {
             registry.register(tool);
         }
     }
@@ -97,7 +97,7 @@ pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_c
     Ok(registry)
 }
 
-/// Create individual tools for custom registries
+/// Create individual tools for custom registries (boxed version for backward compatibility)
 pub fn create_all_tools(config: ToolsConfig) -> Result<Vec<Box<dyn Tool>>, qq_core::Error> {
     let mut tools = Vec::new();
 
@@ -116,6 +116,30 @@ pub fn create_all_tools(config: ToolsConfig) -> Result<Vec<Box<dyn Tool>>, qq_co
     // Web tools
     if config.enable_web {
         tools.extend(create_web_tools());
+    }
+
+    Ok(tools)
+}
+
+/// Create individual tools for custom registries (Arc version)
+pub fn create_all_tools_arc(config: ToolsConfig) -> Result<Vec<Arc<dyn Tool>>, qq_core::Error> {
+    let mut tools = Vec::new();
+
+    // Filesystem tools
+    let fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    tools.extend(create_filesystem_tools_arc(fs_config));
+
+    // Memory tools
+    let store = if let Some(db_path) = &config.memory_db {
+        Arc::new(MemoryStore::new(db_path)?)
+    } else {
+        Arc::new(MemoryStore::in_memory()?)
+    };
+    tools.extend(create_memory_tools_arc(store));
+
+    // Web tools
+    if config.enable_web {
+        tools.extend(create_web_tools_arc());
     }
 
     Ok(tools)

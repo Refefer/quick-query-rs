@@ -385,6 +385,22 @@ impl Agent {
         config: AgentConfig,
         context: Vec<Message>,
     ) -> Result<String, Error> {
+        use tracing::debug;
+
+        debug!(
+            agent = %config.id,
+            context_messages = context.len(),
+            tools_available = tools.definitions().len(),
+            "Agent run_once starting"
+        );
+
+        // Assertion: agent context should be minimal (typically just the task)
+        debug_assert!(
+            context.len() <= 2,
+            "Agent context should be minimal (task only), got {} messages",
+            context.len()
+        );
+
         let mut messages = Vec::new();
 
         // Add system prompt if configured
@@ -396,7 +412,14 @@ impl Agent {
         messages.extend(context);
 
         // Run agentic loop
-        for _iteration in 0..config.max_iterations {
+        for iteration in 0..config.max_iterations {
+            debug!(
+                agent = %config.id,
+                iteration = iteration,
+                message_count = messages.len(),
+                "Agent iteration starting"
+            );
+
             let mut request = CompletionRequest::new(messages.clone())
                 .with_tools(tools.definitions());
 
@@ -404,13 +427,34 @@ impl Agent {
 
             let response = provider.complete(request).await?;
 
+            // Log if thinking was extracted
+            if let Some(ref thinking) = response.thinking {
+                debug!(
+                    agent = %config.id,
+                    thinking_len = thinking.len(),
+                    "Extracted thinking content (not stored)"
+                );
+            }
+
             // Check for tool calls
             if !response.message.tool_calls.is_empty() {
-                // Add assistant message with tool calls
-                messages.push(response.message.clone());
+                debug!(
+                    agent = %config.id,
+                    tool_count = response.message.tool_calls.len(),
+                    "Agent executing tools"
+                );
+
+                // Store message with tool calls but NO content (don't store thinking)
+                let msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
+                messages.push(msg);
 
                 // Execute tools
                 for tool_call in &response.message.tool_calls {
+                    debug!(
+                        agent = %config.id,
+                        tool = %tool_call.name,
+                        "Executing tool"
+                    );
                     let result = execute_tool(&tools, tool_call).await;
                     messages.push(Message::tool_result(&tool_call.id, result));
                 }
@@ -419,7 +463,14 @@ impl Agent {
             }
 
             // No tool calls - return final response
-            return Ok(response.message.content.to_string_lossy());
+            let content = response.message.content.to_string_lossy();
+            debug!(
+                agent = %config.id,
+                iterations = iteration + 1,
+                response_len = content.len(),
+                "Agent completed successfully"
+            );
+            return Ok(content);
         }
 
         Err(Error::Unknown(format!(
@@ -459,9 +510,11 @@ impl Agent {
 
             // Check for tool calls
             if !response.message.tool_calls.is_empty() {
-                // Add assistant message with tool calls
-                messages.push(response.message.clone());
-                self.messages.push(response.message.clone());
+                // Add assistant message with tool calls but NO content (don't store thinking)
+                // Note: response.message.content might contain thinking from some providers
+                let msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
+                messages.push(msg.clone());
+                self.messages.push(msg);
 
                 // Execute tools
                 for tool_call in &response.message.tool_calls {
@@ -474,7 +527,7 @@ impl Agent {
                 continue;
             }
 
-            // No tool calls - save and return response
+            // No tool calls - save and return response (content only, no thinking)
             let content = response.message.content.to_string_lossy();
             self.messages.push(Message::assistant(content.as_str()));
             return Ok(content);

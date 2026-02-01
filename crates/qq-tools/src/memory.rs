@@ -295,16 +295,26 @@ impl Tool for ListMemoriesTool {
 }
 
 // =============================================================================
-// Factory function
+// Factory functions
 // =============================================================================
 
-/// Create all memory tools with a shared store
+/// Create all memory tools with a shared store (boxed version)
 pub fn create_memory_tools(store: Arc<MemoryStore>) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(ReadMemoryTool::new(store.clone())),
         Box::new(AddMemoryTool::new(store.clone())),
         Box::new(DeleteMemoryTool::new(store.clone())),
         Box::new(ListMemoriesTool::new(store)),
+    ]
+}
+
+/// Create all memory tools with a shared store (Arc version)
+pub fn create_memory_tools_arc(store: Arc<MemoryStore>) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(ReadMemoryTool::new(store.clone())),
+        Arc::new(AddMemoryTool::new(store.clone())),
+        Arc::new(DeleteMemoryTool::new(store.clone())),
+        Arc::new(ListMemoriesTool::new(store)),
     ]
 }
 
