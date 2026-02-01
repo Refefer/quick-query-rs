@@ -45,9 +45,8 @@ pub struct TuiApp {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
 
-    // Iteration tracking
-    pub iteration: u32,
-    pub max_iterations: u32,
+    // Tool-call iteration tracking (for multi-turn tool calls)
+    pub tool_iteration: u32,
 
     // Streaming state
     pub is_streaming: bool,
@@ -87,8 +86,7 @@ impl TuiApp {
             thinking_collapsed: false,
             prompt_tokens: 0,
             completion_tokens: 0,
-            iteration: 0,
-            max_iterations: 10,
+            tool_iteration: 0,
             is_streaming: false,
             status_message: None,
             scroll_offset: 0,
@@ -180,7 +178,7 @@ impl TuiApp {
                 }
             }
             StreamEvent::IterationStart { iteration } => {
-                self.iteration = iteration;
+                self.tool_iteration = iteration;
             }
         }
     }
@@ -409,7 +407,6 @@ pub async fn run_tui(
     // Create TUI app
     let model_name = model.clone().unwrap_or_else(|| "gpt-4o".to_string());
     let mut app = TuiApp::new(&model_name);
-    app.max_iterations = 10;
 
     // Channel for stream events
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(100);

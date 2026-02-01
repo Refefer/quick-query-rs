@@ -13,8 +13,6 @@ pub struct StatusBar<'a> {
     model: &'a str,
     prompt_tokens: u32,
     completion_tokens: u32,
-    iteration: u32,
-    max_iterations: u32,
     is_streaming: bool,
     status_message: Option<&'a str>,
 }
@@ -25,8 +23,6 @@ impl<'a> StatusBar<'a> {
             model,
             prompt_tokens: 0,
             completion_tokens: 0,
-            iteration: 0,
-            max_iterations: 10,
             is_streaming: false,
             status_message: None,
         }
@@ -35,12 +31,6 @@ impl<'a> StatusBar<'a> {
     pub fn tokens(mut self, prompt: u32, completion: u32) -> Self {
         self.prompt_tokens = prompt;
         self.completion_tokens = completion;
-        self
-    }
-
-    pub fn iteration(mut self, current: u32, max: u32) -> Self {
-        self.iteration = current;
-        self.max_iterations = max;
         self
     }
 
@@ -76,15 +66,6 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled(
                 format!(" ({}p/{}c)", self.prompt_tokens, self.completion_tokens),
                 Style::default().fg(Color::DarkGray),
-            ));
-        }
-
-        // Show iteration if in multi-turn
-        if self.iteration > 0 {
-            spans.push(Span::styled(" | Iter: ", style_label));
-            spans.push(Span::styled(
-                format!("{}/{}", self.iteration, self.max_iterations),
-                style_value,
             ));
         }
 

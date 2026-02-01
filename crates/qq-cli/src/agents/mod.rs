@@ -14,7 +14,7 @@ pub mod researcher;
 pub mod reviewer;
 pub mod summarizer;
 
-pub use agent_tool::create_agent_tools;
+pub use agent_tool::{create_agent_tools, DEFAULT_MAX_AGENT_DEPTH};
 
 use std::collections::HashMap;
 use std::sync::Arc;

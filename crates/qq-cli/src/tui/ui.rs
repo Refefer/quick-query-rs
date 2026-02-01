@@ -23,7 +23,6 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     // Status bar at top
     let status_bar = StatusBar::new(&app.model)
         .tokens(app.prompt_tokens, app.completion_tokens)
-        .iteration(app.iteration, app.max_iterations)
         .streaming(app.is_streaming);
 
     let status_bar = if let Some(ref msg) = app.status_message {

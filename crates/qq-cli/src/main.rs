@@ -14,7 +14,7 @@ mod debug_log;
 mod markdown;
 mod tui;
 
-use agents::{create_agent_tools, AgentExecutor};
+use agents::{create_agent_tools, AgentExecutor, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
 
 #[derive(Parser)]
@@ -330,6 +330,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             Arc::clone(&provider),
             &agents_config,
             &settings.agents,
+            0, // Start at depth 0
+            DEFAULT_MAX_AGENT_DEPTH,
         )
     };
 

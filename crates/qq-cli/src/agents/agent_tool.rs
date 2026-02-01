@@ -1,8 +1,8 @@
 //! Agent tools that expose agents as callable tools for the LLM.
 //!
 //! Each agent becomes a tool (e.g., `ask_researcher`, `ask_explore`) that
-//! the LLM can invoke. Agents only have access to their specified tools,
-//! NOT to other agent tools, preventing recursive loops.
+//! the LLM can invoke. Agents can call other agents up to a maximum depth,
+//! after which they only have access to base tools.
 
 use std::sync::Arc;
 
@@ -12,7 +12,11 @@ use serde::Deserialize;
 use qq_core::{Agent, AgentConfig, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
 use super::InternalAgent;
-use crate::config::AgentDefinition;
+use crate::config::{AgentDefinition, AgentsConfig};
+
+/// Maximum nesting depth for agent calls.
+/// At depth 0, agents can call other agents. At max_depth, they only get base tools.
+pub const DEFAULT_MAX_AGENT_DEPTH: u32 = 3;
 
 /// A tool that wraps an internal agent.
 pub struct InternalAgentTool {
@@ -20,29 +24,41 @@ pub struct InternalAgentTool {
     tool_name: String,
     /// The internal agent
     agent: Box<dyn InternalAgent>,
-    /// Tools available to this agent (subset, no agent tools)
-    agent_tools: Arc<ToolRegistry>,
+    /// Base tools (filesystem, memory, web) - used to build agent's tool set
+    base_tools: Arc<ToolRegistry>,
     /// Provider for LLM calls
     provider: Arc<dyn Provider>,
+    /// External agents config (for creating nested agent tools)
+    external_agents: AgentsConfig,
+    /// Enabled agents filter
+    enabled_agents: Option<Vec<String>>,
+    /// Current nesting depth (0 = called from main chat)
+    current_depth: u32,
+    /// Maximum allowed depth
+    max_depth: u32,
 }
 
 impl InternalAgentTool {
     pub fn new(
         agent: Box<dyn InternalAgent>,
-        all_tools: &ToolRegistry,
+        base_tools: &ToolRegistry,
         provider: Arc<dyn Provider>,
+        external_agents: AgentsConfig,
+        enabled_agents: Option<Vec<String>>,
+        current_depth: u32,
+        max_depth: u32,
     ) -> Self {
         let tool_name = format!("ask_{}", agent.name());
-
-        // Create tool subset with ONLY the agent's specified tools
-        // This prevents agents from calling other agents
-        let agent_tools = Arc::new(all_tools.subset_from_strs(agent.tool_names()));
 
         Self {
             tool_name,
             agent,
-            agent_tools,
+            base_tools: Arc::new(base_tools.clone()),
             provider,
+            external_agents,
+            enabled_agents,
+            current_depth,
+            max_depth,
         }
     }
 }
@@ -88,11 +104,34 @@ impl Tool for InternalAgentTool {
         let args: AgentArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool(&self.tool_name, format!("Invalid arguments: {}", e)))?;
 
-        // Show agent execution start (always visible)
+        // Build tools for this agent: start with base tools it needs
+        let mut agent_tools = self.base_tools.subset_from_strs(self.agent.tool_names());
+
+        // If not at max depth, add agent tools so this agent can call other agents
+        let next_depth = self.current_depth + 1;
+        if next_depth < self.max_depth {
+            let nested_agent_tools = create_agent_tools(
+                &self.base_tools,
+                Arc::clone(&self.provider),
+                &self.external_agents,
+                &self.enabled_agents,
+                next_depth,
+                self.max_depth,
+            );
+            for tool in nested_agent_tools {
+                agent_tools.register(tool);
+            }
+        }
+
+        let agent_tools = Arc::new(agent_tools);
+
+        // Show agent execution start with depth info
         eprintln!(
-            "[Agent '{}' running with tools: {}]",
+            "[Agent '{}' (depth {}/{}) running with tools: {}]",
             self.agent.name(),
-            self.agent_tools.names().join(", ")
+            self.current_depth,
+            self.max_depth,
+            agent_tools.names().join(", ")
         );
 
         let config = AgentConfig::new(self.agent.name())
@@ -104,7 +143,7 @@ impl Tool for InternalAgentTool {
 
         match Agent::run_once(
             Arc::clone(&self.provider),
-            Arc::clone(&self.agent_tools),
+            agent_tools,
             config,
             context,
         ).await {
@@ -122,30 +161,43 @@ pub struct ExternalAgentTool {
     agent_name: String,
     /// Agent definition from config
     definition: AgentDefinition,
-    /// Tools available to this agent (subset, no agent tools)
-    agent_tools: Arc<ToolRegistry>,
+    /// Base tools (filesystem, memory, web) - used to build agent's tool set
+    base_tools: Arc<ToolRegistry>,
     /// Provider for LLM calls
     provider: Arc<dyn Provider>,
+    /// External agents config (for creating nested agent tools)
+    external_agents: AgentsConfig,
+    /// Enabled agents filter
+    enabled_agents: Option<Vec<String>>,
+    /// Current nesting depth
+    current_depth: u32,
+    /// Maximum allowed depth
+    max_depth: u32,
 }
 
 impl ExternalAgentTool {
     pub fn new(
         name: &str,
         definition: AgentDefinition,
-        all_tools: &ToolRegistry,
+        base_tools: &ToolRegistry,
         provider: Arc<dyn Provider>,
+        external_agents: AgentsConfig,
+        enabled_agents: Option<Vec<String>>,
+        current_depth: u32,
+        max_depth: u32,
     ) -> Self {
         let tool_name = format!("ask_{}", name);
-
-        // Create tool subset with ONLY the agent's specified tools
-        let agent_tools = Arc::new(all_tools.subset(&definition.tools));
 
         Self {
             tool_name,
             agent_name: name.to_string(),
             definition,
-            agent_tools,
+            base_tools: Arc::new(base_tools.clone()),
             provider,
+            external_agents,
+            enabled_agents,
+            current_depth,
+            max_depth,
         }
     }
 }
@@ -175,11 +227,34 @@ impl Tool for ExternalAgentTool {
         let args: AgentArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool(&self.tool_name, format!("Invalid arguments: {}", e)))?;
 
-        // Show agent execution start (always visible)
+        // Build tools for this agent: start with base tools it needs
+        let mut agent_tools = self.base_tools.subset(&self.definition.tools);
+
+        // If not at max depth, add agent tools so this agent can call other agents
+        let next_depth = self.current_depth + 1;
+        if next_depth < self.max_depth {
+            let nested_agent_tools = create_agent_tools(
+                &self.base_tools,
+                Arc::clone(&self.provider),
+                &self.external_agents,
+                &self.enabled_agents,
+                next_depth,
+                self.max_depth,
+            );
+            for tool in nested_agent_tools {
+                agent_tools.register(tool);
+            }
+        }
+
+        let agent_tools = Arc::new(agent_tools);
+
+        // Show agent execution start with depth info
         eprintln!(
-            "[Agent '{}' running with tools: {}]",
+            "[Agent '{}' (depth {}/{}) running with tools: {}]",
             self.agent_name,
-            self.agent_tools.names().join(", ")
+            self.current_depth,
+            self.max_depth,
+            agent_tools.names().join(", ")
         );
 
         let config = AgentConfig::new(self.agent_name.as_str())
@@ -191,7 +266,7 @@ impl Tool for ExternalAgentTool {
 
         match Agent::run_once(
             Arc::clone(&self.provider),
-            Arc::clone(&self.agent_tools),
+            agent_tools,
             config,
             context,
         ).await {
@@ -204,12 +279,21 @@ impl Tool for ExternalAgentTool {
 /// Create agent tools for all enabled agents.
 ///
 /// Returns a vector of tools that can be registered with the main tool registry.
-/// The `base_tools` should NOT include any agent tools to prevent recursion.
+///
+/// # Arguments
+/// * `base_tools` - Base tools (filesystem, memory, web) available to agents
+/// * `provider` - LLM provider for agent calls
+/// * `external_agents` - External agent definitions from config
+/// * `enabled_agents` - Filter for which agents are enabled (None = all)
+/// * `current_depth` - Current nesting depth (0 = top level)
+/// * `max_depth` - Maximum allowed nesting depth
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
     provider: Arc<dyn Provider>,
-    external_agents: &crate::config::AgentsConfig,
+    external_agents: &AgentsConfig,
     enabled_agents: &Option<Vec<String>>,
+    current_depth: u32,
+    max_depth: u32,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -230,6 +314,10 @@ pub fn create_agent_tools(
                 agent,
                 base_tools,
                 Arc::clone(&provider),
+                external_agents.clone(),
+                enabled_agents.clone(),
+                current_depth,
+                max_depth,
             )));
         }
     }
@@ -242,6 +330,10 @@ pub fn create_agent_tools(
                 def.clone(),
                 base_tools,
                 Arc::clone(&provider),
+                external_agents.clone(),
+                enabled_agents.clone(),
+                current_depth,
+                max_depth,
             )));
         }
     }
