@@ -8,6 +8,7 @@ use qq_providers::openai::OpenAIProvider;
 
 mod chat;
 mod config;
+mod markdown;
 
 use config::{expand_path, Config};
 

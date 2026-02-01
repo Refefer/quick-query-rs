@@ -7,8 +7,6 @@ use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
 
-use std::io::{self, Write};
-
 use futures::StreamExt;
 
 use qq_core::{
@@ -17,6 +15,7 @@ use qq_core::{
 };
 
 use crate::config::Config as AppConfig;
+use crate::markdown::MarkdownRenderer;
 use crate::Cli;
 
 /// Chat session state
@@ -287,24 +286,19 @@ async fn run_completion(
         // Stream the response
         let mut stream = provider.stream(request).await?;
 
-        // Collect response while streaming
-        let mut content = String::new();
+        // Set up markdown renderer for streaming output
+        let mut renderer = MarkdownRenderer::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None; // (id, name, arguments)
-        let mut printed_prefix = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk? {
                 StreamChunk::Start { .. } => {}
                 StreamChunk::Delta { content: delta } => {
-                    if !printed_prefix {
-                        print!("assistant> ");
-                        let _ = io::stdout().flush();
-                        printed_prefix = true;
+                    if renderer.is_empty() && !delta.trim().is_empty() {
+                        renderer.print_prefix()?;
                     }
-                    print!("{}", delta);
-                    let _ = io::stdout().flush();
-                    content.push_str(&delta);
+                    renderer.push(&delta)?;
                 }
                 StreamChunk::ToolCallStart { id, name } => {
                     // Finish any pending tool call
@@ -345,9 +339,11 @@ async fn run_completion(
             }
         }
 
+        let content = renderer.content().to_string();
+
         // Handle tool calls if any
         if !tool_calls.is_empty() {
-            if printed_prefix {
+            if !renderer.is_empty() {
                 println!(); // Newline after any content
             }
 
@@ -382,9 +378,7 @@ async fn run_completion(
         }
 
         // No tool calls - finish up
-        if printed_prefix {
-            println!("\n"); // Newlines after content
-        }
+        renderer.finish()?;
         session.add_assistant_message(&content);
 
         return Ok(());

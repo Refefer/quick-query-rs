@@ -44,7 +44,8 @@ async-trait = "0.1"
 
 # Terminal/readline
 rustyline = "14.0"
-crossterm = "0.28"
+crossterm = "0.29"
+termimad = "0.30"
 
 # Internal crates
 qq-core = { path = "crates/qq-core" }
