@@ -460,7 +460,7 @@ pub async fn run_chat(
                                 println!("\nAvailable agents (LLM can use these automatically as tools):");
                                 for agent in agents {
                                     let type_marker = if agent.is_internal { "(built-in)" } else { "(external)" };
-                                    println!("  ask_{} {} - {}", agent.name, type_marker, agent.description);
+                                    println!("  Agent[{}] {} - {}", agent.name, type_marker, agent.description);
                                     if !agent.tools.is_empty() {
                                         println!("    Agent tools: {}", agent.tools.join(", "));
                                     }

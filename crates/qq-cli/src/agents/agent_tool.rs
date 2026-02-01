@@ -1,6 +1,6 @@
 //! Agent tools that expose agents as callable tools for the LLM.
 //!
-//! Each agent becomes a tool (e.g., `ask_researcher`, `ask_explore`) that
+//! Each agent becomes a tool (e.g., `Agent[researcher]`, `Agent[explore]`) that
 //! the LLM can invoke. Agents can call other agents up to a maximum depth,
 //! after which they only have access to base tools.
 
@@ -21,7 +21,7 @@ pub const DEFAULT_MAX_AGENT_DEPTH: u32 = 3;
 
 /// A tool that wraps an internal agent.
 pub struct InternalAgentTool {
-    /// Tool name (e.g., "ask_researcher")
+    /// Tool name (e.g., "Agent[researcher]")
     tool_name: String,
     /// The internal agent
     agent: Box<dyn InternalAgent>,
@@ -52,7 +52,7 @@ impl InternalAgentTool {
         max_depth: u32,
         execution_context: Option<ExecutionContext>,
     ) -> Self {
-        let tool_name = format!("ask_{}", agent.name());
+        let tool_name = format!("Agent[{}]", agent.name());
 
         Self {
             tool_name,
@@ -65,6 +65,11 @@ impl InternalAgentTool {
             max_depth,
             execution_context,
         }
+    }
+
+    /// Get the agent name without the wrapper (for display purposes)
+    pub fn agent_name(&self) -> &str {
+        self.agent.name()
     }
 }
 
@@ -164,7 +169,7 @@ impl Tool for InternalAgentTool {
 
 /// A tool that wraps an external (config-defined) agent.
 pub struct ExternalAgentTool {
-    /// Tool name (e.g., "ask_doc_researcher")
+    /// Tool name (e.g., "Agent[doc_researcher]")
     tool_name: String,
     /// Agent name
     agent_name: String,
@@ -198,7 +203,7 @@ impl ExternalAgentTool {
         max_depth: u32,
         execution_context: Option<ExecutionContext>,
     ) -> Self {
-        let tool_name = format!("ask_{}", name);
+        let tool_name = format!("Agent[{}]", name);
 
         Self {
             tool_name,
@@ -212,6 +217,11 @@ impl ExternalAgentTool {
             max_depth,
             execution_context,
         }
+    }
+
+    /// Get the agent name without the wrapper (for display purposes)
+    pub fn agent_name(&self) -> &str {
+        &self.agent_name
     }
 }
 

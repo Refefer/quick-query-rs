@@ -691,7 +691,7 @@ fn format_agents_list(executor: &AgentExecutor) -> String {
             "(external)"
         };
         output.push_str(&format!(
-            "  ask_{} {} - {}\n",
+            "  Agent[{}] {} - {}\n",
             agent.name, type_marker, agent.description
         ));
     }
