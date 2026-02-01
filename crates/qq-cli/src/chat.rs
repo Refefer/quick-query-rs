@@ -7,7 +7,7 @@ use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
 
-use qq_core::{CompletionRequest, Message, Provider, ToolCall, ToolRegistry};
+use qq_core::{execute_tools_parallel, CompletionRequest, Message, Provider, ToolRegistry};
 
 use crate::config::Config as AppConfig;
 use crate::Cli;
@@ -290,25 +290,28 @@ async fn run_completion(
             // Add to session
             session.add_assistant_with_tools(response.message.clone());
 
-            // Execute tools
+            // Execute tools in parallel
             let tool_calls = response.message.tool_calls.clone();
-            for tool_call in tool_calls {
-                if cli.debug {
+
+            if cli.debug {
+                for tool_call in &tool_calls {
                     eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
                 }
+            }
 
-                let result = execute_tool_call(tools_registry, &tool_call).await;
+            let results = execute_tools_parallel(tools_registry, tool_calls).await;
 
+            for result in results {
                 if cli.debug {
-                    let preview = if result.len() > 100 {
-                        format!("{}...", &result[..100])
+                    let preview = if result.content.len() > 100 {
+                        format!("{}...", &result.content[..100])
                     } else {
-                        result.clone()
+                        result.content.clone()
                     };
                     eprintln!("[result] {}", preview);
                 }
 
-                session.add_tool_result(&tool_call.id, &result);
+                session.add_tool_result(&result.tool_call_id, &result.content);
             }
 
             // Continue to get next response
@@ -334,23 +337,6 @@ async fn run_completion(
 
     eprintln!("Warning: Max iterations ({}) reached", max_iterations);
     Ok(())
-}
-
-async fn execute_tool_call(registry: &ToolRegistry, tool_call: &ToolCall) -> String {
-    let Some(tool) = registry.get(&tool_call.name) else {
-        return format!("Error: Unknown tool '{}'", tool_call.name);
-    };
-
-    match tool.execute(tool_call.arguments.clone()).await {
-        Ok(output) => {
-            if output.is_error {
-                format!("Error: {}", output.content)
-            } else {
-                output.content
-            }
-        }
-        Err(e) => format!("Error executing tool: {}", e),
-    }
 }
 
 fn get_history_path() -> Option<PathBuf> {
