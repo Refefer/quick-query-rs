@@ -224,19 +224,26 @@ fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Lin
 
     // Split by | and render each cell
     let parts: Vec<&str> = line.split('|').collect();
+    let mut is_first_content = true;
 
     for (i, part) in parts.iter().enumerate() {
-        // Skip empty parts at start/end from leading/trailing |
-        if (i == 0 || i == parts.len() - 1) && part.trim().is_empty() {
-            if i == 0 {
-                spans.push(Span::styled("│", styles.table_border));
-            }
+        // Handle leading empty part (from leading |)
+        if i == 0 && part.trim().is_empty() {
+            spans.push(Span::styled("│", styles.table_border));
             continue;
         }
 
-        if i > 0 {
+        // Handle trailing empty part (from trailing |)
+        if i == parts.len() - 1 && part.trim().is_empty() {
+            spans.push(Span::styled("│", styles.table_border));
+            continue;
+        }
+
+        // Add separator before content cells (except the first one)
+        if !is_first_content {
             spans.push(Span::styled("│", styles.table_border));
         }
+        is_first_content = false;
 
         // Preserve the original spacing/padding in the cell
         let cell_content = part.trim();
@@ -263,11 +270,6 @@ fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Lin
         if padding_right > 0 {
             spans.push(Span::styled(" ".repeat(padding_right), styles.normal));
         }
-    }
-
-    // Close the row with │ if the original had trailing |
-    if line.trim().ends_with('|') && !spans.is_empty() {
-        spans.push(Span::styled("│", styles.table_border));
     }
 
     Line::from(spans)
@@ -488,5 +490,8 @@ mod tests {
         assert!(rendered.contains('│'), "Should contain │, got: {}", rendered);
         assert!(rendered.contains("Header 1"), "Should contain Header 1, got: {}", rendered);
         assert!(rendered.contains("Header 2"), "Should contain Header 2, got: {}", rendered);
+        // Verify no double separators at the start
+        assert!(!rendered.starts_with("││"), "Should not start with ││, got: {}", rendered);
+        assert!(!rendered.contains("││"), "Should not have double ││, got: {}", rendered);
     }
 }
