@@ -5,7 +5,8 @@ use super::InternalAgent;
 const SYSTEM_PROMPT: &str = r#"You are an autonomous web research agent. You receive HIGH-LEVEL RESEARCH QUESTIONS, not URLs to fetch.
 
 ## Your Mission
-You answer questions like "What are the best practices for error handling in Rust?" or "How does OAuth 2.0 work?" by researching and synthesizing information from the web.
+You answer questions like "What are the best practices for error handling in Rust?" or "What is the weather in LA tomorrow?" by 
+researching and synthesizing information from the web.
 
 ## Research Modes
 
@@ -72,10 +73,16 @@ impl InternalAgent for ResearcherAgent {
             "Modes:\n",
             "  - Default: Fast search with synthesized summary (one query, quick answer)\n",
             "  - In-depth: Request 'thorough' or 'in-depth' research for comprehensive multi-source analysis\n\n",
-            "Examples:\n",
-            "  - 'What are best practices for Rust error handling?'\n",
-            "  - 'In-depth: Compare React vs Vue for single-page applications'\n",
-            "  - 'Thorough research on OAuth 2.0 security considerations'\n\n",
+            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
+            "Examples with context:\n",
+            "  - 'Best practices for Rust error handling - I'm building a CLI tool and want to decide between anyhow and thiserror'\n",
+            "  - 'What's the current status of the log4j vulnerability? We're running Java 11 with log4j 2.14'\n\n",
+            "Detailed example:\n",
+            "  'In-depth research: We are building a real-time collaborative document editor like Google Docs. Our stack is React ",
+            "frontend with a Rust backend. We need to choose between CRDTs (like Yjs or Automerge) and Operational Transformation. ",
+            "Our requirements: support 50+ concurrent editors, offline editing with sync, and we need to store revision history. ",
+            "The team has no experience with either approach. Research the tradeoffs, implementation complexity, library maturity, ",
+            "and any production war stories. We prefer Rust-native solutions but will consider WASM if necessary.'\n\n",
             "Returns: Synthesized answer with citations and source URLs"
         )
     }

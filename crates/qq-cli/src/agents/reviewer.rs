@@ -63,11 +63,17 @@ impl InternalAgent for ReviewerAgent {
         concat!(
             "Autonomous code review agent that analyzes code for bugs, security issues, performance problems, and maintainability concerns.\n\n",
             "Use when you need: code reviewed before merging, security audit, bug hunting, performance analysis, or quality assessment.\n\n",
-            "Examples:\n",
-            "  - 'Review src/auth.rs for security issues'\n",
-            "  - 'Check this function for potential bugs'\n",
-            "  - 'Review the new payment module before we ship'\n",
-            "  - 'Analyze this code for performance bottlenecks'\n\n",
+            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
+            "Examples with context:\n",
+            "  - 'Review src/auth.rs for security issues - this handles JWT validation and session management'\n",
+            "  - 'Check the parse_config function in src/config.rs - users are reporting crashes with malformed TOML'\n\n",
+            "Detailed example:\n",
+            "  'Security review of src/api/upload.rs before we go to production. This handles user file uploads for profile ",
+            "pictures and document attachments. Files are stored in S3 with presigned URLs. Concerns: we had a path traversal ",
+            "bug in the old PHP codebase so watch for that. Also check for: filename sanitization, content-type validation ",
+            "(users should only upload images and PDFs), file size limits (should be 10MB max), and make sure we are not ",
+            "vulnerable to zip bombs or XML external entity attacks if users upload those formats. The upload endpoint is ",
+            "public (authenticated users only) and we expect ~1000 uploads/day. Check that error messages do not leak internal paths.'\n\n",
             "Returns: Structured feedback grouped by severity (critical/important/moderate/minor) with specific file:line references and suggested fixes"
         )
     }

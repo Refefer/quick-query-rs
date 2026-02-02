@@ -63,11 +63,17 @@ impl InternalAgent for CoderAgent {
         concat!(
             "Autonomous coding agent that implements features, fixes bugs, and modifies code by understanding context and following existing patterns.\n\n",
             "Use when you need: new features implemented, bugs fixed, code refactored, files created, or existing code modified.\n\n",
-            "Examples:\n",
-            "  - 'Add input validation to the login form'\n",
-            "  - 'Implement a retry mechanism for API calls'\n",
-            "  - 'Refactor the config module to support multiple profiles'\n",
-            "  - 'Create a new REST endpoint for user settings'\n\n",
+            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
+            "Examples with context:\n",
+            "  - 'Add input validation to src/components/LoginForm.tsx - email must be valid format, password min 8 chars'\n",
+            "  - 'Implement retry with exponential backoff in src/api/client.rs - max 3 retries, start at 100ms'\n\n",
+            "Detailed example:\n",
+            "  'Implement a caching layer for our API client in src/api/. We make repeated calls to /users/:id and /products/:id ",
+            "that rarely change. Add an in-memory LRU cache with configurable max size (default 1000 entries) and TTL (default 5 ",
+            "minutes). Cache keys should be the full URL including query params. Respect Cache-Control headers from responses - ",
+            "honor max-age and no-store directives. Add a way to manually invalidate specific keys or clear the whole cache. ",
+            "The existing code uses reqwest and tokio. Make sure the cache is thread-safe. Add cache hit/miss metrics that ",
+            "integrate with our existing metrics in src/telemetry.rs which uses the metrics crate.'\n\n",
             "Returns: Confirmation of changes with list of modified files and any design decisions made"
         )
     }
