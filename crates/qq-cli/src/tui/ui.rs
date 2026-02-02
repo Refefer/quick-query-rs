@@ -91,6 +91,23 @@ struct LayoutRegions {
     input: Rect,
 }
 
+/// Calculate the height needed for the input area based on text wrapping
+fn calculate_input_height(input_text: &str, available_width: u16) -> u16 {
+    let prompt_len = 5; // "you> "
+    let text_width = available_width.saturating_sub(prompt_len) as usize;
+
+    if text_width == 0 || input_text.is_empty() {
+        return 3; // Minimum: 1 border + 1 input line + 1 hint line
+    }
+
+    // Calculate wrapped line count
+    let wrapped_lines = (input_text.len() + text_width - 1) / text_width;
+
+    // 1 for border + wrapped lines + 1 for hint, max 10 lines total
+    let height = (1 + wrapped_lines + 1) as u16;
+    height.clamp(3, 10)
+}
+
 /// Create layout based on current app state
 fn create_layout(area: Rect, app: &TuiApp) -> LayoutRegions {
     let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
@@ -126,8 +143,9 @@ fn create_layout(area: Rect, app: &TuiApp) -> LayoutRegions {
         constraints.push(Constraint::Length(tools_height));
     }
 
-    // Input area
-    constraints.push(Constraint::Length(3));
+    // Input area - dynamic height based on text length
+    let input_height = calculate_input_height(app.input.value(), area.width);
+    constraints.push(Constraint::Length(input_height));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)

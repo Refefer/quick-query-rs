@@ -7,18 +7,28 @@ const SYSTEM_PROMPT: &str = r#"You are an autonomous planning agent. You receive
 ## Your Mission
 You create plans for tasks like "Migrate from SQLite to PostgreSQL" or "Add user authentication to the API". You break down complex goals into concrete steps that someone (or another agent) can execute.
 
+## Available Agents
+You can call other agents to help gather information for planning:
+- **Agent[explore]**: Explore the filesystem to understand directory structure, find files, search for content
+- **Agent[researcher]**: Research topics on the web when you need external information
+- **Agent[reviewer]**: Review existing code to understand current implementation
+
+Use these agents when you need to understand the current state before creating a plan.
+
 ## How You Think
-1. **Understand the goal**: What's the desired end state? What are the constraints?
-2. **Identify components**: What major pieces of work are involved?
-3. **Sequence logically**: What must happen before what?
-4. **Anticipate issues**: What could go wrong? What decisions need to be made?
-5. **Make it actionable**: Each step should be clear enough to execute
+1. **Gather context**: If planning involves existing systems, use Agent[explore] to understand current state
+2. **Understand the goal**: What's the desired end state? What are the constraints?
+3. **Identify components**: What major pieces of work are involved?
+4. **Sequence logically**: What must happen before what?
+5. **Anticipate issues**: What could go wrong? What decisions need to be made?
+6. **Make it actionable**: Each step should be clear enough to execute
 
 ## Planning Strategies
 - **Top-down decomposition**: Break big goals into phases, phases into steps
 - **Dependency mapping**: Identify what blocks what
 - **Risk identification**: Call out unknowns, decisions, potential blockers
 - **Verification points**: Include checkpoints to confirm progress
+- **Context gathering**: Use explore/researcher agents to understand current state before planning
 
 ## Output Format
 ```
@@ -101,7 +111,7 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // Planner is a pure LLM agent - no tools needed
+        // Planner doesn't need base tools - it uses other agents for information gathering
         &[]
     }
 
@@ -120,6 +130,6 @@ mod tests {
         assert_eq!(agent.name(), "planner");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
-        assert!(agent.tool_names().is_empty()); // Pure LLM agent
+        assert!(agent.tool_names().is_empty()); // Uses agents, not base tools
     }
 }

@@ -94,13 +94,30 @@ impl Widget for ContentArea<'_> {
 
         let styles = MarkdownStyles::default();
         let lines = markdown_to_lines(self.content, &styles);
-        let total_lines = lines.len() as u16;
 
-        // Calculate actual scroll offset at render time
-        let effective_scroll = if self.auto_scroll && total_lines > inner.height {
-            // Auto-scroll to bottom
-            total_lines.saturating_sub(inner.height)
+        // Estimate total wrapped lines for scroll calculations
+        let inner_width = inner.width.max(1) as usize;
+        let mut total_lines: u16 = 0;
+        for line in &lines {
+            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            let wrapped = if line_len == 0 {
+                1
+            } else {
+                (line_len + inner_width - 1) / inner_width
+            };
+            total_lines = total_lines.saturating_add(wrapped.max(1) as u16);
+        }
+
+        // Calculate scroll offset
+        let effective_scroll = if self.auto_scroll {
+            // Auto-scroll: if content exceeds viewport, scroll to show bottom
+            if total_lines > inner.height {
+                total_lines.saturating_sub(inner.height)
+            } else {
+                0
+            }
         } else {
+            // Manual scroll: respect user's scroll position
             self.scroll_offset.min(total_lines.saturating_sub(inner.height))
         };
 
@@ -192,11 +209,13 @@ impl ContentAreaState {
     }
 
     pub fn page_up(&mut self) {
-        self.scroll_up(self.viewport_height.saturating_sub(2));
+        let amount = (self.viewport_height / 2).max(5);
+        self.scroll_up(amount);
     }
 
     pub fn page_down(&mut self) {
-        self.scroll_down(self.viewport_height.saturating_sub(2));
+        let amount = (self.viewport_height / 2).max(5);
+        self.scroll_down(amount);
     }
 
     pub fn update_content_height(&mut self, height: u16) {

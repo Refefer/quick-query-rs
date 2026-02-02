@@ -123,13 +123,39 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Set up logging
+    // Determine if TUI mode will be used (needed for logging configuration)
+    let will_use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout)
+        && cli.prompt.is_none(); // TUI only for chat mode, not completion mode
+
+    // Set up logging - suppress stderr in TUI mode to avoid corrupting display
     let filter = if cli.debug {
         EnvFilter::new("debug")
     } else {
         EnvFilter::new("warn")
     };
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    if will_use_tui && cli.debug_file.is_none() {
+        // TUI mode without debug file: suppress all tracing output
+        // Use a sink that discards everything
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::sink)
+            .init();
+    } else if let Some(ref debug_file) = cli.debug_file {
+        // Debug file specified: write to file
+        let file = std::fs::File::create(debug_file)
+            .with_context(|| format!("Failed to create debug file: {:?}", debug_file))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .init();
+    } else {
+        // Non-TUI mode: write to stderr as normal
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .init();
+    }
 
     // Load configuration
     let config = Config::load()?;

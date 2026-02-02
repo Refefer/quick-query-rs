@@ -52,12 +52,10 @@ impl Widget for InputArea<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Calculate positions
-        let prompt_len = self.prompt.len() as u16;
+        let prompt_len = self.prompt.len();
         let input_value = self.input.value();
         let cursor_pos = self.input.visual_cursor();
 
-        // Build the line with prompt and input
         let prompt_style = if self.is_active {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else {
@@ -66,38 +64,81 @@ impl Widget for InputArea<'_> {
 
         let input_style = Style::default().fg(Color::White);
 
-        // Calculate visible portion of input (handle overflow)
-        let available_width = inner.width.saturating_sub(prompt_len) as usize;
-        let (visible_input, cursor_offset) = if cursor_pos >= available_width {
-            // Cursor would be off screen, scroll input
-            let start = cursor_pos.saturating_sub(available_width / 2);
-            let end = (start + available_width).min(input_value.len());
-            (&input_value[start..end], cursor_pos - start)
-        } else {
-            let end = available_width.min(input_value.len());
-            (&input_value[..end], cursor_pos)
-        };
+        // Calculate available width for text after prompt (only on first line)
+        let first_line_width = inner.width.saturating_sub(prompt_len as u16) as usize;
+        let full_line_width = inner.width as usize;
 
-        let spans = vec![
-            Span::styled(self.prompt, prompt_style),
-            Span::styled(visible_input, input_style),
-        ];
+        if first_line_width == 0 || full_line_width == 0 {
+            return;
+        }
 
-        let paragraph = Paragraph::new(Line::from(spans));
-        paragraph.render(inner, buf);
+        // Split input into wrapped lines
+        let mut lines: Vec<Line> = Vec::new();
+        let mut remaining = input_value;
+        let mut is_first_line = true;
+
+        while !remaining.is_empty() || is_first_line {
+            let line_width = if is_first_line { first_line_width } else { full_line_width };
+
+            let (line_text, rest) = if remaining.len() <= line_width {
+                (remaining, "")
+            } else {
+                remaining.split_at(line_width)
+            };
+
+            if is_first_line {
+                lines.push(Line::from(vec![
+                    Span::styled(self.prompt, prompt_style),
+                    Span::styled(line_text.to_string(), input_style),
+                ]));
+                is_first_line = false;
+            } else {
+                lines.push(Line::from(Span::styled(line_text.to_string(), input_style)));
+            }
+
+            remaining = rest;
+
+            // Safety: break if we've rendered enough lines for the area
+            if lines.len() >= inner.height.saturating_sub(1) as usize {
+                break;
+            }
+        }
+
+        // Handle empty input case
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(self.prompt, prompt_style)));
+        }
+
+        // Calculate how many lines we have for input (reserve 1 for hint)
+        let input_lines_available = inner.height.saturating_sub(1) as usize;
+        let input_lines_count = lines.len().min(input_lines_available);
+
+        // Render input lines
+        for (i, line) in lines.iter().take(input_lines_count).enumerate() {
+            let y = inner.y + i as u16;
+            if y < inner.bottom() {
+                buf.set_line(inner.x, y, line, inner.width);
+            }
+        }
 
         // Draw cursor if active
         if self.is_active {
-            let cursor_x = inner.x + prompt_len + cursor_offset as u16;
-            let cursor_y = inner.y;
+            // Calculate cursor position accounting for wrapped lines
+            let (cursor_line, cursor_col) = if cursor_pos <= first_line_width {
+                (0, prompt_len + cursor_pos)
+            } else {
+                let pos_after_first = cursor_pos - first_line_width;
+                let line_num = 1 + pos_after_first / full_line_width;
+                let col = pos_after_first % full_line_width;
+                (line_num, col)
+            };
 
-            if cursor_x < inner.right() {
+            let cursor_y = inner.y + cursor_line as u16;
+            let cursor_x = inner.x + cursor_col as u16;
+
+            if cursor_y < inner.bottom().saturating_sub(1) && cursor_x < inner.right() {
                 // Get the character at cursor position or use space
-                let cursor_char = if cursor_offset < visible_input.len() {
-                    visible_input.chars().nth(cursor_offset).unwrap_or(' ')
-                } else {
-                    ' '
-                };
+                let cursor_char = input_value.chars().nth(cursor_pos).unwrap_or(' ');
 
                 buf.set_string(
                     cursor_x,
@@ -110,10 +151,10 @@ impl Widget for InputArea<'_> {
             }
         }
 
-        // Render hint line below input if there's space
+        // Render hint line at the bottom
         if let Some(hint) = self.hint {
-            if inner.height > 1 {
-                let hint_y = inner.y + 1;
+            let hint_y = inner.y + inner.height.saturating_sub(1);
+            if hint_y < inner.bottom() && hint_y > inner.y {
                 buf.set_string(
                     inner.x,
                     hint_y,

@@ -435,14 +435,16 @@ impl TuiApp {
         }
     }
 
-    /// Page up
+    /// Page up - scroll by half viewport to maintain context
     pub fn page_up(&mut self) {
-        self.scroll_up(self.viewport_height.saturating_sub(2));
+        let amount = (self.viewport_height / 2).max(5);
+        self.scroll_up(amount);
     }
 
-    /// Page down
+    /// Page down - scroll by half viewport to maintain context
     pub fn page_down(&mut self) {
-        self.scroll_down(self.viewport_height.saturating_sub(2));
+        let amount = (self.viewport_height / 2).max(5);
+        self.scroll_down(amount);
     }
 
     /// Scroll to top
