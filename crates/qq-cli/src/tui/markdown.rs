@@ -6,6 +6,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use unicode_width::UnicodeWidthStr;
 
 /// Style configuration for markdown elements
 pub struct MarkdownStyles {
@@ -44,18 +45,32 @@ impl Default for MarkdownStyles {
     }
 }
 
+/// A buffered table row for column width calculation
+#[derive(Debug)]
+struct TableRow {
+    cells: Vec<String>,
+    is_separator: bool,
+    is_header: bool,
+}
+
 /// Convert markdown text to styled Lines for ratatui.
 /// This is a simplified parser that handles common inline elements.
 pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
-    let mut in_table = false;
+    let mut table_buffer: Vec<TableRow> = Vec::new();
     let mut is_table_header = true;
 
     for line_text in text.lines() {
         if line_text.starts_with("```") {
+            // Flush any buffered table before code block
+            if !table_buffer.is_empty() {
+                lines.extend(render_buffered_table(&table_buffer, styles));
+                table_buffer.clear();
+                is_table_header = true;
+            }
+
             in_code_block = !in_code_block;
-            in_table = false;
             if in_code_block {
                 // Start of code block - optionally show language
                 let lang = line_text.trim_start_matches("```").trim();
@@ -78,26 +93,31 @@ pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'stati
             continue;
         }
 
-        // Check for table row (starts and ends with |, or contains | and looks like a table)
+        // Check for table row (starts with |)
         let trimmed = line_text.trim();
-        if trimmed.starts_with('|') || (in_table && trimmed.contains('|')) {
-            in_table = true;
-
+        if trimmed.starts_with('|') || (!table_buffer.is_empty() && trimmed.contains('|')) {
             // Check if this is a separator row (|---|---|)
             if is_table_separator(trimmed) {
-                // Render separator with box-drawing characters
-                lines.push(render_table_separator(trimmed, styles));
+                table_buffer.push(TableRow {
+                    cells: parse_table_cells(trimmed),
+                    is_separator: true,
+                    is_header: false,
+                });
                 is_table_header = false;
                 continue;
             }
 
-            // Parse table cells
-            let table_line = render_table_row(trimmed, styles, is_table_header);
-            lines.push(table_line);
+            // Regular table row
+            table_buffer.push(TableRow {
+                cells: parse_table_cells(trimmed),
+                is_separator: false,
+                is_header: is_table_header,
+            });
             continue;
-        } else if in_table {
-            // Exiting table
-            in_table = false;
+        } else if !table_buffer.is_empty() {
+            // Exiting table - render buffered table
+            lines.extend(render_buffered_table(&table_buffer, styles));
+            table_buffer.clear();
             is_table_header = true;
         }
 
@@ -158,12 +178,117 @@ pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'stati
         lines.push(Line::from(spans));
     }
 
-    // Handle trailing code block
-    if in_code_block {
-        // Unclosed code block - that's fine for streaming
+    // Flush any remaining buffered table
+    if !table_buffer.is_empty() {
+        lines.extend(render_buffered_table(&table_buffer, styles));
     }
 
     lines
+}
+
+/// Parse table cells from a row, stripping the leading/trailing |
+fn parse_table_cells(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    // Remove leading and trailing |
+    let inner = trimmed
+        .strip_prefix('|')
+        .unwrap_or(trimmed)
+        .strip_suffix('|')
+        .unwrap_or(trimmed);
+
+    inner
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
+}
+
+/// Render a buffered table with calculated column widths
+fn render_buffered_table(rows: &[TableRow], styles: &MarkdownStyles) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    // Calculate max width for each column (using unicode width)
+    let num_cols = rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+    let mut col_widths: Vec<usize> = vec![0; num_cols];
+
+    for row in rows {
+        if row.is_separator {
+            continue; // Don't count separator dashes in width calculation
+        }
+        for (i, cell) in row.cells.iter().enumerate() {
+            if i < col_widths.len() {
+                let width = UnicodeWidthStr::width(cell.as_str());
+                col_widths[i] = col_widths[i].max(width);
+            }
+        }
+    }
+
+    // Render each row with padded cells
+    let mut lines = Vec::new();
+    for row in rows {
+        if row.is_separator {
+            lines.push(render_separator_row(&col_widths, styles));
+        } else {
+            lines.push(render_data_row(&row.cells, &col_widths, row.is_header, styles));
+        }
+    }
+
+    lines
+}
+
+/// Render a separator row with proper column widths
+fn render_separator_row(col_widths: &[usize], styles: &MarkdownStyles) -> Line<'static> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled("|", styles.table_border));
+
+    for (i, &width) in col_widths.iter().enumerate() {
+        // Add padding (1 space each side) + dashes for content
+        let dashes = "-".repeat(width + 2);
+        spans.push(Span::styled(dashes, styles.table_border));
+        spans.push(Span::styled("|", styles.table_border));
+
+        // Don't add trailing separator after last column
+        if i == col_widths.len() - 1 {
+            break;
+        }
+    }
+
+    Line::from(spans)
+}
+
+/// Render a data row with padded cells
+fn render_data_row(
+    cells: &[String],
+    col_widths: &[usize],
+    is_header: bool,
+    styles: &MarkdownStyles,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let cell_style = if is_header {
+        styles.table_header
+    } else {
+        styles.normal
+    };
+
+    spans.push(Span::styled("|", styles.table_border));
+
+    for (i, width) in col_widths.iter().enumerate() {
+        let cell_content = cells.get(i).map(|s| s.as_str()).unwrap_or("");
+        let cell_width = UnicodeWidthStr::width(cell_content);
+        let padding = width.saturating_sub(cell_width);
+
+        // Add space, content, padding, space
+        spans.push(Span::styled(" ", styles.normal));
+        spans.push(Span::styled(cell_content.to_string(), cell_style));
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), styles.normal));
+        }
+        spans.push(Span::styled(" ", styles.normal));
+        spans.push(Span::styled("|", styles.table_border));
+    }
+
+    Line::from(spans)
 }
 
 /// Check if a line is a table separator (e.g., |---|---|)
@@ -177,54 +302,6 @@ fn is_table_separator(line: &str) -> bool {
         && trimmed.contains('-')
 }
 
-/// Render a table separator row - just style it dimmed
-fn render_table_separator(line: &str, styles: &MarkdownStyles) -> Line<'static> {
-    // Keep the original separator line, just style it
-    Line::from(Span::styled(line.to_string(), styles.table_border))
-}
-
-/// Render a table row with styled cells
-fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Line<'static> {
-    let mut spans = Vec::new();
-    let cell_style = if is_header {
-        styles.table_header
-    } else {
-        styles.normal
-    };
-
-    // Split by | and render each cell, keeping original | characters
-    let mut last_end = 0;
-    for (i, _) in line.match_indices('|') {
-        // Add content before this |
-        if i > last_end {
-            let content = &line[last_end..i];
-            let cell_spans = style_inline(content, styles);
-            for mut span in cell_spans {
-                if is_header {
-                    span.style = cell_style;
-                }
-                spans.push(span);
-            }
-        }
-        // Add the | character with border styling
-        spans.push(Span::styled("|", styles.table_border));
-        last_end = i + 1;
-    }
-
-    // Add any remaining content after the last |
-    if last_end < line.len() {
-        let content = &line[last_end..];
-        let cell_spans = style_inline(content, styles);
-        for mut span in cell_spans {
-            if is_header {
-                span.style = cell_style;
-            }
-            spans.push(span);
-        }
-    }
-
-    Line::from(spans)
-}
 
 /// Check if line starts with "N. " pattern
 fn parse_numbered_list(line: &str) -> Option<&str> {
@@ -417,24 +494,37 @@ mod tests {
     }
 
     #[test]
-    fn test_table_separator_rendering() {
+    fn test_table_column_alignment() {
         let styles = MarkdownStyles::default();
-        let line = render_table_separator("|----------|----------|", &styles);
+        // Table with varying cell widths
+        let text = "| ID | Name |\n|---|---|\n| 1 | Short |\n| 2 | Much longer name |";
+        let lines = markdown_to_lines(text, &styles);
 
-        // Should keep original separator, just styled
-        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(rendered, "|----------|----------|");
+        // All rows should have the same rendered width
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum()
+            })
+            .collect();
+
+        // All rows should be the same width
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "All rows should have same width, got: {:?}",
+            widths
+        );
     }
 
     #[test]
-    fn test_table_row_rendering() {
-        let styles = MarkdownStyles::default();
-        let line = render_table_row("| Header 1 | Header 2 |", &styles, true);
+    fn test_parse_table_cells() {
+        let cells = parse_table_cells("| Header 1 | Header 2 |");
+        assert_eq!(cells, vec!["Header 1", "Header 2"]);
 
-        // Should keep original | characters, just styled
-        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(rendered.contains('|'), "Should contain |, got: {}", rendered);
-        assert!(rendered.contains("Header 1"), "Should contain Header 1, got: {}", rendered);
-        assert!(rendered.contains("Header 2"), "Should contain Header 2, got: {}", rendered);
+        let cells = parse_table_cells("|---|---|");
+        assert_eq!(cells, vec!["---", "---"]);
     }
 }
