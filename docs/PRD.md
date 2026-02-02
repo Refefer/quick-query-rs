@@ -1,6 +1,6 @@
 # Quick-Query (qq) - Product Requirements Document
 
-**Version:** 0.2.0
+**Version:** 0.1.0
 **Last Updated:** February 2026
 
 ## Overview
@@ -24,12 +24,15 @@ A minimal yet powerful CLI that makes LLM interactions feel native to the termin
 quick-query-rs/
 ├── crates/
 │   ├── qq-core/       # Core types, traits, and infrastructure
-│   ├── qq-cli/        # Command-line interface
+│   ├── qq-cli/        # Command-line interface and TUI
 │   ├── qq-providers/  # LLM provider implementations
-│   └── qq-tools/      # Built-in tools for agentic workflows
+│   ├── qq-tools/      # Built-in tools for agentic workflows
+│   └── qq-agents/     # Agent definitions and implementations
 ├── examples/          # Configuration examples
 └── docs/              # Documentation
 ```
+
+For detailed architecture information, see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ### Core Components
 
@@ -40,14 +43,17 @@ Foundation types and traits:
 - **Tools**: `Tool` trait, `ToolRegistry`, `ToolDefinition`, JSON schema parameters
 - **Tasks**: `TaskManager`, `TaskHandle`, parallel execution helpers
 - **Agents**: `Agent`, `AgentChannel`, `AgentRegistry`, inter-agent communication
+- **Chunker**: `ChunkProcessor` for handling large tool outputs
 - **Errors**: Typed error handling with `Error` enum
 
 #### qq-cli
 User-facing command-line interface:
 - **Commands**: `chat`, `profiles`, `config`
+- **TUI Mode**: Rich terminal interface with ratatui
 - **Chat Mode**: Interactive REPL with readline, history, streaming markdown
 - **Configuration**: TOML-based profiles, providers, prompts
-- **Markdown Rendering**: Real-time terminal markdown with termimad
+- **Agent Executor**: Manual agent invocation and delegation
+- **Event Bus**: Agent progress reporting for TUI
 
 #### qq-providers
 LLM provider implementations:
@@ -58,7 +64,19 @@ LLM provider implementations:
 Built-in tools for agentic workflows:
 - **Filesystem**: `read_file`, `write_file`, `list_files`, `search_files`
 - **Memory**: `memory_store`, `memory_get`, `memory_list`, `memory_delete` (SQLite-backed)
-- **Web**: `fetch_url` (HTML to text extraction)
+- **Web**: `fetch_webpage`, `web_search` (with optional Perplexica integration)
+- **Processing**: `process_large_data` for chunking and summarization
+
+#### qq-agents
+Agent definitions and implementations:
+- **ChatAgent**: Interactive coordinator with delegation
+- **ExploreAgent**: Filesystem exploration and discovery
+- **ResearcherAgent**: Web research and synthesis (fast/in-depth modes)
+- **CoderAgent**: Autonomous code generation
+- **ReviewerAgent**: Code review with severity categorization
+- **SummarizerAgent**: Content summarization with format adaptation
+- **PlannerAgent**: Task decomposition and planning
+- **WriterAgent**: Documentation and content creation
 
 ## Features
 
@@ -67,10 +85,13 @@ Built-in tools for agentic workflows:
 #### CLI Interface
 - [x] One-shot completion mode (`qq -p "prompt"`)
 - [x] Interactive chat mode (`qq chat`)
+- [x] TUI mode with ratatui for rich terminal interface
+- [x] Legacy readline mode (`--no-tui`)
 - [x] Profile management (`qq profiles`)
 - [x] Configuration display (`qq config`)
 - [x] Streaming output with markdown rendering
 - [x] Command history with readline
+- [x] Agent selection (`--agent`)
 
 #### Chat Commands
 - [x] `/help` - Show help
@@ -86,26 +107,52 @@ Built-in tools for agentic workflows:
 - [x] Provider-specific parameters
 - [x] Environment variable support for API keys
 - [x] Tool configuration (enable/disable, root directory, write permissions)
+- [x] Layered resolution: TOML → env → CLI
 
 #### Agentic Capabilities
 - [x] Tool calling with automatic execution
 - [x] Parallel tool execution
-- [x] Iterative agent loop (max 20 iterations)
+- [x] Iterative agentic loop (configurable max iterations)
 - [x] Built-in filesystem, memory, and web tools
+- [x] Chunk processor for large tool outputs
+- [x] Agent-as-tool delegation pattern
+- [x] Agent depth limiting to prevent infinite recursion
+
+#### Built-in Agents (8 total)
+- [x] **chat** - Interactive conversations and delegation
+- [x] **explore** - Filesystem exploration
+- [x] **researcher** - Web research (fast/in-depth modes)
+- [x] **coder** - Code generation and modification
+- [x] **reviewer** - Code review and analysis
+- [x] **summarizer** - Content summarization
+- [x] **planner** - Task decomposition
+- [x] **writer** - Documentation creation
+
+#### TUI Features
+- [x] Real-time markdown rendering
+- [x] Streaming response display
+- [x] Agent progress panel with:
+  - Current iteration and max iterations
+  - Thinking/reasoning content
+  - Tool execution status
+  - Token usage statistics
+- [x] Multi-line input support
+- [x] Status bar with profile and model info
 
 #### Infrastructure
 - [x] Async task manager for background work
 - [x] Agent framework with channels for communication
 - [x] Stateful and stateless agent modes
 - [x] Streaming support for agent-to-agent communication
+- [x] Agent progress events (`AgentProgressHandler`)
 
 ### Planned (v0.2.x)
 
 #### Enhanced Chat Experience
-- [ ] Syntax highlighting for code blocks
+- [ ] Syntax highlighting for code blocks in TUI
 - [ ] Conversation save/load
-- [ ] Multi-line input mode
 - [ ] Configurable key bindings
+- [ ] Image/file attachments
 
 #### Background Tasks
 - [ ] `/spawn <prompt>` - Start background agent task
@@ -113,16 +160,9 @@ Built-in tools for agentic workflows:
 - [ ] `/cancel <id>` - Cancel a task
 - [ ] Task status notifications
 
-#### Multi-Agent Workflows
-- [ ] Named agent definitions in config
-- [ ] Agent delegation (agent spawning sub-agents)
-- [ ] Shared context between agents
-- [ ] Agent result aggregation
-
 #### Additional Tools
 - [ ] `run_command` - Execute shell commands (sandboxed)
 - [ ] `edit_file` - Structured file editing with diffs
-- [ ] `search_web` - Web search integration
 - [ ] `git_*` - Git operations
 
 #### Provider Enhancements
@@ -172,6 +212,7 @@ model = "gpt-4o"
 provider = "openai"
 prompt = "coding"
 model = "gpt-4o"
+agent = "coder"
 
 [profiles.coding.parameters]
 temperature = 0.2
@@ -200,6 +241,7 @@ Options:
       --provider <NAME>      Provider override
       --no-stream            Disable streaming
   -d, --debug                Enable debug output
+  -A, --agent <AGENT>        Primary agent to use
 
 Commands:
   chat       Interactive chat mode
@@ -212,7 +254,7 @@ Commands:
 ### Streaming Architecture
 
 1. Provider returns `StreamResult` (pinned async stream of `StreamChunk`)
-2. Chunks include: `Start`, `Delta`, `ToolCallStart`, `ToolCallDelta`, `Done`, `Error`
+2. Chunks include: `Start`, `Delta`, `ThinkingDelta`, `ToolCallStart`, `ToolCallDelta`, `Done`, `Error`
 3. `MarkdownRenderer` accumulates content and re-renders with terminal formatting
 4. Tool calls are collected during streaming and executed in parallel when complete
 
@@ -237,8 +279,30 @@ let mut agent = Agent::new_stateful(provider, tools, config);
 let r1 = agent.process("First query").await?;
 let r2 = agent.process("Follow-up").await?;  // Has context
 
-// Inter-agent communication
-agent_a.process_streaming("Task", &agent_b_sender).await?;
+// With progress reporting
+let result = Agent::run_once_with_progress(
+    provider, tools, config, context, Some(progress_handler)
+).await?;
+```
+
+### Agent Progress Handler
+
+Receives real-time updates during agent execution:
+
+```rust
+pub enum AgentProgressEvent {
+    IterationStart { agent_name, iteration, max_iterations },
+    ThinkingDelta { agent_name, content },
+    ToolStart { agent_name, tool_name },
+    ToolComplete { agent_name, tool_name, is_error },
+    UsageUpdate { agent_name, usage },
+    ByteCount { agent_name, input_bytes, output_bytes },
+}
+
+#[async_trait]
+pub trait AgentProgressHandler: Send + Sync {
+    async fn on_progress(&self, event: AgentProgressEvent);
+}
 ```
 
 ## Dependencies
@@ -248,6 +312,7 @@ agent_a.process_streaming("Task", &agent_b_sender).await?;
 - `reqwest` - HTTP client with streaming
 - `rustyline` - Readline for interactive input
 - `crossterm` - Terminal control
+- `ratatui` - TUI framework
 - `termimad` - Markdown rendering
 
 ### Serialization
@@ -255,14 +320,7 @@ agent_a.process_streaming("Task", &agent_b_sender).await?;
 - `toml` - Configuration parsing
 
 ### Storage
-- `rusqlite` - SQLite for memory persistence
-
-## Testing Strategy
-
-- Unit tests for core types and transformations
-- Integration tests for provider communication (mocked)
-- End-to-end tests for CLI commands
-- Manual testing for streaming and interactive features
+- `rusqlite` (bundled) - SQLite for memory persistence
 
 ## Performance Goals
 
@@ -277,6 +335,7 @@ agent_a.process_streaming("Task", &agent_b_sender).await?;
 - Filesystem tools: Sandboxed to configured root, write disabled by default
 - Web tools: No credential storage, user-agent identification
 - Command execution: Not included by default, requires explicit enable
+- Agent depth: Limited to prevent infinite recursion
 
 ## Compatibility
 

@@ -22,7 +22,7 @@ You have access to specialized agents that can help with specific tasks:
 - **planner**: Breaking down complex tasks into steps
 - **writer**: Creating documentation, READMEs, and written content
 
-When a task would benefit from a specialized agent, delegate to it by calling the appropriate agent tool with a clear goal description.
+Delegate work to the right agent, providing context to the agent to do a good job. 
 
 Be helpful, concise, and direct. Ask clarifying questions when the user's intent is unclear."#;
 
