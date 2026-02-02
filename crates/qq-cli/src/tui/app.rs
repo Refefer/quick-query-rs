@@ -1,9 +1,18 @@
 //! TUI Application state and main event loop.
 
 use std::io;
+use std::io::Write as IoWrite;
 use std::panic;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Log diagnostic message to file for streaming debug
+fn diag_log(msg: &str) {
+    let path = std::env::var("QQ_DIAG_LOG").unwrap_or_else(|_| "/tmp/qq-stream-diag.log".to_string());
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{}", msg);
+    }
+}
 
 use anyhow::Result;
 use crossterm::{
@@ -524,8 +533,18 @@ pub async fn run_tui(
 
     // Main event loop
     let tick_rate = Duration::from_millis(33); // ~30fps
+    let tui_start = std::time::Instant::now();
+    let mut loop_count = 0u64;
 
     loop {
+        loop_count += 1;
+        let loop_start = std::time::Instant::now();
+
+        // Log every loop iteration during streaming
+        if app.is_streaming && loop_count % 10 == 1 {
+            diag_log(&format!("[{:?}] TUI: Loop #{} starting", tui_start.elapsed(), loop_count));
+        }
+
         // Render
         terminal.draw(|f| {
             // Update viewport height for scrolling
@@ -536,6 +555,11 @@ pub async fn run_tui(
             ui::render(&app, f);
         })?;
 
+        // Force flush stdout after render (test for terminal buffering)
+        std::io::stdout().flush()?;
+
+        let render_elapsed = loop_start.elapsed();
+
         // Handle events with timeout for render ticks
         let timeout = if app.is_streaming {
             Duration::from_millis(16) // Faster updates during streaming
@@ -544,7 +568,10 @@ pub async fn run_tui(
         };
 
         // Check for stream events first (non-blocking)
+        let recv_start = std::time::Instant::now();
+        let mut event_count = 0u32;
         while let Ok(event) = stream_rx.try_recv() {
+            event_count += 1;
             match &event {
                 StreamEvent::Done { usage: _, content } => {
                     // Add assistant response to session
@@ -571,6 +598,16 @@ pub async fn run_tui(
             }
             app.handle_stream_event(event);
         }
+        if event_count > 0 {
+            let recv_elapsed = recv_start.elapsed();
+            diag_log(&format!(
+                "[{:?}] TUI: Processed {} stream events in {:?} (render took {:?})",
+                tui_start.elapsed(),
+                event_count,
+                recv_elapsed,
+                render_elapsed
+            ));
+        }
 
         // Check for agent events (non-blocking)
         if let Some(ref mut rx) = agent_event_rx {
@@ -580,7 +617,24 @@ pub async fn run_tui(
         }
 
         // Poll for keyboard events
-        if event::poll(timeout)? {
+        let poll_start = std::time::Instant::now();
+        let poll_result = event::poll(timeout)?;
+        let poll_elapsed = poll_start.elapsed();
+
+        // Log every poll during streaming to see the pattern
+        if app.is_streaming {
+            diag_log(&format!(
+                "[{:?}] TUI: Loop #{} poll() took {:?}, result={}, timeout={:?}, events_pending={}",
+                tui_start.elapsed(),
+                loop_count,
+                poll_elapsed,
+                poll_result,
+                timeout,
+                event_count
+            ));
+        }
+
+        if poll_result {
             if let Event::Key(key) = event::read()? {
                 // Handle help overlay dismissal
                 if app.show_help {
@@ -669,12 +723,16 @@ pub async fn run_tui(
                                     let original_query = input.clone();
 
                                     // Spawn streaming task
+                                    let spawn_time = tui_start.elapsed();
+                                    diag_log(&format!("[{:?}] TUI: Spawning streaming task", spawn_time));
                                     tokio::spawn(async move {
+                                        diag_log(&format!("[TASK] Streaming task started (spawned at {:?})", spawn_time));
                                         run_streaming_completion(
                                             provider, tools, params, model, messages, tx, debug,
                                             temp, max_tok, exec_ctx, chunker_cfg, original_query,
                                         )
-                                        .await
+                                        .await;
+                                        diag_log("[TASK] Streaming task completed");
                                     });
                                 }
                             }
@@ -690,6 +748,21 @@ pub async fn run_tui(
 
         // Check for completion events that need session updates
         // This is handled by the completion task sending back results
+
+        // Log total loop time during streaming
+        if app.is_streaming {
+            let loop_elapsed = loop_start.elapsed();
+            if loop_elapsed > Duration::from_millis(50) {
+                diag_log(&format!(
+                    "[{:?}] TUI: Loop #{} total time {:?} (render {:?}, poll {:?})",
+                    tui_start.elapsed(),
+                    loop_count,
+                    loop_elapsed,
+                    render_elapsed,
+                    poll_elapsed
+                ));
+            }
+        }
 
         if app.should_quit {
             break;
@@ -856,7 +929,11 @@ async fn run_streaming_completion(
         request = request.with_tools(tools_registry.definitions());
 
         // Stream the response
+        let stream_call_start = std::time::Instant::now();
+        diag_log("[COMPLETION] Calling provider.stream()...");
         let stream_result = provider.stream(request).await;
+        diag_log(&format!("[COMPLETION] provider.stream() returned in {:?}", stream_call_start.elapsed()));
+
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
@@ -869,8 +946,15 @@ async fn run_streaming_completion(
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None;
+        let mut chunk_count = 0u32;
+        let first_chunk_time = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
+            chunk_count += 1;
+            if chunk_count == 1 {
+                diag_log(&format!("[COMPLETION] First chunk received after {:?}", first_chunk_time.elapsed()));
+            }
+
             match chunk {
                 Ok(StreamChunk::Start { model }) => {
                     let _ = tx.send(StreamEvent::Start { model }).await;
@@ -899,6 +983,9 @@ async fn run_streaming_completion(
                     let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
                 }
                 Ok(StreamChunk::Done { usage }) => {
+                    diag_log(&format!("[COMPLETION] StreamChunk::Done received after {} chunks, {:?} since first chunk",
+                        chunk_count, first_chunk_time.elapsed()));
+
                     // Finish pending tool call
                     if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
                         let args: serde_json::Value =

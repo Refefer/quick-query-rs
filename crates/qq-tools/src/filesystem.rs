@@ -302,27 +302,27 @@ impl Tool for SearchFilesTool {
         let file_pattern = args.file_pattern.as_deref().unwrap_or("**/*");
         let glob_pattern = format!("{}/{}", base_path.display(), file_pattern);
 
-        let mut results = Vec::new();
-        let mut files_searched = 0;
+        // Collect file paths (fast glob enumeration)
+        let file_paths: Vec<PathBuf> = glob(&glob_pattern)
+            .map_err(|e| Error::tool("search_files", e.to_string()))?
+            .filter_map(|entry| entry.ok())
+            .filter(|path| path.is_file())
+            .collect();
 
-        for entry in glob(&glob_pattern).map_err(|e| Error::tool("search_files", e.to_string()))? {
-            if let Ok(path) = entry {
-                if path.is_file() {
-                    files_searched += 1;
-                    if let Ok(content) = fs::read_to_string(&path).await {
-                        for (line_num, line) in content.lines().enumerate() {
-                            if regex.is_match(line) {
-                                let rel_path = path
-                                    .strip_prefix(&self.config.root)
-                                    .unwrap_or(&path)
-                                    .display();
-                                results.push(format!("{}:{}: {}", rel_path, line_num + 1, line.trim()));
-                            }
-                        }
-                    }
-                }
+        // Read file contents asynchronously
+        let mut file_contents: Vec<(PathBuf, String)> = Vec::new();
+        for path in &file_paths {
+            if let Ok(content) = fs::read_to_string(&path).await {
+                file_contents.push((path.clone(), content));
             }
         }
+
+        // CPU-intensive regex matching in blocking threadpool
+        let root = self.config.root.clone();
+        let (results, files_searched) = qq_core::run_blocking(move || {
+            search_content_with_regex(&file_contents, &regex, &root)
+        })
+        .await?;
 
         if results.is_empty() {
             Ok(ToolOutput::success(format!(
@@ -338,6 +338,27 @@ impl Tool for SearchFilesTool {
             )))
         }
     }
+}
+
+/// CPU-intensive regex matching over file contents (runs in spawn_blocking).
+fn search_content_with_regex(
+    file_contents: &[(PathBuf, String)],
+    regex: &Regex,
+    root: &Path,
+) -> (Vec<String>, usize) {
+    let mut results = Vec::new();
+    let files_searched = file_contents.len();
+
+    for (path, content) in file_contents {
+        for (line_num, line) in content.lines().enumerate() {
+            if regex.is_match(line) {
+                let rel_path = path.strip_prefix(root).unwrap_or(path).display();
+                results.push(format!("{}:{}: {}", rel_path, line_num + 1, line.trim()));
+            }
+        }
+    }
+
+    (results, files_searched)
 }
 
 // =============================================================================

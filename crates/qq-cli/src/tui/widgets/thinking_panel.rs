@@ -15,6 +15,7 @@ pub struct ThinkingPanel<'a> {
     content: &'a str,
     is_collapsed: bool,
     is_streaming: bool,
+    auto_scroll: bool,
 }
 
 impl<'a> ThinkingPanel<'a> {
@@ -23,6 +24,7 @@ impl<'a> ThinkingPanel<'a> {
             content,
             is_collapsed: false,
             is_streaming: false,
+            auto_scroll: true,
         }
     }
 
@@ -33,6 +35,11 @@ impl<'a> ThinkingPanel<'a> {
 
     pub fn streaming(mut self, streaming: bool) -> Self {
         self.is_streaming = streaming;
+        self
+    }
+
+    pub fn auto_scroll(mut self, auto_scroll: bool) -> Self {
+        self.auto_scroll = auto_scroll;
         self
     }
 }
@@ -83,7 +90,35 @@ impl Widget for ThinkingPanel<'_> {
 
             let lines = markdown_to_lines(self.content, &styles);
 
-            let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+            // Calculate scroll offset for auto-scroll
+            // Inner area is area minus borders (2 for top/bottom, 2 for left/right)
+            let inner_height = area.height.saturating_sub(2);
+            let inner_width = area.width.saturating_sub(2).max(1) as usize;
+
+            // Estimate wrapped line count by calculating how many display lines
+            // each logical line will take when wrapped
+            let wrapped_height: u16 = lines
+                .iter()
+                .map(|line| {
+                    let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+                    if line_width == 0 {
+                        1 // Empty lines still take 1 row
+                    } else {
+                        ((line_width + inner_width - 1) / inner_width) as u16
+                    }
+                })
+                .sum();
+
+            let scroll_offset = if self.auto_scroll && wrapped_height > inner_height {
+                wrapped_height.saturating_sub(inner_height)
+            } else {
+                0
+            };
+
+            let paragraph = Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_offset, 0));
 
             paragraph.render(area, buf);
         }

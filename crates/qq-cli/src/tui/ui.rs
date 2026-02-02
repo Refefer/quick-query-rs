@@ -40,9 +40,11 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
 
     // Thinking panel (if visible and has content)
     if app.show_thinking && !app.thinking_content.is_empty() {
+        let is_thinking_streaming = app.is_streaming && app.content.is_empty();
         let thinking = ThinkingPanel::new(&app.thinking_content)
             .collapsed(app.thinking_collapsed)
-            .streaming(app.is_streaming && app.content.is_empty());
+            .streaming(is_thinking_streaming)
+            .auto_scroll(is_thinking_streaming);
 
         frame.render_widget(thinking, chunks.thinking);
     }

@@ -91,7 +91,7 @@ impl Tool for FetchWebpageTool {
         let args: FetchWebpageArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("fetch_webpage", format!("Invalid arguments: {}", e)))?;
 
-        // Fetch the page
+        // Fetch the page (I/O-bound, stays async)
         let response = self
             .client
             .get(&args.url)
@@ -111,48 +111,12 @@ impl Tool for FetchWebpageTool {
             .await
             .map_err(|e| Error::tool("fetch_webpage", format!("Failed to read response: {}", e)))?;
 
-        // Parse HTML
-        let document = Html::parse_document(&html);
-
-        // Extract text based on selector
-        let text = if let Some(selector_str) = &args.selector {
-            let selector = Selector::parse(selector_str)
-                .map_err(|_| Error::tool("fetch_webpage", format!("Invalid selector: {}", selector_str)))?;
-
-            document
-                .select(&selector)
-                .map(|el| extract_text(&el))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        } else {
-            // Default: try to get main content, fall back to body
-            let main_selector = Selector::parse("main, article, .content, #content, .post, .entry").ok();
-            let body_selector = Selector::parse("body").ok();
-
-            if let Some(selector) = main_selector {
-                let main_content: Vec<_> = document.select(&selector).collect();
-                if !main_content.is_empty() {
-                    main_content
-                        .into_iter()
-                        .map(|el| extract_text(&el))
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                } else if let Some(body_sel) = body_selector {
-                    document
-                        .select(&body_sel)
-                        .map(|el| extract_text(&el))
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                } else {
-                    extract_text(&document.root_element())
-                }
-            } else {
-                extract_text(&document.root_element())
-            }
-        };
-
-        // Clean up the text
-        let cleaned = clean_text(&text);
+        // Move CPU-intensive HTML parsing to blocking threadpool
+        let selector_str = args.selector.clone();
+        let cleaned = qq_core::run_blocking(move || {
+            parse_and_extract_text(&html, selector_str.as_deref())
+        })
+        .await?;
 
         if cleaned.is_empty() {
             Ok(ToolOutput::success("(No text content found on page)"))
@@ -170,6 +134,51 @@ impl Tool for FetchWebpageTool {
             }
         }
     }
+}
+
+/// CPU-intensive HTML parsing and text extraction (runs in spawn_blocking).
+fn parse_and_extract_text(html: &str, selector: Option<&str>) -> String {
+    let document = Html::parse_document(html);
+
+    let text = if let Some(selector_str) = selector {
+        if let Ok(sel) = Selector::parse(selector_str) {
+            document
+                .select(&sel)
+                .map(|el| extract_text(&el))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            // Invalid selector - return empty, error handled by caller
+            String::new()
+        }
+    } else {
+        // Default: try to get main content, fall back to body
+        let main_selector = Selector::parse("main, article, .content, #content, .post, .entry").ok();
+        let body_selector = Selector::parse("body").ok();
+
+        if let Some(sel) = main_selector {
+            let main_content: Vec<_> = document.select(&sel).collect();
+            if !main_content.is_empty() {
+                main_content
+                    .into_iter()
+                    .map(|el| extract_text(&el))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            } else if let Some(body_sel) = body_selector {
+                document
+                    .select(&body_sel)
+                    .map(|el| extract_text(&el))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            } else {
+                extract_text(&document.root_element())
+            }
+        } else {
+            extract_text(&document.root_element())
+        }
+    };
+
+    clean_text(&text)
 }
 
 /// Extract text from an HTML element, filtering out scripts and styles

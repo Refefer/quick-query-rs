@@ -4,6 +4,7 @@
 //! the quick-query LLM CLI tool.
 
 pub mod agent;
+pub mod blocking;
 pub mod chunker;
 pub mod error;
 pub mod message;
@@ -26,5 +27,6 @@ pub use task::{
 };
 pub use tool::{PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 pub use chunker::{ChunkProcessor, ChunkerConfig};
+pub use blocking::run_blocking;
 
 pub type Result<T> = std::result::Result<T, Error>;
