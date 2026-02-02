@@ -42,7 +42,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     if app.show_thinking && !app.thinking_content.is_empty() {
         let is_thinking_streaming = app.is_streaming && app.content.is_empty();
         let thinking = ThinkingPanel::new(&app.thinking_content)
-            .collapsed(app.thinking_collapsed)
+            .expanded(app.thinking_expanded)
             .streaming(is_thinking_streaming)
             .auto_scroll(true); // Always auto-scroll thinking panel
 
@@ -101,24 +101,33 @@ fn create_layout(area: Rect, app: &TuiApp) -> LayoutRegions {
         Constraint::Length(2), // Status bar
     ];
 
-    // Thinking panel - variable height based on content, max 6 lines
+    // Thinking panel - normal or expanded
+    // Normal: min 8 lines (6 content + 2 border), max 10
+    // Expanded: takes most of the space, leaving min 6 lines for content
     let thinking_height = if has_thinking {
-        if app.thinking_collapsed {
-            3 // Just the collapsed line
+        if app.thinking_expanded {
+            // Expanded: take most of the screen
+            // Reserve: status (2) + min content (6) + tools (2 if present) + input (3)
+            let reserved = 2 + 6 + if has_tools { 2 } else { 0 } + 3;
+            area.height.saturating_sub(reserved).max(8)
         } else {
+            // Normal: based on content, min 8 (6 content lines), max 10
             let lines = app.thinking_content.lines().count() as u16;
-            (lines + 2).min(8).max(3) // +2 for borders, min 3, max 8
+            (lines + 2).min(10).max(8) // +2 for borders, min 8, max 10
         }
     } else {
         0
     };
+
+    // Content area minimum depends on whether thinking is expanded
+    let min_content_height = if has_thinking && app.thinking_expanded { 6 } else { 5 };
 
     if has_thinking {
         constraints.push(Constraint::Length(thinking_height));
     }
 
     // Main content - takes remaining space
-    constraints.push(Constraint::Min(5));
+    constraints.push(Constraint::Min(min_content_height));
 
     // Tool bar
     let tools_height = if has_tools { 2 } else { 0 };
@@ -195,7 +204,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("Navigation:", Style::default().fg(Color::Cyan))),
         Line::from("  PgUp/PgDn    Scroll content"),
         Line::from("  Home/End     Scroll to top/bottom"),
-        Line::from("  Ctrl+T       Toggle thinking panel"),
+        Line::from("  Ctrl+T       Expand/shrink thinking panel"),
         Line::from(""),
         Line::from(Span::styled("Commands:", Style::default().fg(Color::Cyan))),
         Line::from("  /help        Show this help"),

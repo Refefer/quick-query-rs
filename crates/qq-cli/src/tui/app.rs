@@ -42,7 +42,7 @@ pub struct TuiApp {
     pub content: String,
     pub thinking_content: String,
     pub show_thinking: bool,
-    pub thinking_collapsed: bool,
+    pub thinking_expanded: bool,
 
     // Token counts
     pub prompt_tokens: u32,
@@ -103,7 +103,7 @@ impl TuiApp {
             content: String::new(),
             thinking_content: String::new(),
             show_thinking: true,
-            thinking_collapsed: false,
+            thinking_expanded: false,
             prompt_tokens: 0,
             completion_tokens: 0,
             tool_iteration: 0,
@@ -140,7 +140,7 @@ impl TuiApp {
 
         // Clear thinking for new response
         self.thinking_content.clear();
-        self.thinking_collapsed = false;
+        self.thinking_expanded = false;
         self.is_streaming = true;
         self.is_waiting = true;
         self.tool_calls.clear();
@@ -382,7 +382,7 @@ impl TuiApp {
             }
             InputAction::ToggleThinking => {
                 if self.show_thinking && !self.thinking_content.is_empty() {
-                    self.thinking_collapsed = !self.thinking_collapsed;
+                    self.thinking_expanded = !self.thinking_expanded;
                 }
             }
             InputAction::Help => {

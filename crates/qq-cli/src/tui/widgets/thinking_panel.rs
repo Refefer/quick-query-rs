@@ -1,19 +1,19 @@
-//! Collapsible thinking/reasoning panel widget.
+//! Expandable thinking/reasoning panel widget.
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Span,
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
 use crate::tui::markdown::{markdown_to_lines, MarkdownStyles};
 
-/// Thinking panel that can be collapsed
+/// Thinking panel that can be expanded to fullscreen
 pub struct ThinkingPanel<'a> {
     content: &'a str,
-    is_collapsed: bool,
+    is_expanded: bool,
     is_streaming: bool,
     auto_scroll: bool,
 }
@@ -22,14 +22,14 @@ impl<'a> ThinkingPanel<'a> {
     pub fn new(content: &'a str) -> Self {
         Self {
             content,
-            is_collapsed: false,
+            is_expanded: false,
             is_streaming: false,
             auto_scroll: true,
         }
     }
 
-    pub fn collapsed(mut self, collapsed: bool) -> Self {
-        self.is_collapsed = collapsed;
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.is_expanded = expanded;
         self
     }
 
@@ -50,12 +50,17 @@ impl Widget for ThinkingPanel<'_> {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
 
-        let title = if self.is_collapsed {
-            " Thinking [+] "
-        } else if self.is_streaming {
-            " Thinking... "
+        // Show expansion state and streaming status in title
+        let title = if self.is_streaming {
+            if self.is_expanded {
+                " Thinking... [Ctrl+T to shrink] "
+            } else {
+                " Thinking... [Ctrl+T to expand] "
+            }
+        } else if self.is_expanded {
+            " Thinking [Ctrl+T to shrink] "
         } else {
-            " Thinking "
+            " Thinking [Ctrl+T to expand] "
         };
 
         let block = Block::default()
@@ -63,64 +68,53 @@ impl Widget for ThinkingPanel<'_> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
 
-        if self.is_collapsed {
-            // Just render the block with collapsed indicator
-            let collapsed_text = format!("({} chars) Press Ctrl+T to expand", self.content.len());
-            let paragraph = Paragraph::new(Line::from(Span::styled(
-                collapsed_text,
-                Style::default().fg(Color::DarkGray),
-            )))
-            .block(block);
-            paragraph.render(area, buf);
+        // Render content with dimmed styling
+        let mut styles = MarkdownStyles::default();
+        // Dim all styles for thinking content
+        styles.normal = Style::default().fg(Color::DarkGray);
+        styles.bold = Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD);
+        styles.italic = Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC);
+        styles.code = Style::default().fg(Color::DarkGray);
+        styles.header1 = Style::default().fg(Color::Gray);
+        styles.header2 = Style::default().fg(Color::Gray);
+        styles.header3 = Style::default().fg(Color::DarkGray);
+
+        let lines = markdown_to_lines(self.content, &styles);
+
+        // Calculate scroll offset for auto-scroll
+        // Inner area is area minus borders (2 for top/bottom, 2 for left/right)
+        let inner_height = area.height.saturating_sub(2);
+        let inner_width = area.width.saturating_sub(2).max(1) as usize;
+
+        // Estimate wrapped line count by calculating how many display lines
+        // each logical line will take when wrapped
+        let wrapped_height: u16 = lines
+            .iter()
+            .map(|line| {
+                let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+                if line_width == 0 {
+                    1 // Empty lines still take 1 row
+                } else {
+                    ((line_width + inner_width - 1) / inner_width) as u16
+                }
+            })
+            .sum();
+
+        let scroll_offset = if self.auto_scroll && wrapped_height > inner_height {
+            wrapped_height.saturating_sub(inner_height)
         } else {
-            // Render content with dimmed styling
-            let mut styles = MarkdownStyles::default();
-            // Dim all styles for thinking content
-            styles.normal = Style::default().fg(Color::DarkGray);
-            styles.bold = Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD);
-            styles.italic = Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::ITALIC);
-            styles.code = Style::default().fg(Color::DarkGray);
-            styles.header1 = Style::default().fg(Color::Gray);
-            styles.header2 = Style::default().fg(Color::Gray);
-            styles.header3 = Style::default().fg(Color::DarkGray);
+            0
+        };
 
-            let lines = markdown_to_lines(self.content, &styles);
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_offset, 0));
 
-            // Calculate scroll offset for auto-scroll
-            // Inner area is area minus borders (2 for top/bottom, 2 for left/right)
-            let inner_height = area.height.saturating_sub(2);
-            let inner_width = area.width.saturating_sub(2).max(1) as usize;
-
-            // Estimate wrapped line count by calculating how many display lines
-            // each logical line will take when wrapped
-            let wrapped_height: u16 = lines
-                .iter()
-                .map(|line| {
-                    let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
-                    if line_width == 0 {
-                        1 // Empty lines still take 1 row
-                    } else {
-                        ((line_width + inner_width - 1) / inner_width) as u16
-                    }
-                })
-                .sum();
-
-            let scroll_offset = if self.auto_scroll && wrapped_height > inner_height {
-                wrapped_height.saturating_sub(inner_height)
-            } else {
-                0
-            };
-
-            let paragraph = Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll_offset, 0));
-
-            paragraph.render(area, buf);
-        }
+        paragraph.render(area, buf);
     }
 }
