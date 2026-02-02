@@ -95,10 +95,8 @@ impl InternalAgent for ChatAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // ChatAgent gets agent tools only (or all tools if agents_only is false)
-        // The actual tools are configured at runtime based on agents_only setting
-        // For the trait, we return an empty list since tools are managed externally
-        &[]
+        // ChatAgent gets filesystem tools for reading and writing
+        &["read_file", "write_file", "list_files", "search_files"]
     }
 
     fn max_iterations(&self) -> usize {
