@@ -2,10 +2,10 @@
 //!
 //! Provides a proper TUI with separate panels for thinking, content, tools, and input.
 
-mod app;
-mod events;
-mod markdown;
-mod ui;
-mod widgets;
+pub mod app;
+pub mod events;
+pub mod markdown;
+pub mod ui;
+pub mod widgets;
 
 pub use app::run_tui;

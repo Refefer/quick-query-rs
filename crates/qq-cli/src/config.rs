@@ -54,6 +54,12 @@ pub struct ProfileEntry {
     /// - Some([names]): only listed agents enabled
     #[serde(default)]
     pub agents: Option<Vec<String>>,
+
+    /// Primary agent to use for interactive sessions.
+    /// Defaults to "chat" if not specified.
+    /// Can be any internal or external agent name (e.g., "chat", "explore", "researcher").
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -292,6 +298,7 @@ impl Config {
             model: profile.model.clone(),
             parameters,
             agents: profile.agents.clone(),
+            agent: profile.agent.clone().unwrap_or_else(|| "chat".to_string()),
         })
     }
 }
@@ -306,6 +313,8 @@ pub struct ResolvedProfile {
     pub model: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
     pub agents: Option<Vec<String>>,
+    /// Primary agent for interactive sessions (default: "chat")
+    pub agent: String,
 }
 
 // =============================================================================

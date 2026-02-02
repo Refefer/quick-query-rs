@@ -25,8 +25,8 @@ use crate::Cli;
 
 /// Chat session state
 pub struct ChatSession {
-    messages: Vec<Message>,
-    system_prompt: Option<String>,
+    pub messages: Vec<Message>,
+    pub system_prompt: Option<String>,
 }
 
 impl ChatSession {

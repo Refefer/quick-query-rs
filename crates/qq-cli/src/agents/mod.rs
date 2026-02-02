@@ -1,18 +1,20 @@
 //! Agent system for quick-query.
 //!
 //! This module provides:
-//! - Internal agents (researcher, summarizer, coder, reviewer, explore, planner)
+//! - Internal agents (chat, researcher, summarizer, coder, reviewer, explore, planner)
 //! - Support for external agents defined in agents.toml
 //! - Agent tools that expose agents as callable tools for the LLM
 //! - AgentExecutor for manual agent invocation via chat commands
 
 pub mod agent_tool;
+pub mod chat;
 pub mod coder;
 pub mod explore;
 pub mod planner;
 pub mod researcher;
 pub mod reviewer;
 pub mod summarizer;
+pub mod writer;
 
 pub use agent_tool::{create_agent_tools, DEFAULT_MAX_AGENT_DEPTH};
 
@@ -60,16 +62,18 @@ pub trait InternalAgent: Send + Sync {
 
 /// All internal agent types
 pub enum InternalAgentType {
+    Chat,
     Researcher,
     Summarizer,
     Coder,
     Reviewer,
     Explore,
     Planner,
+    Writer,
 }
 
 impl InternalAgentType {
-    /// Get all internal agent types
+    /// Get all internal agent types (excluding chat, which is special)
     pub fn all() -> Vec<Self> {
         vec![
             Self::Researcher,
@@ -78,42 +82,63 @@ impl InternalAgentType {
             Self::Reviewer,
             Self::Explore,
             Self::Planner,
+            Self::Writer,
+        ]
+    }
+
+    /// Get all internal agent types including chat
+    pub fn all_with_chat() -> Vec<Self> {
+        vec![
+            Self::Chat,
+            Self::Researcher,
+            Self::Summarizer,
+            Self::Coder,
+            Self::Reviewer,
+            Self::Explore,
+            Self::Planner,
+            Self::Writer,
         ]
     }
 
     /// Get the agent name
     pub fn name(&self) -> &str {
         match self {
+            Self::Chat => "chat",
             Self::Researcher => "researcher",
             Self::Summarizer => "summarizer",
             Self::Coder => "coder",
             Self::Reviewer => "reviewer",
             Self::Explore => "explore",
             Self::Planner => "planner",
+            Self::Writer => "writer",
         }
     }
 
     /// Create the internal agent instance
     pub fn create(&self) -> Box<dyn InternalAgent> {
         match self {
+            Self::Chat => Box::new(chat::ChatAgent::new()),
             Self::Researcher => Box::new(researcher::ResearcherAgent::new()),
             Self::Summarizer => Box::new(summarizer::SummarizerAgent::new()),
             Self::Coder => Box::new(coder::CoderAgent::new()),
             Self::Reviewer => Box::new(reviewer::ReviewerAgent::new()),
             Self::Explore => Box::new(explore::ExploreAgent::new()),
             Self::Planner => Box::new(planner::PlannerAgent::new()),
+            Self::Writer => Box::new(writer::WriterAgent::new()),
         }
     }
 
     /// Parse a name into an agent type
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "chat" => Some(Self::Chat),
             "researcher" => Some(Self::Researcher),
             "summarizer" => Some(Self::Summarizer),
             "coder" => Some(Self::Coder),
             "reviewer" => Some(Self::Reviewer),
             "explore" => Some(Self::Explore),
             "planner" => Some(Self::Planner),
+            "writer" => Some(Self::Writer),
             _ => None,
         }
     }
@@ -292,7 +317,7 @@ mod tests {
     #[test]
     fn test_internal_agent_types() {
         let types = InternalAgentType::all();
-        assert_eq!(types.len(), 6);
+        assert_eq!(types.len(), 7);
 
         for t in types {
             let agent = t.create();
@@ -303,13 +328,24 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_agent_types_with_chat() {
+        let types = InternalAgentType::all_with_chat();
+        assert_eq!(types.len(), 8);
+
+        // Verify chat is included
+        assert!(types.iter().any(|t| t.name() == "chat"));
+    }
+
+    #[test]
     fn test_agent_type_from_name() {
+        assert!(InternalAgentType::from_name("chat").is_some());
         assert!(InternalAgentType::from_name("researcher").is_some());
         assert!(InternalAgentType::from_name("summarizer").is_some());
         assert!(InternalAgentType::from_name("coder").is_some());
         assert!(InternalAgentType::from_name("reviewer").is_some());
         assert!(InternalAgentType::from_name("explore").is_some());
         assert!(InternalAgentType::from_name("planner").is_some());
+        assert!(InternalAgentType::from_name("writer").is_some());
         assert!(InternalAgentType::from_name("unknown").is_none());
     }
 }

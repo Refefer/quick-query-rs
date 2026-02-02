@@ -16,7 +16,9 @@ mod config;
 mod debug_log;
 mod event_bus;
 mod execution_context;
+mod interface;
 mod markdown;
+mod runner;
 mod tui;
 
 pub use event_bus::AgentEventBus;
@@ -100,6 +102,11 @@ pub struct Cli {
     /// Disable TUI mode, use legacy readline interface
     #[arg(long)]
     pub no_tui: bool,
+
+    /// Primary agent to use for interactive sessions (overrides profile)
+    /// Can be any internal agent: chat, explore, researcher, coder, reviewer, summarizer, planner
+    #[arg(short = 'A', long)]
+    pub agent: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -468,6 +475,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             tools_registry,
             settings.parameters,
             settings.profile_name,
+            settings.agent.clone(),
             agent_executor,
             execution_context,
             chunker_config,
@@ -555,6 +563,11 @@ fn list_profiles(config: &Config) -> Result<()> {
                     .collect();
                 println!("    Parameters: {}", params.join(", "));
             }
+
+            // Primary agent
+            if resolved.agent != "chat" {
+                println!("    Primary agent: {}", resolved.agent);
+            }
         } else {
             println!("    (invalid - missing provider)");
         }
@@ -638,6 +651,8 @@ struct ResolvedSettings {
     system_prompt: Option<String>,
     parameters: std::collections::HashMap<String, serde_json::Value>,
     agents: Option<Vec<String>>,
+    /// Primary agent for interactive sessions
+    agent: String,
 }
 
 /// Resolve all settings from CLI args, profile, and config
@@ -697,6 +712,12 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         .unwrap_or_default();
     parameters.extend(resolved_profile.parameters.clone());
 
+    // Resolve primary agent: CLI > profile > default
+    let agent = cli
+        .agent
+        .clone()
+        .unwrap_or_else(|| resolved_profile.agent.clone());
+
     Ok(ResolvedSettings {
         profile_name,
         provider_name,
@@ -706,6 +727,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         system_prompt,
         parameters,
         agents: resolved_profile.agents.clone(),
+        agent,
     })
 }
 

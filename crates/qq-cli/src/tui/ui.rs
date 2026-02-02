@@ -22,7 +22,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
 
     // Status bar at top
     let agent_progress = app.agent_progress.as_ref().map(|(name, iter, max)| (name.as_str(), *iter, *max));
-    let mut status_bar = StatusBar::new(&app.profile)
+    let mut status_bar = StatusBar::new(&app.profile, &app.primary_agent)
         .tokens(app.prompt_tokens, app.completion_tokens)
         .streaming(app.is_streaming)
         .waiting(app.is_waiting)

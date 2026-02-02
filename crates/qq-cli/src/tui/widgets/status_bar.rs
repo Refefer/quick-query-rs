@@ -13,6 +13,8 @@ use crate::execution_context::ExecutionContext;
 /// Status bar display state
 pub struct StatusBar<'a> {
     profile: &'a str,
+    /// Primary agent for this session (e.g., "chat", "explore")
+    primary_agent: &'a str,
     prompt_tokens: u32,
     completion_tokens: u32,
     is_streaming: bool,
@@ -29,9 +31,10 @@ pub struct StatusBar<'a> {
 }
 
 impl<'a> StatusBar<'a> {
-    pub fn new(profile: &'a str) -> Self {
+    pub fn new(profile: &'a str, primary_agent: &'a str) -> Self {
         Self {
             profile,
+            primary_agent,
             prompt_tokens: 0,
             completion_tokens: 0,
             is_streaming: false,
@@ -110,16 +113,24 @@ impl Widget for StatusBar<'_> {
 
         let mut spans = Vec::new();
 
-        // Always show profile first
+        // Format primary agent name with proper capitalization
+        let agent_display = capitalize_first(self.primary_agent);
+
+        // Always show "Profile > Agent[X]" first
         spans.push(Span::styled(" ", style_dim));
         spans.push(Span::styled(self.profile, style_profile));
+        spans.push(Span::styled(" > ", style_dim));
+        spans.push(Span::styled(
+            format!("Agent[{}]", agent_display),
+            Style::default().fg(Color::Magenta),
+        ));
 
-        // Show agent progress if an agent is running (takes precedence over execution context)
+        // Show nested agent progress if a sub-agent is running
         if let Some((agent_name, iteration, max_iterations)) = self.agent_progress {
             let style_agent = Style::default().fg(Color::Magenta);
-            spans.push(Span::styled(" › ", style_dim));
+            spans.push(Span::styled(" > ", style_dim));
             spans.push(Span::styled(
-                format!("Agent[{}] turn {}/{}", agent_name, iteration, max_iterations),
+                format!("Agent[{}] turn {}/{}", capitalize_first(agent_name), iteration, max_iterations),
                 style_agent,
             ));
             // Show byte counts for agent
@@ -130,7 +141,7 @@ impl Widget for StatusBar<'_> {
                 ));
             }
         } else {
-            // No agent running - show activity from execution context or status message
+            // No sub-agent running - show activity from execution context or status message
             let activity = self.get_activity();
             if let Some(activity) = activity {
                 spans.push(Span::styled(" › ", style_dim));
@@ -209,6 +220,15 @@ fn format_bytes(bytes: usize) -> String {
         format!("{:.1}Kb", bytes as f64 / 1_000.0)
     } else {
         format!("{}b", bytes)
+    }
+}
+
+/// Capitalize the first letter of a string
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 

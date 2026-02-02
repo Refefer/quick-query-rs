@@ -167,6 +167,7 @@ impl Widget for InputArea<'_> {
 }
 
 /// Input history for up/down arrow navigation
+#[derive(Clone)]
 pub struct InputHistory {
     entries: Vec<String>,
     position: Option<usize>,

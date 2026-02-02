@@ -39,6 +39,8 @@ use super::widgets::{InputHistory, ToolCallInfo, ToolStatus};
 pub struct TuiApp {
     // Display state
     pub profile: String,
+    /// Primary agent name for this session (e.g., "chat", "explore")
+    pub primary_agent: String,
     pub content: String,
     pub thinking_content: String,
     pub show_thinking: bool,
@@ -92,14 +94,15 @@ pub struct TuiApp {
 
 impl Default for TuiApp {
     fn default() -> Self {
-        Self::new("auto", ExecutionContext::new())
+        Self::new("auto", "chat", ExecutionContext::new())
     }
 }
 
 impl TuiApp {
-    pub fn new(profile: &str, execution_context: ExecutionContext) -> Self {
+    pub fn new(profile: &str, primary_agent: &str, execution_context: ExecutionContext) -> Self {
         Self {
             profile: profile.to_string(),
+            primary_agent: primary_agent.to_string(),
             content: String::new(),
             thinking_content: String::new(),
             show_thinking: true,
@@ -493,6 +496,7 @@ pub async fn run_tui(
     tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     profile_name: String,
+    primary_agent: String,
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
     execution_context: ExecutionContext,
     chunker_config: ChunkerConfig,
@@ -523,7 +527,7 @@ pub async fn run_tui(
     let mut session = ChatSession::new(system_prompt);
 
     // Create TUI app
-    let mut app = TuiApp::new(&profile_name, execution_context.clone());
+    let mut app = TuiApp::new(&profile_name, &primary_agent, execution_context.clone());
 
     // Channel for stream events
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(100);
