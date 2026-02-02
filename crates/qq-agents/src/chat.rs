@@ -3,7 +3,7 @@
 //! The ChatAgent is the default interactive agent that users interact with.
 //! It can delegate to other agents and optionally use tools directly.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are a helpful AI assistant engaged in an interactive conversation. You can help with a wide variety of tasks including:
 
@@ -20,6 +20,7 @@ You have access to specialized agents that can help with specific tasks:
 - **reviewer**: Code review and analysis
 - **summarizer**: Summarizing long content
 - **planner**: Breaking down complex tasks into steps
+- **writer**: Creating documentation, READMEs, and written content
 
 When a task would benefit from a specialized agent, delegate to it by calling the appropriate agent tool with a clear goal description.
 

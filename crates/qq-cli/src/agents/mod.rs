@@ -1,22 +1,20 @@
-//! Agent system for quick-query.
+//! Agent system for quick-query CLI.
 //!
 //! This module provides:
-//! - Internal agents (chat, researcher, summarizer, coder, reviewer, explore, planner)
-//! - Support for external agents defined in agents.toml
+//! - Re-exports from qq-agents crate (agent definitions and traits)
 //! - Agent tools that expose agents as callable tools for the LLM
 //! - AgentExecutor for manual agent invocation via chat commands
 
 pub mod agent_tool;
-pub mod chat;
-pub mod coder;
-pub mod explore;
-pub mod planner;
-pub mod researcher;
-pub mod reviewer;
-pub mod summarizer;
-pub mod writer;
 
 pub use agent_tool::{create_agent_tools, DEFAULT_MAX_AGENT_DEPTH};
+
+// Re-export everything from qq-agents
+pub use qq_agents::{
+    AgentDefinition, AgentInfo, AgentsConfig, ChatAgent, CoderAgent, ExploreAgent,
+    InternalAgent, InternalAgentType, PlannerAgent, ResearcherAgent, ReviewerAgent,
+    SummarizerAgent, WriterAgent,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,125 +22,6 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use qq_core::{Agent, AgentConfig, Provider, ToolRegistry};
-
-use crate::config::{AgentDefinition, AgentsConfig};
-
-/// Information about an available agent
-#[derive(Debug, Clone)]
-pub struct AgentInfo {
-    /// Unique agent name/identifier
-    pub name: String,
-    /// Human-readable description
-    pub description: String,
-    /// Whether this is an internal (built-in) agent
-    pub is_internal: bool,
-    /// Tool names this agent uses
-    pub tools: Vec<String>,
-}
-
-/// Trait for internal agents
-pub trait InternalAgent: Send + Sync {
-    /// Get the agent name
-    fn name(&self) -> &str;
-
-    /// Get the agent description
-    fn description(&self) -> &str;
-
-    /// Get the system prompt for this agent
-    fn system_prompt(&self) -> &str;
-
-    /// Get the tool names this agent needs
-    fn tool_names(&self) -> &[&str];
-
-    /// Get the default max iterations
-    fn max_iterations(&self) -> usize {
-        20
-    }
-}
-
-/// All internal agent types
-pub enum InternalAgentType {
-    Chat,
-    Researcher,
-    Summarizer,
-    Coder,
-    Reviewer,
-    Explore,
-    Planner,
-    Writer,
-}
-
-impl InternalAgentType {
-    /// Get all internal agent types (excluding chat, which is special)
-    pub fn all() -> Vec<Self> {
-        vec![
-            Self::Researcher,
-            Self::Summarizer,
-            Self::Coder,
-            Self::Reviewer,
-            Self::Explore,
-            Self::Planner,
-            Self::Writer,
-        ]
-    }
-
-    /// Get all internal agent types including chat
-    pub fn all_with_chat() -> Vec<Self> {
-        vec![
-            Self::Chat,
-            Self::Researcher,
-            Self::Summarizer,
-            Self::Coder,
-            Self::Reviewer,
-            Self::Explore,
-            Self::Planner,
-            Self::Writer,
-        ]
-    }
-
-    /// Get the agent name
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Chat => "chat",
-            Self::Researcher => "researcher",
-            Self::Summarizer => "summarizer",
-            Self::Coder => "coder",
-            Self::Reviewer => "reviewer",
-            Self::Explore => "explore",
-            Self::Planner => "planner",
-            Self::Writer => "writer",
-        }
-    }
-
-    /// Create the internal agent instance
-    pub fn create(&self) -> Box<dyn InternalAgent> {
-        match self {
-            Self::Chat => Box::new(chat::ChatAgent::new()),
-            Self::Researcher => Box::new(researcher::ResearcherAgent::new()),
-            Self::Summarizer => Box::new(summarizer::SummarizerAgent::new()),
-            Self::Coder => Box::new(coder::CoderAgent::new()),
-            Self::Reviewer => Box::new(reviewer::ReviewerAgent::new()),
-            Self::Explore => Box::new(explore::ExploreAgent::new()),
-            Self::Planner => Box::new(planner::PlannerAgent::new()),
-            Self::Writer => Box::new(writer::WriterAgent::new()),
-        }
-    }
-
-    /// Parse a name into an agent type
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "chat" => Some(Self::Chat),
-            "researcher" => Some(Self::Researcher),
-            "summarizer" => Some(Self::Summarizer),
-            "coder" => Some(Self::Coder),
-            "reviewer" => Some(Self::Reviewer),
-            "explore" => Some(Self::Explore),
-            "planner" => Some(Self::Planner),
-            "writer" => Some(Self::Writer),
-            _ => None,
-        }
-    }
-}
 
 /// The agent executor manages both internal and external agents.
 pub struct AgentExecutor {
@@ -155,6 +34,7 @@ pub struct AgentExecutor {
     /// Provider for LLM calls
     provider: Arc<dyn Provider>,
     /// Model to use (can be overridden per-agent)
+    #[allow(dead_code)]
     default_model: Option<String>,
     /// Enabled agents filter (None = all enabled)
     enabled_agents: Option<Vec<String>>,

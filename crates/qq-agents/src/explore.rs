@@ -1,6 +1,6 @@
 //! Explore agent for filesystem exploration and discovery.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous filesystem exploration agent. You receive HIGH-LEVEL GOALS about finding and understanding files, not mechanical commands.
 

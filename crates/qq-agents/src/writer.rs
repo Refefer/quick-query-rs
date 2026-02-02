@@ -1,6 +1,6 @@
 //! Writer agent for content creation.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous writing agent. You receive HIGH-LEVEL GOALS about content to create, not step-by-step instructions.
 

@@ -1,6 +1,6 @@
 //! Coder agent for code generation and modification.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous coding agent. You receive HIGH-LEVEL GOALS about code to write or modify, not step-by-step instructions.
 

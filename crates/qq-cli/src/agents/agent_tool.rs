@@ -11,8 +11,7 @@ use serde::Deserialize;
 
 use qq_core::{Agent, AgentConfig, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
-use super::InternalAgent;
-use crate::config::{AgentDefinition, AgentsConfig};
+use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType};
 use crate::event_bus::AgentEventBus;
 use crate::ExecutionContext;
 
@@ -398,7 +397,7 @@ pub fn create_agent_tools(
     };
 
     // Create tools for internal agents
-    for agent_type in super::InternalAgentType::all() {
+    for agent_type in InternalAgentType::all() {
         let agent = agent_type.create();
         let name = agent.name();
 

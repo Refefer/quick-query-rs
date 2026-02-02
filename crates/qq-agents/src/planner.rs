@@ -1,6 +1,6 @@
 //! Planner agent for task planning and decomposition.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous planning agent. You receive HIGH-LEVEL GOALS and produce detailed, actionable implementation plans.
 

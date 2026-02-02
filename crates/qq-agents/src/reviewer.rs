@@ -1,6 +1,6 @@
 //! Reviewer agent for code review.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous code review agent. You receive CODE or FILE PATHS to review, along with optional focus areas.
 

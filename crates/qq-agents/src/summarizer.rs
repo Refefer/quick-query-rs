@@ -1,6 +1,6 @@
 //! Summarizer agent for content summarization.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous summarization agent. You receive CONTENT and a FOCUS AREA, then produce a tailored summary.
 

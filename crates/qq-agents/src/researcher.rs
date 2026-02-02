@@ -1,11 +1,11 @@
 //! Researcher agent for web research and information synthesis.
 
-use super::InternalAgent;
+use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous web research agent. You receive HIGH-LEVEL RESEARCH QUESTIONS, not URLs to fetch.
 
 ## Your Mission
-You answer questions like "What are the best practices for error handling in Rust?" or "What is the weather in LA tomorrow?" by 
+You answer questions like "What are the best practices for error handling in Rust?" or "What is the weather in LA tomorrow?" by
 researching and synthesizing information from the web.
 
 ## Research Modes
