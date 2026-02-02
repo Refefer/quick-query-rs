@@ -4,11 +4,9 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
-
-use crate::tui::markdown::{markdown_to_lines, MarkdownStyles};
 
 /// Thinking panel that can be expanded to fullscreen
 pub struct ThinkingPanel<'a> {
@@ -68,22 +66,13 @@ impl Widget for ThinkingPanel<'_> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
 
-        // Render content with dimmed styling
-        let mut styles = MarkdownStyles::default();
-        // Dim all styles for thinking content
-        styles.normal = Style::default().fg(Color::DarkGray);
-        styles.bold = Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD);
-        styles.italic = Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::ITALIC);
-        styles.code = Style::default().fg(Color::DarkGray);
-        styles.header1 = Style::default().fg(Color::Gray);
-        styles.header2 = Style::default().fg(Color::Gray);
-        styles.header3 = Style::default().fg(Color::DarkGray);
-
-        let lines = markdown_to_lines(self.content, &styles);
+        // Render thinking content as plain text (no markdown parsing)
+        // Thinking content is raw model output, not formatted markdown
+        let text_style = Style::default().fg(Color::DarkGray);
+        let lines: Vec<Line> = self.content
+            .lines()
+            .map(|line| Line::from(Span::styled(line.to_string(), text_style)))
+            .collect();
 
         // Calculate scroll offset for auto-scroll
         // Inner area is area minus borders (2 for top/bottom, 2 for left/right)
