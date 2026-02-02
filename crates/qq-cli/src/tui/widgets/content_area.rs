@@ -96,9 +96,17 @@ impl Widget for ContentArea<'_> {
         let lines = markdown_to_lines(self.content, &styles);
         let total_lines = lines.len() as u16;
 
+        // Calculate actual scroll offset at render time
+        let effective_scroll = if self.auto_scroll && total_lines > inner.height {
+            // Auto-scroll to bottom
+            total_lines.saturating_sub(inner.height)
+        } else {
+            self.scroll_offset.min(total_lines.saturating_sub(inner.height))
+        };
+
         let paragraph = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset, 0));
+            .scroll((effective_scroll, 0));
 
         paragraph.render(inner, buf);
 
@@ -109,7 +117,7 @@ impl Widget for ContentArea<'_> {
                 .end_symbol(Some(""));
 
             let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
-                .position(self.scroll_offset as usize)
+                .position(effective_scroll as usize)
                 .viewport_content_length(inner.height as usize);
 
             scrollbar.render(
@@ -122,8 +130,8 @@ impl Widget for ContentArea<'_> {
             );
 
             // Show scroll position indicator
-            if !self.auto_scroll && self.scroll_offset > 0 {
-                let percent = (self.scroll_offset as f32 / (total_lines.saturating_sub(inner.height)) as f32 * 100.0) as u16;
+            if !self.auto_scroll && effective_scroll > 0 {
+                let percent = (effective_scroll as f32 / (total_lines.saturating_sub(inner.height)) as f32 * 100.0) as u16;
                 let indicator = format!(" {}% ", percent.min(100));
                 let x = area.right().saturating_sub(indicator.len() as u16 + 1);
                 let y = area.bottom().saturating_sub(1);

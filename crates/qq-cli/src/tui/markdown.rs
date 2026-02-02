@@ -20,6 +20,8 @@ pub struct MarkdownStyles {
     pub link: Style,
     pub list_marker: Style,
     pub quote: Style,
+    pub table_border: Style,
+    pub table_header: Style,
 }
 
 impl Default for MarkdownStyles {
@@ -36,6 +38,8 @@ impl Default for MarkdownStyles {
             link: Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
             list_marker: Style::default().fg(Color::Cyan),
             quote: Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            table_border: Style::default().fg(Color::DarkGray),
+            table_header: Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         }
     }
 }
@@ -45,10 +49,13 @@ impl Default for MarkdownStyles {
 pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
+    let mut in_table = false;
+    let mut is_table_header = true;
 
     for line_text in text.lines() {
         if line_text.starts_with("```") {
             in_code_block = !in_code_block;
+            in_table = false;
             if in_code_block {
                 // Start of code block - optionally show language
                 let lang = line_text.trim_start_matches("```").trim();
@@ -69,6 +76,32 @@ pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'stati
                 styles.code_block,
             )));
             continue;
+        }
+
+        // Check for table row (starts and ends with |, or contains | and looks like a table)
+        let trimmed = line_text.trim();
+        if trimmed.starts_with('|') || (in_table && trimmed.contains('|')) {
+            in_table = true;
+
+            // Check if this is a separator row (|---|---|)
+            if is_table_separator(trimmed) {
+                // Render separator as a dimmed line
+                lines.push(Line::from(Span::styled(
+                    trimmed.to_string(),
+                    styles.table_border,
+                )));
+                is_table_header = false;
+                continue;
+            }
+
+            // Parse table cells
+            let table_line = render_table_row(trimmed, styles, is_table_header);
+            lines.push(table_line);
+            continue;
+        } else if in_table {
+            // Exiting table
+            in_table = false;
+            is_table_header = true;
         }
 
         // Check for headers
@@ -134,6 +167,50 @@ pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'stati
     }
 
     lines
+}
+
+/// Check if a line is a table separator (e.g., |---|---|)
+fn is_table_separator(line: &str) -> bool {
+    let trimmed = line.trim().trim_matches('|').trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // A separator contains only -, :, |, and whitespace
+    trimmed.chars().all(|c| c == '-' || c == ':' || c == '|' || c.is_whitespace())
+        && trimmed.contains('-')
+}
+
+/// Render a table row with styled cells
+fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Line<'static> {
+    let mut spans = Vec::new();
+    let cell_style = if is_header {
+        styles.table_header
+    } else {
+        styles.normal
+    };
+
+    // Split by | and render each cell
+    let parts: Vec<&str> = line.split('|').collect();
+
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("│", styles.table_border));
+        }
+
+        let cell_content = part.trim();
+        if !cell_content.is_empty() || (i > 0 && i < parts.len() - 1) {
+            // Apply inline styling to cell content
+            let cell_spans = style_inline(cell_content, styles);
+            for mut span in cell_spans {
+                if is_header {
+                    span.style = cell_style;
+                }
+                spans.push(span);
+            }
+        }
+    }
+
+    Line::from(spans)
 }
 
 /// Check if line starts with "N. " pattern
@@ -307,5 +384,22 @@ mod tests {
         let styles = MarkdownStyles::default();
         let lines = markdown_to_lines("Use `code` here", &styles);
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_table() {
+        let styles = MarkdownStyles::default();
+        let text = "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |";
+        let lines = markdown_to_lines(text, &styles);
+        assert_eq!(lines.len(), 3); // header, separator, data row
+    }
+
+    #[test]
+    fn test_table_separator_detection() {
+        assert!(is_table_separator("|---|---|"));
+        assert!(is_table_separator("| --- | --- |"));
+        assert!(is_table_separator("|:---:|:---:|"));
+        assert!(!is_table_separator("| text | text |"));
+        assert!(!is_table_separator("not a table"));
     }
 }

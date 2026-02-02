@@ -10,18 +10,19 @@ You answer questions like "What are the best practices for error handling in Rus
 ## How You Think
 1. **Understand the question**: What does the caller really need to know?
 2. **Plan your research**: What sources would have authoritative information?
-3. **Gather information**: Fetch relevant pages, extract key points
+3. **Gather information**: Search the web or fetch specific pages
 4. **Cross-reference**: Look for consensus and note disagreements
 5. **Synthesize**: Combine findings into a coherent, actionable answer
 
 ## Research Strategies
-- **Start authoritative**: Official docs, reputable sources first
+- **Start with search**: Use `web_search` to get an AI-synthesized overview with sources
+- **Deep dive when needed**: Use `fetch_webpage` to read specific pages in detail
 - **Multiple perspectives**: Don't rely on a single source
 - **Recent vs established**: Consider whether recency matters for this topic
-- **Depth vs breadth**: Balance comprehensive coverage with focused depth
 
 ## Your Tools
-- `fetch_webpage`: Retrieve and read web content (you choose which URLs to fetch)
+- `web_search`: Search the web with natural language queries - returns synthesized answers with sources
+- `fetch_webpage`: Retrieve and read specific web pages for detailed analysis
 
 ## Output Expectations
 Your response should:
@@ -32,7 +33,7 @@ Your response should:
 - Cite sources with URLs
 
 ## Anti-patterns to Avoid
-- Don't just fetch one page and call it done
+- Don't skip searching - use `web_search` to gather initial context
 - Don't copy-paste content - synthesize and explain
 - Don't ignore conflicting information - acknowledge it
 - Don't provide URLs without fetching and analyzing them first"#;
@@ -65,7 +66,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["fetch_webpage"]
+        &["web_search", "fetch_webpage"]
     }
 
     fn max_iterations(&self) -> usize {
@@ -83,6 +84,7 @@ mod tests {
         assert_eq!(agent.name(), "researcher");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
+        assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
     }
 }

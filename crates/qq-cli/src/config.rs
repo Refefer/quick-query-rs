@@ -102,6 +102,21 @@ pub struct ToolsConfigEntry {
     /// Chunker configuration for large tool outputs
     #[serde(default)]
     pub chunker: ChunkerConfigEntry,
+
+    /// Web search configuration (Perplexica)
+    #[serde(default)]
+    pub web_search: Option<WebSearchConfigEntry>,
+}
+
+/// Web search (Perplexica) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchConfigEntry {
+    /// Host URL (e.g., "http://localhost:3000")
+    pub host: String,
+    /// Chat model name (e.g., "gpt-4o-mini")
+    pub chat_model: String,
+    /// Embedding model name (e.g., "text-embedding-3-large")
+    pub embed_model: String,
 }
 
 /// Chunker configuration for processing large tool outputs
@@ -174,11 +189,12 @@ impl Default for ToolsConfigEntry {
         Self {
             root: None, // Will default to $PWD at runtime
             memory_db: None, // Will default to ~/.config/qq/memory.db
-            allow_write: false,
+            allow_write: true,
             enable_web: true,
             enable_filesystem: true,
             enable_memory: true,
             chunker: ChunkerConfigEntry::default(),
+            web_search: None,
         }
     }
 }

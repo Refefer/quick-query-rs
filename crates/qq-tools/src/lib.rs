@@ -14,7 +14,7 @@ pub mod web;
 pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig};
 pub use memory::{create_memory_tools, create_memory_tools_arc, MemoryStore};
 pub use process_data::{create_process_data_tool, create_process_data_tool_arc, ProcessLargeDataTool};
-pub use web::{create_web_tools, create_web_tools_arc};
+pub use web::{create_web_tools, create_web_tools_arc, create_web_tools_with_search, WebSearchConfig};
 
 use qq_core::{Tool, ToolRegistry};
 use std::path::PathBuf;
@@ -31,6 +31,8 @@ pub struct ToolsConfig {
     pub memory_db: Option<PathBuf>,
     /// Enable web tools
     pub enable_web: bool,
+    /// Web search configuration (Perplexica)
+    pub web_search: Option<WebSearchConfig>,
 }
 
 impl Default for ToolsConfig {
@@ -40,6 +42,7 @@ impl Default for ToolsConfig {
             allow_write: false,
             memory_db: None,
             enable_web: true,
+            web_search: None,
         }
     }
 }
@@ -68,6 +71,11 @@ impl ToolsConfig {
         self.enable_web = enable;
         self
     }
+
+    pub fn with_web_search(mut self, config: WebSearchConfig) -> Self {
+        self.web_search = Some(config);
+        self
+    }
 }
 
 /// Create a registry with all default tools
@@ -92,7 +100,7 @@ pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_c
 
     // Web tools
     if config.enable_web {
-        for tool in create_web_tools_arc() {
+        for tool in create_web_tools_with_search(config.web_search.clone()) {
             registry.register(tool);
         }
     }
@@ -116,7 +124,7 @@ pub fn create_all_tools(config: ToolsConfig) -> Result<Vec<Box<dyn Tool>>, qq_co
     };
     tools.extend(create_memory_tools(store));
 
-    // Web tools
+    // Web tools (boxed version doesn't support web_search for simplicity)
     if config.enable_web {
         tools.extend(create_web_tools());
     }
@@ -142,7 +150,7 @@ pub fn create_all_tools_arc(config: ToolsConfig) -> Result<Vec<Arc<dyn Tool>>, q
 
     // Web tools
     if config.enable_web {
-        tools.extend(create_web_tools_arc());
+        tools.extend(create_web_tools_with_search(config.web_search.clone()));
     }
 
     Ok(tools)

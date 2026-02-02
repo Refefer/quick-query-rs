@@ -191,7 +191,10 @@ fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
 
     // Web tools
     if config.tools.enable_web {
-        for tool in qq_tools::create_web_tools_arc() {
+        let web_search_config = config.tools.web_search.as_ref().map(|ws| {
+            qq_tools::WebSearchConfig::new(&ws.host, &ws.chat_model, &ws.embed_model)
+        });
+        for tool in qq_tools::create_web_tools_with_search(web_search_config) {
             registry.register(tool);
         }
     }

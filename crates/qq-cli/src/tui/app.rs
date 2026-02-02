@@ -11,15 +11,15 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::StreamExt;
+use futures::{stream::FuturesUnordered, StreamExt};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tui_input::Input;
 
 use qq_core::{
-    execute_tools_parallel_with_chunker, ChunkProcessor, ChunkerConfig, CompletionRequest,
-    Message, Provider, StreamChunk, ToolCall, ToolRegistry,
+    ChunkProcessor, ChunkerConfig, CompletionRequest, Message, Provider, StreamChunk, ToolCall,
+    ToolExecutionResult, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -127,15 +127,22 @@ impl TuiApp {
         }
     }
 
-    /// Reset for a new response
-    pub fn start_response(&mut self) {
-        self.content.clear();
+    /// Reset for a new response (preserves conversation history)
+    pub fn start_response(&mut self, user_input: &str) {
+        // Add separator and user message to existing content
+        if !self.content.is_empty() {
+            self.content.push_str("\n\n---\n\n");
+        }
+        self.content.push_str("**You:** ");
+        self.content.push_str(user_input);
+        self.content.push_str("\n\n**Assistant:** ");
+
+        // Clear thinking for new response
         self.thinking_content.clear();
         self.thinking_collapsed = false;
         self.is_streaming = true;
         self.is_waiting = true;
         self.tool_calls.clear();
-        self.scroll_offset = 0;
         self.auto_scroll = true;
         self.status_message = None;
         self.agent_progress = None;
@@ -436,10 +443,8 @@ impl TuiApp {
         self.auto_scroll = false;
     }
 
-    /// Scroll to bottom
+    /// Scroll to bottom (auto-scroll handles actual position at render time)
     pub fn scroll_to_bottom(&mut self) {
-        let max_scroll = self.content_height.saturating_sub(self.viewport_height);
-        self.scroll_offset = max_scroll;
         self.auto_scroll = true;
     }
 
@@ -647,7 +652,7 @@ pub async fn run_tui(
                                 } else {
                                     // Regular message - start completion
                                     session.add_user_message(&input);
-                                    app.start_response();
+                                    app.start_response(&input);
 
                                     // Clone things for the spawned task
                                     let provider = Arc::clone(&provider);
@@ -932,31 +937,68 @@ async fn run_streaming_completion(
                 messages: vec![assistant_msg],
             }).await;
 
-            // Execute tools - push context for each tool as it starts
+            // Execute tools with streaming - send events as each tool completes
             for tool_call in &tool_calls {
                 execution_context.push_tool(&tool_call.name).await;
                 let _ = tx.send(StreamEvent::ToolExecuting { name: tool_call.name.clone() }).await;
             }
 
-            let results = execute_tools_parallel_with_chunker(
-                &tools_registry,
-                tool_calls.clone(),
-                Some(&chunk_processor),
-                Some(&original_query),
-            )
-            .await;
+            // Create futures for each tool execution
+            let mut futures: FuturesUnordered<_> = tool_calls
+                .iter()
+                .map(|tool_call| {
+                    let registry = tools_registry.clone();
+                    let tool_call_id = tool_call.id.clone();
+                    let tool_name = tool_call.name.clone();
+                    let arguments = tool_call.arguments.clone();
 
+                    async move {
+                        let result = if let Some(tool) = registry.get(&tool_name) {
+                            match tool.execute(arguments).await {
+                                Ok(output) => ToolExecutionResult {
+                                    tool_call_id: tool_call_id.clone(),
+                                    content: if output.is_error {
+                                        format!("Error: {}", output.content)
+                                    } else {
+                                        output.content
+                                    },
+                                    is_error: output.is_error,
+                                },
+                                Err(e) => ToolExecutionResult {
+                                    tool_call_id: tool_call_id.clone(),
+                                    content: format!("Error executing tool: {}", e),
+                                    is_error: true,
+                                },
+                            }
+                        } else {
+                            ToolExecutionResult {
+                                tool_call_id: tool_call_id.clone(),
+                                content: format!("Error: Unknown tool '{}'", tool_name),
+                                is_error: true,
+                            }
+                        };
+                        (tool_name, result)
+                    }
+                })
+                .collect();
+
+            // Stream results as they complete
             let mut tool_result_messages = Vec::new();
-            for result in results {
-                let tool_name = tool_calls
-                    .iter()
-                    .find(|tc| tc.id == result.tool_call_id)
-                    .map(|tc| tc.name.clone())
-                    .unwrap_or_default();
+            while let Some((tool_name, mut result)) = futures.next().await {
+                // Apply chunking if needed
+                if !result.is_error && chunk_processor.should_chunk(&result.content) {
+                    if let Ok(processed) = chunk_processor
+                        .process_large_content(&result.content, Some(&original_query))
+                        .await
+                    {
+                        result.content = processed;
+                    }
+                }
 
                 // Pop the tool context
                 execution_context.pop().await;
 
+                // Send completion event immediately
                 let _ = tx.send(StreamEvent::ToolComplete {
                     id: result.tool_call_id.clone(),
                     name: tool_name,

@@ -3,9 +3,34 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use scraper::{Html, Selector};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
+
+// =============================================================================
+// Web Search Configuration (Perplexica API)
+// =============================================================================
+
+/// Configuration for the Perplexica-based web search
+#[derive(Clone, Debug)]
+pub struct WebSearchConfig {
+    /// Base URL of the Perplexica instance (e.g., "http://localhost:3000")
+    pub host: String,
+    /// Chat model name (e.g., "gpt-4o-mini")
+    pub chat_model: String,
+    /// Embedding model name (e.g., "text-embedding-3-large")
+    pub embed_model: String,
+}
+
+impl WebSearchConfig {
+    pub fn new(host: impl Into<String>, chat_model: impl Into<String>, embed_model: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            chat_model: chat_model.into(),
+            embed_model: embed_model.into(),
+        }
+    }
+}
 
 // =============================================================================
 // Fetch Webpage Tool
@@ -205,6 +230,228 @@ fn clean_text(text: &str) -> String {
 }
 
 // =============================================================================
+// Web Search Tool (Perplexica API)
+// =============================================================================
+
+pub struct WebSearchTool {
+    client: Client,
+    config: WebSearchConfig,
+}
+
+impl WebSearchTool {
+    pub fn new(config: WebSearchConfig) -> Self {
+        Self {
+            client: Client::builder()
+                .user_agent("qq-cli/0.1.0")
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
+            config,
+        }
+    }
+
+    /// Get provider IDs for the configured chat and embedding models.
+    /// Returns optional providers - if models aren't found, returns None for that provider
+    /// and lets the search API handle validation (matching Python behavior).
+    async fn get_provider_ids(&self) -> Result<(Option<ModelProvider>, Option<ModelProvider>), Error> {
+        let url = format!("{}/api/providers", self.config.host);
+        let response = self.client.get(&url).send().await
+            .map_err(|e| Error::tool("web_search", format!("Failed to get providers: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(Error::tool("web_search", format!("Provider API error: {}", response.status())));
+        }
+
+        let data: ProvidersResponse = response.json().await
+            .map_err(|e| Error::tool("web_search", format!("Failed to parse providers: {}", e)))?;
+
+        let mut chat_provider: Option<ModelProvider> = None;
+        let mut embed_provider: Option<ModelProvider> = None;
+
+        for provider in &data.providers {
+            // Find chat model
+            if chat_provider.is_none() {
+                if let Some(model) = provider.chat_models.iter().find(|m| m.name == self.config.chat_model) {
+                    chat_provider = Some(ModelProvider {
+                        provider_id: provider.id.clone(),
+                        key: model.key.clone(),
+                    });
+                }
+            }
+
+            // Find embedding model
+            if embed_provider.is_none() {
+                if let Some(model) = provider.embedding_models.iter().find(|m| m.name == self.config.embed_model) {
+                    embed_provider = Some(ModelProvider {
+                        provider_id: provider.id.clone(),
+                        key: model.key.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok((chat_provider, embed_provider))
+    }
+}
+
+#[derive(Deserialize)]
+struct ProvidersResponse {
+    providers: Vec<Provider>,
+}
+
+#[derive(Deserialize)]
+struct Provider {
+    id: String,
+    #[serde(rename = "chatModels")]
+    chat_models: Vec<Model>,
+    #[serde(rename = "embeddingModels")]
+    embedding_models: Vec<Model>,
+}
+
+#[derive(Deserialize)]
+struct Model {
+    name: String,
+    key: String,
+}
+
+#[derive(Clone)]
+struct ModelProvider {
+    provider_id: String,
+    key: String,
+}
+
+
+#[derive(Serialize)]
+struct SearchRequest {
+    #[serde(rename = "chatModel")]
+    chat_model: Option<ChatModelRef>,
+    #[serde(rename = "embeddingModel")]
+    embedding_model: Option<EmbedModelRef>,
+    #[serde(rename = "optimizationMode")]
+    optimization_mode: String,
+    sources: Vec<String>,
+    query: String,
+    history: Vec<(String, String)>,
+    #[serde(rename = "systemInstructions")]
+    system_instructions: String,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct ChatModelRef {
+    #[serde(rename = "providerId")]
+    provider_id: String,
+    key: String,
+}
+
+#[derive(Serialize)]
+struct EmbedModelRef {
+    #[serde(rename = "providerId")]
+    provider_id: String,
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct SearchResponse {
+    message: String,
+    sources: Vec<SearchSource>,
+}
+
+#[derive(Deserialize)]
+struct SearchSource {
+    content: String,
+    metadata: SourceMetadata,
+}
+
+#[derive(Deserialize)]
+struct SourceMetadata {
+    title: String,
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct WebSearchArgs {
+    query: String,
+}
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web using natural language queries. Returns a synthesized answer with sources."
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property("query", PropertySchema::string("The search query (can be natural language)"), true),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        let args: WebSearchArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("web_search", format!("Invalid arguments: {}", e)))?;
+
+        // Get provider IDs (may be None if models not found - let API handle validation)
+        let (chat_provider, embed_provider) = self.get_provider_ids().await?;
+
+        // Build search request with optional model refs (matching Python behavior)
+        let request = SearchRequest {
+            chat_model: chat_provider.map(|p| ChatModelRef {
+                provider_id: p.provider_id,
+                key: p.key,
+            }),
+            embedding_model: embed_provider.map(|p| EmbedModelRef {
+                provider_id: p.provider_id,
+                key: p.key,
+            }),
+            optimization_mode: "speed".to_string(),
+            sources: vec!["web".to_string()],
+            query: args.query.clone(),
+            history: vec![
+                ("human".to_string(), "Hi, how are you?".to_string()),
+                ("assistant".to_string(), "I am doing well, how can I help you today?".to_string()),
+            ],
+            system_instructions: "Provide high level details.".to_string(),
+            stream: false,
+        };
+
+        // Perform search
+        let url = format!("{}/api/search", self.config.host);
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::tool("web_search", format!("Search request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::tool("web_search", format!("Search API error {}: {}", status, body)));
+        }
+
+        let result: SearchResponse = response.json().await
+            .map_err(|e| Error::tool("web_search", format!("Failed to parse search response: {}", e)))?;
+
+        // Format output
+        let mut output = result.message;
+
+        if !result.sources.is_empty() {
+            output.push_str("\n\n## Sources\n");
+            for source in result.sources {
+                output.push_str(&format!("- [{}]({})\n", source.metadata.title, source.metadata.url));
+            }
+        }
+
+        Ok(ToolOutput::success(output))
+    }
+}
+
+// =============================================================================
 // Factory functions
 // =============================================================================
 
@@ -218,6 +465,17 @@ pub fn create_web_tools() -> Vec<Box<dyn Tool>> {
 /// Create all web tools (Arc version)
 pub fn create_web_tools_arc() -> Vec<Arc<dyn Tool>> {
     vec![Arc::new(FetchWebpageTool::new())]
+}
+
+/// Create web tools with optional search capability
+pub fn create_web_tools_with_search(search_config: Option<WebSearchConfig>) -> Vec<Arc<dyn Tool>> {
+    let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FetchWebpageTool::new())];
+
+    if let Some(config) = search_config {
+        tools.push(Arc::new(WebSearchTool::new(config)));
+    }
+
+    tools
 }
 
 #[cfg(test)]
