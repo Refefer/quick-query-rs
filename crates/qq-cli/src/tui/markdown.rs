@@ -177,40 +177,10 @@ fn is_table_separator(line: &str) -> bool {
         && trimmed.contains('-')
 }
 
-/// Render a table separator row with box-drawing characters
+/// Render a table separator row - just style it dimmed
 fn render_table_separator(line: &str, styles: &MarkdownStyles) -> Line<'static> {
-    let mut spans = Vec::new();
-    let parts: Vec<&str> = line.split('|').collect();
-    let mut is_first_content = true;
-
-    for (i, part) in parts.iter().enumerate() {
-        let trimmed = part.trim();
-
-        // Handle leading empty part (from leading |)
-        if i == 0 && trimmed.is_empty() {
-            spans.push(Span::styled("├", styles.table_border));
-            continue;
-        }
-
-        // Handle trailing empty part (from trailing |)
-        if i == parts.len() - 1 && trimmed.is_empty() {
-            spans.push(Span::styled("┤", styles.table_border));
-            continue;
-        }
-
-        // Add intersection before content cells (except the first one)
-        if !is_first_content {
-            spans.push(Span::styled("┼", styles.table_border));
-        }
-        is_first_content = false;
-
-        // Replace dashes with horizontal line, preserving width
-        let width = part.len();
-        let separator = "─".repeat(width);
-        spans.push(Span::styled(separator, styles.table_border));
-    }
-
-    Line::from(spans)
+    // Keep the original separator line, just style it
+    Line::from(Span::styled(line.to_string(), styles.table_border))
 }
 
 /// Render a table row with styled cells
@@ -222,42 +192,13 @@ fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Lin
         styles.normal
     };
 
-    // Split by | and render each cell
-    let parts: Vec<&str> = line.split('|').collect();
-    let mut is_first_content = true;
-
-    for (i, part) in parts.iter().enumerate() {
-        // Handle leading empty part (from leading |)
-        if i == 0 && part.trim().is_empty() {
-            spans.push(Span::styled("│", styles.table_border));
-            continue;
-        }
-
-        // Handle trailing empty part (from trailing |)
-        if i == parts.len() - 1 && part.trim().is_empty() {
-            spans.push(Span::styled("│", styles.table_border));
-            continue;
-        }
-
-        // Add separator before content cells (except the first one)
-        if !is_first_content {
-            spans.push(Span::styled("│", styles.table_border));
-        }
-        is_first_content = false;
-
-        // Preserve the original spacing/padding in the cell
-        let cell_content = part.trim();
-        let padding_left = part.len() - part.trim_start().len();
-        let padding_right = part.len() - part.trim_end().len();
-
-        // Add left padding
-        if padding_left > 0 {
-            spans.push(Span::styled(" ".repeat(padding_left), styles.normal));
-        }
-
-        if !cell_content.is_empty() {
-            // Apply inline styling to cell content
-            let cell_spans = style_inline(cell_content, styles);
+    // Split by | and render each cell, keeping original | characters
+    let mut last_end = 0;
+    for (i, _) in line.match_indices('|') {
+        // Add content before this |
+        if i > last_end {
+            let content = &line[last_end..i];
+            let cell_spans = style_inline(content, styles);
             for mut span in cell_spans {
                 if is_header {
                     span.style = cell_style;
@@ -265,10 +206,20 @@ fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Lin
                 spans.push(span);
             }
         }
+        // Add the | character with border styling
+        spans.push(Span::styled("|", styles.table_border));
+        last_end = i + 1;
+    }
 
-        // Add right padding
-        if padding_right > 0 {
-            spans.push(Span::styled(" ".repeat(padding_right), styles.normal));
+    // Add any remaining content after the last |
+    if last_end < line.len() {
+        let content = &line[last_end..];
+        let cell_spans = style_inline(content, styles);
+        for mut span in cell_spans {
+            if is_header {
+                span.style = cell_style;
+            }
+            spans.push(span);
         }
     }
 
@@ -470,14 +421,9 @@ mod tests {
         let styles = MarkdownStyles::default();
         let line = render_table_separator("|----------|----------|", &styles);
 
-        // Should render as: ├──────────┼──────────┤
+        // Should keep original separator, just styled
         let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(rendered.starts_with('├'), "Should start with ├, got: {}", rendered);
-        assert!(rendered.ends_with('┤'), "Should end with ┤, got: {}", rendered);
-        assert!(rendered.contains('┼'), "Should contain ┼, got: {}", rendered);
-        assert!(rendered.contains('─'), "Should contain ─, got: {}", rendered);
-        // Verify no double intersections
-        assert!(!rendered.contains("┼┼"), "Should not have double ┼, got: {}", rendered);
+        assert_eq!(rendered, "|----------|----------|");
     }
 
     #[test]
@@ -485,13 +431,10 @@ mod tests {
         let styles = MarkdownStyles::default();
         let line = render_table_row("| Header 1 | Header 2 |", &styles, true);
 
-        // Should have │ separators
+        // Should keep original | characters, just styled
         let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(rendered.contains('│'), "Should contain │, got: {}", rendered);
+        assert!(rendered.contains('|'), "Should contain |, got: {}", rendered);
         assert!(rendered.contains("Header 1"), "Should contain Header 1, got: {}", rendered);
         assert!(rendered.contains("Header 2"), "Should contain Header 2, got: {}", rendered);
-        // Verify no double separators at the start
-        assert!(!rendered.starts_with("││"), "Should not start with ││, got: {}", rendered);
-        assert!(!rendered.contains("││"), "Should not have double ││, got: {}", rendered);
     }
 }
