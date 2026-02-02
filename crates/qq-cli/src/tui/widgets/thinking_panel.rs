@@ -124,15 +124,12 @@ impl<'a> ThinkingPanel<'a> {
             Style::default().fg(Color::DarkGray),
         )));
 
-        // Show up to 5 most recent notifications
+        // Show up to 5 most recent notifications (newest first)
         let to_show: Vec<_> = self
             .tool_notifications
             .iter()
             .rev()
             .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
             .collect();
 
         for notification in to_show {
