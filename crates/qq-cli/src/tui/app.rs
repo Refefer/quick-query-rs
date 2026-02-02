@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -31,9 +34,11 @@ use crate::execution_context::ExecutionContext;
 use crate::Cli;
 
 use super::events::{InputAction, StreamEvent};
+use super::layout::{LayoutConfig, PaneId};
 use super::markdown::{markdown_to_lines, MarkdownStyles};
+use super::scroll::ScrollState;
 use super::ui;
-use super::widgets::{InputHistory, ToolCallInfo, ToolStatus};
+use super::widgets::{InputHistory, ToolNotification, ToolNotificationStatus};
 
 /// TUI Application state
 pub struct TuiApp {
@@ -57,14 +62,11 @@ pub struct TuiApp {
     pub is_streaming: bool,
     pub status_message: Option<String>,
 
-    // Scroll state
-    pub scroll_offset: u16,
-    pub auto_scroll: bool,
-    pub content_height: u16,
-    pub viewport_height: u16,
+    // Scroll state (replaces individual scroll fields)
+    pub scroll: ScrollState,
 
-    // Tool calls
-    pub tool_calls: Vec<ToolCallInfo>,
+    // Tool notifications (displayed in thinking panel)
+    pub tool_notifications: Vec<ToolNotification>,
 
     // Input
     pub input: Input,
@@ -112,11 +114,8 @@ impl TuiApp {
             tool_iteration: 0,
             is_streaming: false,
             status_message: None,
-            scroll_offset: 0,
-            auto_scroll: true,
-            content_height: 0,
-            viewport_height: 0,
-            tool_calls: Vec::new(),
+            scroll: ScrollState::default(),
+            tool_notifications: Vec::new(),
             input: Input::default(),
             input_history: InputHistory::new(),
             show_help: false,
@@ -146,8 +145,8 @@ impl TuiApp {
         self.thinking_expanded = false;
         self.is_streaming = true;
         self.is_waiting = true;
-        self.tool_calls.clear();
-        self.auto_scroll = true;
+        self.tool_notifications.clear();
+        self.scroll.enable_auto_scroll();
         self.status_message = None;
         self.agent_progress = None;
         self.agent_input_bytes = 0;
@@ -169,17 +168,13 @@ impl TuiApp {
             StreamEvent::ContentDelta(delta) => {
                 self.is_waiting = false;
                 self.content.push_str(&delta);
-                // Auto-scroll if enabled
-                if self.auto_scroll {
-                    self.scroll_to_bottom();
-                }
+                // Auto-scroll if enabled (handled by ScrollState)
             }
             StreamEvent::ToolCallStart { id: _, name } => {
-                self.tool_calls.push(ToolCallInfo {
-                    name: name.clone(),
-                    args_preview: String::new(),
-                    status: ToolStatus::Pending,
-                });
+                self.tool_notifications.push(ToolNotification::new(
+                    name.clone(),
+                    ToolNotificationStatus::Started,
+                ));
                 self.status_message = Some(format!("Tool: {}", name));
             }
             StreamEvent::ToolCallDelta { arguments: _ } => {
@@ -204,8 +199,12 @@ impl TuiApp {
             }
             StreamEvent::ToolExecuting { name } => {
                 // Mark tool as executing
-                if let Some(tool) = self.tool_calls.iter_mut().find(|t| t.name == name) {
-                    tool.status = ToolStatus::Executing;
+                if let Some(notif) = self
+                    .tool_notifications
+                    .iter_mut()
+                    .find(|n| n.tool_name == name)
+                {
+                    notif.status = ToolNotificationStatus::Executing;
                 }
                 self.status_message = Some(format!("Running: {}", name));
             }
@@ -215,20 +214,27 @@ impl TuiApp {
                 result_len,
                 is_error,
             } => {
-                if let Some(tool) = self.tool_calls.iter_mut().find(|t| t.name == name) {
-                    tool.status = if is_error {
-                        ToolStatus::Error
+                if let Some(notif) = self
+                    .tool_notifications
+                    .iter_mut()
+                    .find(|n| n.tool_name == name)
+                {
+                    notif.status = if is_error {
+                        ToolNotificationStatus::Error
                     } else {
-                        ToolStatus::Complete
+                        ToolNotificationStatus::Completed
                     };
-                    tool.args_preview = format!("{} bytes", result_len);
+                    notif.preview = format!("{} bytes", result_len);
                 }
             }
             StreamEvent::IterationStart { iteration } => {
                 self.tool_iteration = iteration;
                 self.is_waiting = true;
             }
-            StreamEvent::ByteCount { input_bytes, output_bytes } => {
+            StreamEvent::ByteCount {
+                input_bytes,
+                output_bytes,
+            } => {
                 // Accumulate byte counts from main streaming
                 self.session_input_bytes += input_bytes;
                 self.session_output_bytes += output_bytes;
@@ -247,17 +253,22 @@ impl TuiApp {
                 self.agent_progress = Some((agent_name, iteration, max_iterations));
                 self.is_waiting = true;
             }
-            AgentEvent::ThinkingDelta { agent_name: _, content } => {
+            AgentEvent::ThinkingDelta {
+                agent_name: _,
+                content,
+            } => {
                 self.is_waiting = false;
                 self.thinking_content.push_str(&content);
             }
-            AgentEvent::ToolStart { agent_name: _, tool_name } => {
+            AgentEvent::ToolStart {
+                agent_name: _,
+                tool_name,
+            } => {
                 self.is_waiting = false;
-                self.tool_calls.push(ToolCallInfo {
-                    name: tool_name.clone(),
-                    args_preview: String::new(),
-                    status: ToolStatus::Executing,
-                });
+                self.tool_notifications.push(ToolNotification::new(
+                    tool_name.clone(),
+                    ToolNotificationStatus::Executing,
+                ));
                 self.status_message = Some(format!("Agent tool: {}", tool_name));
             }
             AgentEvent::ToolComplete {
@@ -265,11 +276,15 @@ impl TuiApp {
                 tool_name,
                 is_error,
             } => {
-                if let Some(tool) = self.tool_calls.iter_mut().find(|t| t.name == tool_name) {
-                    tool.status = if is_error {
-                        ToolStatus::Error
+                if let Some(notif) = self
+                    .tool_notifications
+                    .iter_mut()
+                    .find(|n| n.tool_name == tool_name)
+                {
+                    notif.status = if is_error {
+                        ToolNotificationStatus::Error
                     } else {
-                        ToolStatus::Complete
+                        ToolNotificationStatus::Completed
                     };
                 }
             }
@@ -366,22 +381,22 @@ impl TuiApp {
                 }
             }
             InputAction::ScrollUp => {
-                self.scroll_up(3);
+                self.scroll.scroll_up(3);
             }
             InputAction::ScrollDown => {
-                self.scroll_down(3);
+                self.scroll.scroll_down(3);
             }
             InputAction::PageUp => {
-                self.page_up();
+                self.scroll.page_up();
             }
             InputAction::PageDown => {
-                self.page_down();
+                self.scroll.page_down();
             }
             InputAction::ScrollToTop => {
-                self.scroll_to_top();
+                self.scroll.scroll_to_top();
             }
             InputAction::ScrollToBottom => {
-                self.scroll_to_bottom();
+                self.scroll.scroll_to_bottom();
             }
             InputAction::ToggleThinking => {
                 if self.show_thinking && !self.thinking_content.is_empty() {
@@ -411,7 +426,8 @@ impl TuiApp {
                             .unwrap_or(0)
                     };
                     let after: String = value.chars().skip(cursor).collect();
-                    let new_value: String = value.chars().take(new_cursor).chain(after.chars()).collect();
+                    let new_value: String =
+                        value.chars().take(new_cursor).chain(after.chars()).collect();
                     self.input = Input::new(new_value).with_cursor(new_cursor);
                 }
             }
@@ -419,46 +435,18 @@ impl TuiApp {
         }
     }
 
-    /// Scroll up by amount
-    pub fn scroll_up(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        // Any manual scroll up disables auto-scroll
-        self.auto_scroll = false;
-    }
+    /// Update scroll state with current content and viewport dimensions.
+    /// Call this BEFORE rendering to ensure scroll state is accurate.
+    pub fn update_scroll_dimensions(&mut self, viewport_height: u16, content_width: u16) {
+        // Update viewport height first (this clamps offset if needed)
+        self.scroll.set_viewport_height(viewport_height);
 
-    /// Scroll down by amount
-    pub fn scroll_down(&mut self, amount: u16) {
-        let max_scroll = self.content_height.saturating_sub(self.viewport_height);
-        self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
-        // Re-enable auto-scroll only when we reach the bottom
-        if self.scroll_offset >= max_scroll && max_scroll > 0 {
-            self.auto_scroll = true;
-        } else {
-            self.auto_scroll = false;
-        }
-    }
+        // Calculate content height using markdown processing
+        let styles = MarkdownStyles::default();
+        let lines = markdown_to_lines(&self.content, &styles);
+        let content_height = calculate_wrapped_height(&lines, content_width);
 
-    /// Page up - scroll by half viewport to maintain context
-    pub fn page_up(&mut self) {
-        let amount = (self.viewport_height / 2).max(5);
-        self.scroll_up(amount);
-    }
-
-    /// Page down - scroll by half viewport to maintain context
-    pub fn page_down(&mut self) {
-        let amount = (self.viewport_height / 2).max(5);
-        self.scroll_down(amount);
-    }
-
-    /// Scroll to top
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll = false;
-    }
-
-    /// Scroll to bottom (auto-scroll handles actual position at render time)
-    pub fn scroll_to_bottom(&mut self) {
-        self.auto_scroll = true;
+        self.scroll.set_content_height(content_height);
     }
 
     /// Get current input value and clear
@@ -468,6 +456,22 @@ impl TuiApp {
         self.input = Input::default();
         value
     }
+}
+
+/// Calculate the total wrapped line height for a list of lines.
+fn calculate_wrapped_height(lines: &[ratatui::text::Line], width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if line_len == 0 {
+                1
+            } else {
+                ((line_len + width - 1) / width) as u16
+            }
+        })
+        .sum()
 }
 
 /// Set up panic hook to restore terminal on panic
@@ -515,11 +519,15 @@ pub async fn run_tui(
         None
     };
 
-    // Initialize terminal
-    // Explicitly disable mouse capture to allow normal terminal selection for copy/paste
+    // Initialize terminal with mouse capture enabled
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, DisableMouseCapture, crossterm::cursor::Hide)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::cursor::Hide
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -544,13 +552,23 @@ pub async fn run_tui(
     loop {
         // Render
         terminal.draw(|f| {
-            // Update viewport height for scrolling
-            let content_area_height = f.area().height.saturating_sub(10); // Rough estimate
-            app.viewport_height = content_area_height;
-            // Calculate content height using markdown processing (same as ContentArea)
-            let styles = MarkdownStyles::default();
-            let lines = markdown_to_lines(&app.content, &styles);
-            app.content_height = lines.len() as u16;
+            let area = f.area();
+
+            // Build layout config to compute viewport height BEFORE rendering
+            let mut layout_config = LayoutConfig::new();
+            let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
+            let thinking_lines = app.thinking_content.lines().count() as u16;
+            layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
+
+            // Compute layout to get content area dimensions
+            let layout = layout_config.compute(area);
+            if let Some(&content_rect) = layout.get(&PaneId::Content) {
+                // Update scroll dimensions BEFORE rendering
+                // Subtract 2 for borders
+                let viewport_height = content_rect.height.saturating_sub(2);
+                let content_width = content_rect.width.saturating_sub(2);
+                app.update_scroll_dimensions(viewport_height, content_width);
+            }
 
             ui::render(&app, f);
         })?;
@@ -598,112 +616,141 @@ pub async fn run_tui(
             }
         }
 
-        // Poll for keyboard events
+        // Poll for events (keyboard and mouse)
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                // Handle help overlay dismissal
-                if app.show_help {
-                    app.show_help = false;
-                    continue;
-                }
-
-                let action = key_to_action(key, app.is_streaming);
-
-                match action {
-                    Some(InputAction::Quit) => {
-                        app.should_quit = true;
+            match event::read()? {
+                Event::Key(key) => {
+                    // Handle help overlay dismissal
+                    if app.show_help {
+                        app.show_help = false;
+                        continue;
                     }
-                    Some(InputAction::Cancel) => {
-                        if app.is_streaming {
-                            cancel_token.cancel();
-                            app.is_streaming = false;
-                            app.status_message = Some("Cancelled".to_string());
+
+                    let action = key_to_action(key, app.is_streaming);
+
+                    match action {
+                        Some(InputAction::Quit) => {
+                            app.should_quit = true;
                         }
-                    }
-                    Some(InputAction::Submit) => {
-                        if !app.is_streaming {
-                            let input = app.take_input();
-                            if !input.is_empty() {
-                                // Handle commands
-                                if let Some(cmd) = parse_tui_command(&input) {
-                                    match cmd {
-                                        TuiCommand::Quit => {
-                                            app.should_quit = true;
-                                        }
-                                        TuiCommand::Clear => {
-                                            session.clear();
-                                            app.content.clear();
-                                            app.thinking_content.clear();
-                                            app.tool_calls.clear();
-                                            app.status_message = Some("Cleared".to_string());
-                                        }
-                                        TuiCommand::Reset => {
-                                            session.clear();
-                                            app.content.clear();
-                                            app.thinking_content.clear();
-                                            app.tool_calls.clear();
-                                            app.prompt_tokens = 0;
-                                            app.completion_tokens = 0;
-                                            app.status_message = Some("Session reset".to_string());
-                                        }
-                                        TuiCommand::Help => {
-                                            app.show_help = true;
-                                        }
-                                        TuiCommand::Tools => {
-                                            app.content = format_tools_list(&tools_registry);
-                                        }
-                                        TuiCommand::Agents => {
-                                            if let Some(ref exec) = agent_executor {
-                                                let exec = exec.read().await;
-                                                app.content = format_agents_list(&exec);
-                                            } else {
-                                                app.content =
-                                                    "Agents not configured.".to_string();
+                        Some(InputAction::Cancel) => {
+                            if app.is_streaming {
+                                cancel_token.cancel();
+                                app.is_streaming = false;
+                                app.status_message = Some("Cancelled".to_string());
+                            }
+                        }
+                        Some(InputAction::Submit) => {
+                            if !app.is_streaming {
+                                let input = app.take_input();
+                                if !input.is_empty() {
+                                    // Handle commands
+                                    if let Some(cmd) = parse_tui_command(&input) {
+                                        match cmd {
+                                            TuiCommand::Quit => {
+                                                app.should_quit = true;
+                                            }
+                                            TuiCommand::Clear => {
+                                                session.clear();
+                                                app.content.clear();
+                                                app.thinking_content.clear();
+                                                app.tool_notifications.clear();
+                                                app.status_message = Some("Cleared".to_string());
+                                            }
+                                            TuiCommand::Reset => {
+                                                session.clear();
+                                                app.content.clear();
+                                                app.thinking_content.clear();
+                                                app.tool_notifications.clear();
+                                                app.prompt_tokens = 0;
+                                                app.completion_tokens = 0;
+                                                app.status_message = Some("Session reset".to_string());
+                                            }
+                                            TuiCommand::Help => {
+                                                app.show_help = true;
+                                            }
+                                            TuiCommand::Tools => {
+                                                app.content = format_tools_list(&tools_registry);
+                                            }
+                                            TuiCommand::Agents => {
+                                                if let Some(ref exec) = agent_executor {
+                                                    let exec = exec.read().await;
+                                                    app.content = format_agents_list(&exec);
+                                                } else {
+                                                    app.content = "Agents not configured.".to_string();
+                                                }
+                                            }
+                                            TuiCommand::History => {
+                                                app.content = format!(
+                                                    "Messages in conversation: {}",
+                                                    session.message_count()
+                                                );
                                             }
                                         }
-                                        TuiCommand::History => {
-                                            app.content = format!(
-                                                "Messages in conversation: {}",
-                                                session.message_count()
-                                            );
-                                        }
+                                    } else {
+                                        // Regular message - start completion
+                                        session.add_user_message(&input);
+                                        app.start_response(&input);
+
+                                        // Clone things for the spawned task
+                                        let provider = Arc::clone(&provider);
+                                        let tools = tools_registry.clone();
+                                        let params = extra_params.clone();
+                                        let model = provider.default_model().map(|s| s.to_string());
+                                        let tx = stream_tx.clone();
+                                        let messages = session.build_messages();
+                                        let debug = debug_logger.clone();
+                                        let temp = cli.temperature;
+                                        let max_tok = cli.max_tokens;
+                                        let exec_ctx = execution_context.clone();
+                                        let chunker_cfg = chunker_config.clone();
+                                        let original_query = input.clone();
+
+                                        // Spawn streaming task
+                                        tokio::spawn(async move {
+                                            run_streaming_completion(
+                                                provider,
+                                                tools,
+                                                params,
+                                                model,
+                                                messages,
+                                                tx,
+                                                debug,
+                                                temp,
+                                                max_tok,
+                                                exec_ctx,
+                                                chunker_cfg,
+                                                original_query,
+                                            )
+                                            .await;
+                                        });
                                     }
-                                } else {
-                                    // Regular message - start completion
-                                    session.add_user_message(&input);
-                                    app.start_response(&input);
-
-                                    // Clone things for the spawned task
-                                    let provider = Arc::clone(&provider);
-                                    let tools = tools_registry.clone();
-                                    let params = extra_params.clone();
-                                    let model = provider.default_model().map(|s| s.to_string());
-                                    let tx = stream_tx.clone();
-                                    let messages = session.build_messages();
-                                    let debug = debug_logger.clone();
-                                    let temp = cli.temperature;
-                                    let max_tok = cli.max_tokens;
-                                    let exec_ctx = execution_context.clone();
-                                    let chunker_cfg = chunker_config.clone();
-                                    let original_query = input.clone();
-
-                                    // Spawn streaming task
-                                    tokio::spawn(async move {
-                                        run_streaming_completion(
-                                            provider, tools, params, model, messages, tx, debug,
-                                            temp, max_tok, exec_ctx, chunker_cfg, original_query,
-                                        )
-                                        .await;
-                                    });
                                 }
                             }
                         }
+                        Some(action) => {
+                            app.handle_input_action(action);
+                        }
+                        None => {}
                     }
-                    Some(action) => {
-                        app.handle_input_action(action);
-                    }
-                    None => {}
                 }
+                Event::Mouse(mouse) => {
+                    // Handle mouse scroll events
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            app.scroll.scroll_up(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll.scroll_down(3);
+                        }
+                        _ => {
+                            // Ignore other mouse events
+                        }
+                    }
+                }
+                Event::Resize(_, _) => {
+                    // Terminal resized - next render will update dimensions
+                }
+                _ => {}
             }
         }
 
@@ -848,7 +895,11 @@ async fn run_streaming_completion(
     let max_iterations = 100u32;
 
     for iteration in 0..max_iterations {
-        let _ = tx.send(StreamEvent::IterationStart { iteration: iteration + 1 }).await;
+        let _ = tx
+            .send(StreamEvent::IterationStart {
+                iteration: iteration + 1,
+            })
+            .await;
 
         if let Some(ref logger) = debug_logger {
             logger.log_iteration(iteration as usize, "tui_completion");
@@ -884,7 +935,11 @@ async fn run_streaming_completion(
             Ok(s) => s,
             Err(e) => {
                 execution_context.reset().await;
-                let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                let _ = tx
+                    .send(StreamEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
                 return;
             }
         };
@@ -934,12 +989,22 @@ async fn run_streaming_completion(
                     }
 
                     // Send byte counts for this iteration
-                    let _ = tx.send(StreamEvent::ByteCount { input_bytes, output_bytes }).await;
+                    let _ = tx
+                        .send(StreamEvent::ByteCount {
+                            input_bytes,
+                            output_bytes,
+                        })
+                        .await;
 
                     if tool_calls.is_empty() {
                         // No tool calls - we're done, send final content for session
                         execution_context.reset().await;
-                        let _ = tx.send(StreamEvent::Done { usage, content: content.clone() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Done {
+                                usage,
+                                content: content.clone(),
+                            })
+                            .await;
                         return;
                     }
                 }
@@ -950,7 +1015,11 @@ async fn run_streaming_completion(
                 }
                 Err(e) => {
                     execution_context.reset().await;
-                    let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                    let _ = tx
+                        .send(StreamEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
                     return;
                 }
             }
@@ -959,18 +1028,25 @@ async fn run_streaming_completion(
         // Handle tool calls
         if !tool_calls.is_empty() {
             // Add assistant message with tool calls
-            let assistant_msg = Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+            let assistant_msg =
+                Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
             messages.push(assistant_msg.clone());
 
             // Send session update for the assistant message with tool calls
-            let _ = tx.send(StreamEvent::SessionUpdate {
-                messages: vec![assistant_msg],
-            }).await;
+            let _ = tx
+                .send(StreamEvent::SessionUpdate {
+                    messages: vec![assistant_msg],
+                })
+                .await;
 
             // Execute tools with streaming - send events as each tool completes
             for tool_call in &tool_calls {
                 execution_context.push_tool(&tool_call.name).await;
-                let _ = tx.send(StreamEvent::ToolExecuting { name: tool_call.name.clone() }).await;
+                let _ = tx
+                    .send(StreamEvent::ToolExecuting {
+                        name: tool_call.name.clone(),
+                    })
+                    .await;
             }
 
             // Create futures for each tool execution
@@ -1029,12 +1105,14 @@ async fn run_streaming_completion(
                 execution_context.pop().await;
 
                 // Send completion event immediately
-                let _ = tx.send(StreamEvent::ToolComplete {
-                    id: result.tool_call_id.clone(),
-                    name: tool_name,
-                    result_len: result.content.len(),
-                    is_error: result.is_error,
-                }).await;
+                let _ = tx
+                    .send(StreamEvent::ToolComplete {
+                        id: result.tool_call_id.clone(),
+                        name: tool_name,
+                        result_len: result.content.len(),
+                        is_error: result.is_error,
+                    })
+                    .await;
 
                 let tool_msg = Message::tool_result(&result.tool_call_id, &result.content);
                 messages.push(tool_msg.clone());
@@ -1042,24 +1120,38 @@ async fn run_streaming_completion(
             }
 
             // Send session update for tool results
-            let _ = tx.send(StreamEvent::SessionUpdate {
-                messages: tool_result_messages,
-            }).await;
+            let _ = tx
+                .send(StreamEvent::SessionUpdate {
+                    messages: tool_result_messages,
+                })
+                .await;
 
             // Continue to next iteration
             continue;
         }
 
         // No tool calls, we're done - send byte counts and final content
-        let _ = tx.send(StreamEvent::ByteCount { input_bytes, output_bytes }).await;
+        let _ = tx
+            .send(StreamEvent::ByteCount {
+                input_bytes,
+                output_bytes,
+            })
+            .await;
         execution_context.reset().await;
-        let _ = tx.send(StreamEvent::Done { usage: None, content: content.clone() }).await;
+        let _ = tx
+            .send(StreamEvent::Done {
+                usage: None,
+                content: content.clone(),
+            })
+            .await;
         return;
     }
 
     // Max iterations reached
     execution_context.reset().await;
-    let _ = tx.send(StreamEvent::Error {
-        message: format!("Max iterations ({}) reached", max_iterations),
-    }).await;
+    let _ = tx
+        .send(StreamEvent::Error {
+            message: format!("Max iterations ({}) reached", max_iterations),
+        })
+        .await;
 }

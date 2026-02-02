@@ -1,7 +1,7 @@
 //! UI layout rendering for the TUI.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -9,72 +9,95 @@ use ratatui::{
 };
 
 use super::app::TuiApp;
-use super::widgets::{
-    ContentArea, InputArea, StatusBar, ThinkingPanel, ToolBar,
-};
+use super::layout::{LayoutConfig, PaneId};
+use super::widgets::{ContentArea, InputArea, StatusBar, ThinkingPanel};
 
 /// Render the entire TUI
 pub fn render(app: &TuiApp, frame: &mut Frame) {
     let area = frame.area();
 
-    // Calculate layout based on what's visible
-    let chunks = create_layout(area, app);
+    // Build layout configuration based on current app state
+    let mut layout_config = LayoutConfig::new();
 
-    // Status bar at top
-    let agent_progress = app.agent_progress.as_ref().map(|(name, iter, max)| (name.as_str(), *iter, *max));
-    let mut status_bar = StatusBar::new(&app.profile, &app.primary_agent)
-        .tokens(app.prompt_tokens, app.completion_tokens)
-        .streaming(app.is_streaming)
-        .waiting(app.is_waiting)
-        .execution_context(&app.execution_context)
-        .iteration(app.tool_iteration)
-        .agent_progress(agent_progress)
-        .agent_bytes(app.agent_input_bytes, app.agent_output_bytes)
-        .session_bytes(app.session_input_bytes, app.session_output_bytes);
+    // Configure thinking pane
+    let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
+    let thinking_lines = app.thinking_content.lines().count() as u16;
+    layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
 
-    if let Some(ref msg) = app.status_message {
-        status_bar = status_bar.status(msg);
+    // Configure input pane based on text wrapping
+    let input_lines = calculate_input_lines(app.input.value(), area.width);
+    layout_config.set_input_lines(input_lines);
+
+    // Compute layout
+    let layout = layout_config.compute(area);
+
+    // Render Content area (at top now)
+    if let Some(&content_rect) = layout.get(&PaneId::Content) {
+        if content_rect.height > 0 {
+            let content = ContentArea::new(&app.content)
+                .scroll(app.scroll.effective_offset())
+                .streaming(app.is_streaming)
+                .auto_scroll(app.scroll.is_auto_scroll());
+
+            frame.render_widget(content, content_rect);
+        }
     }
 
-    frame.render_widget(status_bar, chunks.status);
+    // Render Thinking panel (below content)
+    if let Some(&thinking_rect) = layout.get(&PaneId::Thinking) {
+        if thinking_rect.height > 0 && has_thinking {
+            let is_thinking_streaming = app.is_streaming && app.content.is_empty();
+            let thinking = ThinkingPanel::new(&app.thinking_content)
+                .tool_notifications(&app.tool_notifications)
+                .expanded(app.thinking_expanded)
+                .streaming(is_thinking_streaming)
+                .auto_scroll(true);
 
-    // Thinking panel (if visible and has content)
-    if app.show_thinking && !app.thinking_content.is_empty() {
-        let is_thinking_streaming = app.is_streaming && app.content.is_empty();
-        let thinking = ThinkingPanel::new(&app.thinking_content)
-            .expanded(app.thinking_expanded)
-            .streaming(is_thinking_streaming)
-            .auto_scroll(true); // Always auto-scroll thinking panel
-
-        frame.render_widget(thinking, chunks.thinking);
+            frame.render_widget(thinking, thinking_rect);
+        }
     }
 
-    // Main content area
-    let content = ContentArea::new(&app.content)
-        .scroll(app.scroll_offset)
-        .streaming(app.is_streaming)
-        .auto_scroll(app.auto_scroll);
+    // Render Status bar (below thinking)
+    if let Some(&status_rect) = layout.get(&PaneId::Status) {
+        if status_rect.height > 0 {
+            let agent_progress = app
+                .agent_progress
+                .as_ref()
+                .map(|(name, iter, max)| (name.as_str(), *iter, *max));
+            let mut status_bar = StatusBar::new(&app.profile, &app.primary_agent)
+                .tokens(app.prompt_tokens, app.completion_tokens)
+                .streaming(app.is_streaming)
+                .waiting(app.is_waiting)
+                .execution_context(&app.execution_context)
+                .iteration(app.tool_iteration)
+                .agent_progress(agent_progress)
+                .agent_bytes(app.agent_input_bytes, app.agent_output_bytes)
+                .session_bytes(app.session_input_bytes, app.session_output_bytes);
 
-    frame.render_widget(content, chunks.content);
+            if let Some(ref msg) = app.status_message {
+                status_bar = status_bar.status(msg);
+            }
 
-    // Tool bar (if there are tools)
-    if !app.tool_calls.is_empty() {
-        let tool_bar = ToolBar::new(&app.tool_calls);
-        frame.render_widget(tool_bar, chunks.tools);
+            frame.render_widget(status_bar, status_rect);
+        }
     }
 
-    // Input area
-    let input_hint = if app.is_streaming {
-        "Press Ctrl+C to cancel"
-    } else {
-        "/help | /quit | PgUp/PgDn scroll | Ctrl+T toggle thinking"
-    };
+    // Render Input area (at bottom)
+    if let Some(&input_rect) = layout.get(&PaneId::Input) {
+        if input_rect.height > 0 {
+            let input_hint = if app.is_streaming {
+                "Press Ctrl+C to cancel"
+            } else {
+                "/help | /quit | PgUp/PgDn scroll | Ctrl+T toggle thinking"
+            };
 
-    let input = InputArea::new(&app.input)
-        .active(!app.is_streaming)
-        .hint(input_hint);
+            let input = InputArea::new(&app.input)
+                .active(!app.is_streaming)
+                .hint(input_hint);
 
-    frame.render_widget(input, chunks.input);
+            frame.render_widget(input, input_rect);
+        }
+    }
 
     // Show help overlay if requested
     if app.show_help {
@@ -82,109 +105,18 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     }
 }
 
-/// Layout regions
-struct LayoutRegions {
-    status: Rect,
-    thinking: Rect,
-    content: Rect,
-    tools: Rect,
-    input: Rect,
-}
-
-/// Calculate the height needed for the input area based on text wrapping
-fn calculate_input_height(input_text: &str, available_width: u16) -> u16 {
+/// Calculate the number of wrapped lines for input text.
+fn calculate_input_lines(input_text: &str, available_width: u16) -> u16 {
     let prompt_len = 5; // "you> "
     let text_width = available_width.saturating_sub(prompt_len) as usize;
 
     if text_width == 0 || input_text.is_empty() {
-        return 3; // Minimum: 1 border + 1 input line + 1 hint line
+        return 1; // Minimum 1 line for input
     }
 
     // Calculate wrapped line count
     let wrapped_lines = (input_text.len() + text_width - 1) / text_width;
-
-    // 1 for border + wrapped lines + 1 for hint, max 10 lines total
-    let height = (1 + wrapped_lines + 1) as u16;
-    height.clamp(3, 10)
-}
-
-/// Create layout based on current app state
-fn create_layout(area: Rect, app: &TuiApp) -> LayoutRegions {
-    let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
-    let has_tools = !app.tool_calls.is_empty();
-
-    // Build constraints dynamically
-    let mut constraints = vec![
-        Constraint::Length(2), // Status bar
-    ];
-
-    // Thinking panel - normal or expanded
-    // Normal: min 8 lines (6 content + 2 border), max 10
-    // Expanded: takes ~70% of the space
-    if has_thinking {
-        if app.thinking_expanded {
-            // Expanded: use percentage to take most of the screen
-            constraints.push(Constraint::Percentage(70));
-        } else {
-            // Normal: based on content, min 8 (6 content lines), max 10
-            let lines = app.thinking_content.lines().count() as u16;
-            let thinking_height = (lines + 2).min(10).max(8); // +2 for borders, min 8, max 10
-            constraints.push(Constraint::Length(thinking_height));
-        }
-    }
-
-    // Main content - takes remaining space (min 6 lines when thinking expanded)
-    let min_content_height = if has_thinking && app.thinking_expanded { 6 } else { 5 };
-    constraints.push(Constraint::Min(min_content_height));
-
-    // Tool bar
-    let tools_height = if has_tools { 2 } else { 0 };
-    if has_tools {
-        constraints.push(Constraint::Length(tools_height));
-    }
-
-    // Input area - dynamic height based on text length
-    let input_height = calculate_input_height(app.input.value(), area.width);
-    constraints.push(Constraint::Length(input_height));
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-
-    let mut idx = 0;
-
-    let status = chunks[idx];
-    idx += 1;
-
-    let thinking = if has_thinking {
-        let r = chunks[idx];
-        idx += 1;
-        r
-    } else {
-        Rect::default()
-    };
-
-    let content = chunks[idx];
-    idx += 1;
-
-    let tools = if has_tools {
-        let r = chunks[idx];
-        idx += 1;
-        r
-    } else {
-        Rect::default()
-    };
-
-    let input = chunks[idx];
-
-    LayoutRegions {
-        status,
-        thinking,
-        content,
-        tools,
-        input,
-    }
+    wrapped_lines as u16
 }
 
 /// Render help overlay
@@ -216,6 +148,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  Ctrl+Home    Scroll to top"),
         Line::from("  Ctrl+End     Scroll to bottom"),
         Line::from("  Ctrl+T       Expand/shrink thinking panel"),
+        Line::from("  Mouse wheel  Scroll content"),
         Line::from(""),
         Line::from(Span::styled("Commands:", Style::default().fg(Color::Cyan))),
         Line::from("  /help        Show this help"),

@@ -10,7 +10,10 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use crossterm::{
-    event::{self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,11 +23,13 @@ use tui_input::Input;
 
 use crate::execution_context::ExecutionContext;
 use crate::tui::events::InputAction;
+use crate::tui::layout::{LayoutConfig, PaneId};
 use crate::tui::markdown::{markdown_to_lines, MarkdownStyles};
+use crate::tui::scroll::ScrollState;
 use crate::tui::ui;
-use crate::tui::widgets::{InputHistory, ToolCallInfo, ToolStatus};
+use crate::tui::widgets::{InputHistory, ToolNotification, ToolNotificationStatus};
 
-use super::{AgentInterface, AgentOutput, InputResult, UserInput, parse_user_input};
+use super::{parse_user_input, AgentInterface, AgentOutput, InputResult, UserInput};
 
 /// TUI Application state (extracted from tui/app.rs TuiApp).
 pub struct TuiState {
@@ -48,13 +53,10 @@ pub struct TuiState {
     pub status_message: Option<String>,
 
     // Scroll state
-    pub scroll_offset: u16,
-    pub auto_scroll: bool,
-    pub content_height: u16,
-    pub viewport_height: u16,
+    pub scroll: ScrollState,
 
-    // Tool calls
-    pub tool_calls: Vec<ToolCallInfo>,
+    // Tool notifications (displayed in thinking panel)
+    pub tool_notifications: Vec<ToolNotification>,
 
     // Input
     pub input: Input,
@@ -94,11 +96,8 @@ impl TuiState {
             tool_iteration: 0,
             is_streaming: false,
             status_message: None,
-            scroll_offset: 0,
-            auto_scroll: true,
-            content_height: 0,
-            viewport_height: 0,
-            tool_calls: Vec::new(),
+            scroll: ScrollState::default(),
+            tool_notifications: Vec::new(),
             input: Input::default(),
             input_history: InputHistory::new(),
             show_help: false,
@@ -126,8 +125,8 @@ impl TuiState {
         self.thinking_expanded = false;
         self.is_streaming = true;
         self.is_waiting = true;
-        self.tool_calls.clear();
-        self.auto_scroll = true;
+        self.tool_notifications.clear();
+        self.scroll.enable_auto_scroll();
         self.status_message = None;
         self.agent_progress = None;
         self.agent_input_bytes = 0;
@@ -203,12 +202,12 @@ impl TuiState {
                     self.input = Input::new(s);
                 }
             }
-            InputAction::ScrollUp => self.scroll_up(3),
-            InputAction::ScrollDown => self.scroll_down(3),
-            InputAction::PageUp => self.page_up(),
-            InputAction::PageDown => self.page_down(),
-            InputAction::ScrollToTop => self.scroll_to_top(),
-            InputAction::ScrollToBottom => self.scroll_to_bottom(),
+            InputAction::ScrollUp => self.scroll.scroll_up(3),
+            InputAction::ScrollDown => self.scroll.scroll_down(3),
+            InputAction::PageUp => self.scroll.page_up(),
+            InputAction::PageDown => self.scroll.page_down(),
+            InputAction::ScrollToTop => self.scroll.scroll_to_top(),
+            InputAction::ScrollToBottom => self.scroll.scroll_to_bottom(),
             InputAction::ToggleThinking => {
                 if self.show_thinking && !self.thinking_content.is_empty() {
                     self.thinking_expanded = !self.thinking_expanded;
@@ -235,7 +234,8 @@ impl TuiState {
                             .unwrap_or(0)
                     };
                     let after: String = value.chars().skip(cursor).collect();
-                    let new_value: String = value.chars().take(new_cursor).chain(after.chars()).collect();
+                    let new_value: String =
+                        value.chars().take(new_cursor).chain(after.chars()).collect();
                     self.input = Input::new(new_value).with_cursor(new_cursor);
                 }
             }
@@ -243,38 +243,14 @@ impl TuiState {
         }
     }
 
-    pub fn scroll_up(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        self.auto_scroll = false;
-    }
+    /// Update scroll state with current content and viewport dimensions.
+    pub fn update_scroll_dimensions(&mut self, viewport_height: u16, content_width: u16) {
+        self.scroll.set_viewport_height(viewport_height);
 
-    pub fn scroll_down(&mut self, amount: u16) {
-        let max_scroll = self.content_height.saturating_sub(self.viewport_height);
-        self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
-        if self.scroll_offset >= max_scroll && max_scroll > 0 {
-            self.auto_scroll = true;
-        } else {
-            self.auto_scroll = false;
-        }
-    }
-
-    pub fn page_up(&mut self) {
-        let amount = (self.viewport_height / 2).max(5);
-        self.scroll_up(amount);
-    }
-
-    pub fn page_down(&mut self) {
-        let amount = (self.viewport_height / 2).max(5);
-        self.scroll_down(amount);
-    }
-
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll = false;
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.auto_scroll = true;
+        let styles = MarkdownStyles::default();
+        let lines = markdown_to_lines(&self.content, &styles);
+        let content_height = calculate_wrapped_height(&lines, content_width);
+        self.scroll.set_content_height(content_height);
     }
 
     pub fn take_input(&mut self) -> String {
@@ -283,6 +259,22 @@ impl TuiState {
         self.input = Input::default();
         value
     }
+}
+
+/// Calculate the total wrapped line height for a list of lines.
+fn calculate_wrapped_height(lines: &[ratatui::text::Line], width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if line_len == 0 {
+                1
+            } else {
+                ((line_len + width - 1) / width) as u16
+            }
+        })
+        .sum()
 }
 
 /// TUI-based interface for interactive chat.
@@ -365,11 +357,22 @@ impl TuiInterface {
     fn render(&mut self) -> Result<()> {
         if let Some(ref mut terminal) = self.terminal {
             terminal.draw(|f| {
-                let content_area_height = f.area().height.saturating_sub(10);
-                self.state.viewport_height = content_area_height;
-                let styles = MarkdownStyles::default();
-                let lines = markdown_to_lines(&self.state.content, &styles);
-                self.state.content_height = lines.len() as u16;
+                let area = f.area();
+
+                // Build layout config to compute viewport height BEFORE rendering
+                let mut layout_config = LayoutConfig::new();
+                let has_thinking =
+                    self.state.show_thinking && !self.state.thinking_content.is_empty();
+                let thinking_lines = self.state.thinking_content.lines().count() as u16;
+                layout_config.set_thinking(has_thinking, self.state.thinking_expanded, thinking_lines);
+
+                // Compute layout to get content area dimensions
+                let layout = layout_config.compute(area);
+                if let Some(&content_rect) = layout.get(&PaneId::Content) {
+                    let viewport_height = content_rect.height.saturating_sub(2);
+                    let content_width = content_rect.width.saturating_sub(2);
+                    self.state.update_scroll_dimensions(viewport_height, content_width);
+                }
 
                 // Use the existing UI render with our state
                 render_tui_state(&self.state, f);
@@ -378,7 +381,7 @@ impl TuiInterface {
         Ok(())
     }
 
-    /// Process pending keyboard events.
+    /// Process pending keyboard and mouse events.
     fn process_events(&mut self) -> Result<Option<UserInput>> {
         let timeout = if self.state.is_streaming {
             Duration::from_millis(16)
@@ -387,37 +390,55 @@ impl TuiInterface {
         };
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if self.state.show_help {
-                    self.state.show_help = false;
-                    return Ok(None);
-                }
-
-                let action = Self::key_to_action(key, self.state.is_streaming);
-
-                match action {
-                    Some(InputAction::Quit) => {
-                        self.state.should_quit = true;
-                        return Ok(Some(UserInput::Command(super::InterfaceCommand::Quit)));
+            match event::read()? {
+                Event::Key(key) => {
+                    if self.state.show_help {
+                        self.state.show_help = false;
+                        return Ok(None);
                     }
-                    Some(InputAction::Cancel) => {
-                        if self.state.is_streaming {
-                            return Ok(Some(UserInput::Cancel));
+
+                    let action = Self::key_to_action(key, self.state.is_streaming);
+
+                    match action {
+                        Some(InputAction::Quit) => {
+                            self.state.should_quit = true;
+                            return Ok(Some(UserInput::Command(super::InterfaceCommand::Quit)));
                         }
-                    }
-                    Some(InputAction::Submit) => {
-                        if !self.state.is_streaming {
-                            let input = self.state.take_input();
-                            if !input.is_empty() {
-                                return Ok(Some(parse_user_input(&input)));
+                        Some(InputAction::Cancel) => {
+                            if self.state.is_streaming {
+                                return Ok(Some(UserInput::Cancel));
                             }
                         }
+                        Some(InputAction::Submit) => {
+                            if !self.state.is_streaming {
+                                let input = self.state.take_input();
+                                if !input.is_empty() {
+                                    return Ok(Some(parse_user_input(&input)));
+                                }
+                            }
+                        }
+                        Some(action) => {
+                            self.state.handle_input_action(action);
+                        }
+                        None => {}
                     }
-                    Some(action) => {
-                        self.state.handle_input_action(action);
-                    }
-                    None => {}
                 }
+                Event::Mouse(mouse) => {
+                    // Handle mouse scroll events
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.state.scroll.scroll_up(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.state.scroll.scroll_down(3);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Resize(_, _) => {
+                    // Terminal resized - next render will update dimensions
+                }
+                _ => {}
             }
         }
 
@@ -464,36 +485,47 @@ impl AgentInterface for TuiInterface {
             AgentOutput::ContentDelta(delta) => {
                 self.state.is_waiting = false;
                 self.state.content.push_str(&delta);
-                if self.state.auto_scroll {
-                    self.state.scroll_to_bottom();
-                }
             }
             AgentOutput::ThinkingDelta(delta) => {
                 self.state.is_waiting = false;
                 self.state.thinking_content.push_str(&delta);
             }
             AgentOutput::ToolStarted { name, .. } => {
-                self.state.tool_calls.push(ToolCallInfo {
-                    name: name.clone(),
-                    args_preview: String::new(),
-                    status: ToolStatus::Pending,
-                });
+                self.state.tool_notifications.push(ToolNotification::new(
+                    name.clone(),
+                    ToolNotificationStatus::Started,
+                ));
                 self.state.status_message = Some(format!("Tool: {}", name));
             }
             AgentOutput::ToolExecuting { name } => {
-                if let Some(tool) = self.state.tool_calls.iter_mut().find(|t| t.name == name) {
-                    tool.status = ToolStatus::Executing;
+                if let Some(notif) = self
+                    .state
+                    .tool_notifications
+                    .iter_mut()
+                    .find(|n| n.tool_name == name)
+                {
+                    notif.status = ToolNotificationStatus::Executing;
                 }
                 self.state.status_message = Some(format!("Running: {}", name));
             }
-            AgentOutput::ToolCompleted { name, result_len, is_error, .. } => {
-                if let Some(tool) = self.state.tool_calls.iter_mut().find(|t| t.name == name) {
-                    tool.status = if is_error {
-                        ToolStatus::Error
+            AgentOutput::ToolCompleted {
+                name,
+                result_len,
+                is_error,
+                ..
+            } => {
+                if let Some(notif) = self
+                    .state
+                    .tool_notifications
+                    .iter_mut()
+                    .find(|n| n.tool_name == name)
+                {
+                    notif.status = if is_error {
+                        ToolNotificationStatus::Error
                     } else {
-                        ToolStatus::Complete
+                        ToolNotificationStatus::Completed
                     };
-                    tool.args_preview = format!("{} bytes", result_len);
+                    notif.preview = format!("{} bytes", result_len);
                 }
             }
             AgentOutput::Done { usage, .. } => {
@@ -524,7 +556,10 @@ impl AgentInterface for TuiInterface {
                 self.state.tool_iteration = iteration;
                 self.state.is_waiting = true;
             }
-            AgentOutput::ByteCount { input_bytes, output_bytes } => {
+            AgentOutput::ByteCount {
+                input_bytes,
+                output_bytes,
+            } => {
                 self.state.session_input_bytes += input_bytes;
                 self.state.session_output_bytes += output_bytes;
             }
@@ -554,7 +589,12 @@ impl AgentInterface for TuiInterface {
 
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, DisableMouseCapture, crossterm::cursor::Hide)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            crossterm::cursor::Hide
+        )?;
         let backend = CrosstermBackend::new(stdout);
         self.terminal = Some(Terminal::new(backend)?);
 
@@ -608,11 +648,8 @@ fn render_tui_state(state: &TuiState, f: &mut ratatui::Frame) {
         tool_iteration: state.tool_iteration,
         is_streaming: state.is_streaming,
         status_message: state.status_message.clone(),
-        scroll_offset: state.scroll_offset,
-        auto_scroll: state.auto_scroll,
-        content_height: state.content_height,
-        viewport_height: state.viewport_height,
-        tool_calls: state.tool_calls.clone(),
+        scroll: state.scroll.clone(),
+        tool_notifications: state.tool_notifications.clone(),
         input: state.input.clone(),
         input_history: state.input_history.clone(),
         show_help: state.show_help,

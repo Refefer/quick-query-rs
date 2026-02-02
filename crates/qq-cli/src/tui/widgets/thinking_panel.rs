@@ -1,4 +1,4 @@
-//! Expandable thinking/reasoning panel widget.
+//! Expandable thinking/reasoning panel widget with tool notifications.
 
 use ratatui::{
     buffer::Buffer,
@@ -8,9 +8,72 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
-/// Thinking panel that can be expanded to fullscreen
+/// Status of a tool notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolNotificationStatus {
+    /// Tool call has started (arguments being streamed)
+    Started,
+    /// Tool is currently executing
+    Executing,
+    /// Tool completed successfully
+    Completed,
+    /// Tool execution failed
+    Error,
+}
+
+/// A tool notification to display in the thinking panel.
+#[derive(Debug, Clone)]
+pub struct ToolNotification {
+    pub tool_name: String,
+    pub status: ToolNotificationStatus,
+    /// Optional preview of arguments or result
+    pub preview: String,
+}
+
+impl ToolNotification {
+    pub fn new(tool_name: String, status: ToolNotificationStatus) -> Self {
+        Self {
+            tool_name,
+            status,
+            preview: String::new(),
+        }
+    }
+
+    pub fn with_preview(mut self, preview: String) -> Self {
+        self.preview = preview;
+        self
+    }
+
+    /// Get the status icon for this notification.
+    fn icon(&self) -> (&'static str, Style) {
+        match self.status {
+            ToolNotificationStatus::Started => (
+                "",
+                Style::default().fg(Color::DarkGray),
+            ),
+            ToolNotificationStatus::Executing => (
+                "",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ToolNotificationStatus::Completed => (
+                "",
+                Style::default().fg(Color::Green),
+            ),
+            ToolNotificationStatus::Error => (
+                "",
+                Style::default().fg(Color::Red),
+            ),
+        }
+    }
+}
+
+/// Thinking panel that can be expanded to fullscreen.
+/// Also displays tool notifications at the bottom.
 pub struct ThinkingPanel<'a> {
     content: &'a str,
+    tool_notifications: &'a [ToolNotification],
     is_expanded: bool,
     is_streaming: bool,
     auto_scroll: bool,
@@ -20,10 +83,16 @@ impl<'a> ThinkingPanel<'a> {
     pub fn new(content: &'a str) -> Self {
         Self {
             content,
+            tool_notifications: &[],
             is_expanded: false,
             is_streaming: false,
             auto_scroll: true,
         }
+    }
+
+    pub fn tool_notifications(mut self, notifications: &'a [ToolNotification]) -> Self {
+        self.tool_notifications = notifications;
+        self
     }
 
     pub fn expanded(mut self, expanded: bool) -> Self {
@@ -39,6 +108,71 @@ impl<'a> ThinkingPanel<'a> {
     pub fn auto_scroll(mut self, auto_scroll: bool) -> Self {
         self.auto_scroll = auto_scroll;
         self
+    }
+
+    /// Render tool notifications as lines.
+    fn render_tool_notifications(&self) -> Vec<Line<'a>> {
+        if self.tool_notifications.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = Vec::new();
+
+        // Separator line
+        lines.push(Line::from(Span::styled(
+            "─ Tools ─────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        // Show up to 5 most recent notifications
+        let to_show: Vec<_> = self
+            .tool_notifications
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        for notification in to_show {
+            let (icon, icon_style) = notification.icon();
+            let mut spans = vec![
+                Span::styled(icon, icon_style),
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    notification.tool_name.clone(),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ];
+
+            if !notification.preview.is_empty() {
+                // Truncate preview to avoid overflow
+                let max_preview = 40;
+                let preview = if notification.preview.len() > max_preview {
+                    format!("{}...", &notification.preview[..max_preview])
+                } else {
+                    notification.preview.clone()
+                };
+                spans.push(Span::styled(
+                    format!(" {}", preview),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+
+            lines.push(Line::from(spans));
+        }
+
+        // Show count if there are more
+        if self.tool_notifications.len() > 5 {
+            let hidden = self.tool_notifications.len() - 5;
+            lines.push(Line::from(Span::styled(
+                format!("  (+{} more)", hidden),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        lines
     }
 }
 
@@ -69,10 +203,18 @@ impl Widget for ThinkingPanel<'_> {
         // Render thinking content as plain text (no markdown parsing)
         // Thinking content is raw model output, not formatted markdown
         let text_style = Style::default().fg(Color::DarkGray);
-        let lines: Vec<Line> = self.content
+        let mut lines: Vec<Line> = self
+            .content
             .lines()
             .map(|line| Line::from(Span::styled(line.to_string(), text_style)))
             .collect();
+
+        // Add tool notifications at the bottom
+        let tool_lines = self.render_tool_notifications();
+        if !tool_lines.is_empty() {
+            lines.push(Line::from("")); // Empty line separator
+            lines.extend(tool_lines);
+        }
 
         // Calculate scroll offset for auto-scroll
         // Inner area is area minus borders (2 for top/bottom, 2 for left/right)

@@ -505,4 +505,102 @@ mod tests {
         assert!(result.content.contains("file1.txt"));
         assert!(!result.content.contains("file2.rs"));
     }
+
+    #[tokio::test]
+    async fn test_write_file() {
+        let dir = TempDir::new().unwrap();
+
+        // Test with write enabled
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = WriteFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "output.txt",
+                "content": "Hello from write_file test!"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Successfully wrote"));
+        assert!(result.content.contains("27 bytes")); // "Hello from write_file test!" is 27 chars
+
+        // Verify the file was actually written
+        let written_content = std::fs::read_to_string(dir.path().join("output.txt")).unwrap();
+        assert_eq!(written_content, "Hello from write_file test!");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_disabled() {
+        let dir = TempDir::new().unwrap();
+
+        // Test with write disabled (default)
+        let config = FileSystemConfig::new(dir.path()); // allow_write defaults to false
+        let tool = WriteFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "output.txt",
+                "content": "Should not be written"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_in_existing_subdir() {
+        let dir = TempDir::new().unwrap();
+
+        // Create the subdirectory first
+        std::fs::create_dir_all(dir.path().join("subdir")).unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = WriteFileTool::new(config);
+
+        // Write to an existing subdirectory
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "subdir/file.txt",
+                "content": "Subdir content"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+
+        // Verify the file was created
+        let written_content = std::fs::read_to_string(dir.path().join("subdir/file.txt")).unwrap();
+        assert_eq!(written_content, "Subdir content");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_overwrite() {
+        let dir = TempDir::new().unwrap();
+
+        // Create an existing file
+        let file_path = dir.path().join("existing.txt");
+        std::fs::write(&file_path, "Original content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = WriteFileTool::new(config);
+
+        // Overwrite the file
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "existing.txt",
+                "content": "New content"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+
+        // Verify the file was overwritten
+        let written_content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written_content, "New content");
+    }
 }
