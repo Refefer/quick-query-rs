@@ -85,13 +85,9 @@ pub struct Cli {
     #[arg(long)]
     pub minimal: bool,
 
-    /// Agents-only mode: Chat can only call agents, not tools directly (default: true)
-    #[arg(long, default_value = "true")]
-    pub agents_only: bool,
-
-    /// Allow Chat to call tools directly (disables agents-only mode)
+    /// Agents-only mode: Chat can only call agents, not tools directly
     #[arg(long)]
-    pub direct_tools: bool,
+    pub agents_only: bool,
 
     /// Use TUI mode (default for chat)
     #[arg(long, default_value = "true")]
@@ -189,7 +185,7 @@ fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
         }
     }
 
-    // Web tools
+    // Web tools (fetch_webpage always, web_search if configured)
     if config.tools.enable_web {
         let web_search_config = config.tools.web_search.as_ref().map(|ws| {
             qq_tools::WebSearchConfig::new(&ws.host, &ws.chat_model, &ws.embed_model)
@@ -388,9 +384,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Build the tools registry
-    // In agents-only mode (default), Chat can only call agents (no direct tool access)
-    // Use --direct-tools to allow Chat to call tools directly
-    let agents_only = cli.agents_only && !cli.direct_tools;
+    // By default, Chat can call both tools and agents directly
+    // Use --agents-only to restrict Chat to only calling agents
+    let agents_only = cli.agents_only;
     let mut tools_registry = if agents_only {
         if cli.debug {
             eprintln!("[debug] Agents-only mode: Chat cannot call tools directly");
