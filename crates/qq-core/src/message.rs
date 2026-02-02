@@ -60,19 +60,17 @@ impl Content {
         }
     }
 
-    /// Count the number of characters in this content.
-    pub fn char_count(&self) -> usize {
+    /// Count the number of bytes in this content.
+    pub fn byte_count(&self) -> usize {
         match self {
-            Content::Text(s) => s.chars().count(),
+            Content::Text(s) => s.len(),
             Content::Parts(parts) => parts
                 .iter()
                 .map(|p| match p {
-                    ContentPart::Text { text } => text.chars().count(),
-                    ContentPart::Image { url } => url.chars().count(),
-                    ContentPart::ToolUse(tc) => {
-                        tc.name.chars().count() + tc.arguments.to_string().chars().count()
-                    }
-                    ContentPart::ToolResult(tr) => tr.content.chars().count(),
+                    ContentPart::Text { text } => text.len(),
+                    ContentPart::Image { url } => url.len(),
+                    ContentPart::ToolUse(tc) => tc.name.len() + tc.arguments.to_string().len(),
+                    ContentPart::ToolResult(tr) => tr.content.len(),
                 })
                 .sum(),
         }

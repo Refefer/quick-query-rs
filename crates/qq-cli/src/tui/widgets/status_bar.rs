@@ -16,13 +16,16 @@ pub struct StatusBar<'a> {
     prompt_tokens: u32,
     completion_tokens: u32,
     is_streaming: bool,
+    is_waiting: bool,
     status_message: Option<&'a str>,
     execution_context: Option<&'a ExecutionContext>,
     tool_iteration: u32,
     /// Agent progress: (agent_name, current_iteration, max_iterations)
     agent_progress: Option<(&'a str, u32, u32)>,
-    /// Agent character counts: (input_chars, output_chars)
-    agent_chars: Option<(usize, usize)>,
+    /// Agent byte counts: (input_bytes, output_bytes)
+    agent_bytes: Option<(usize, usize)>,
+    /// Session byte counts: (input_bytes, output_bytes)
+    session_bytes: Option<(usize, usize)>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -32,11 +35,13 @@ impl<'a> StatusBar<'a> {
             prompt_tokens: 0,
             completion_tokens: 0,
             is_streaming: false,
+            is_waiting: false,
             status_message: None,
             execution_context: None,
             tool_iteration: 0,
             agent_progress: None,
-            agent_chars: None,
+            agent_bytes: None,
+            session_bytes: None,
         }
     }
 
@@ -48,6 +53,11 @@ impl<'a> StatusBar<'a> {
 
     pub fn streaming(mut self, is_streaming: bool) -> Self {
         self.is_streaming = is_streaming;
+        self
+    }
+
+    pub fn waiting(mut self, is_waiting: bool) -> Self {
+        self.is_waiting = is_waiting;
         self
     }
 
@@ -71,9 +81,16 @@ impl<'a> StatusBar<'a> {
         self
     }
 
-    pub fn agent_chars(mut self, input_chars: usize, output_chars: usize) -> Self {
-        if input_chars > 0 || output_chars > 0 {
-            self.agent_chars = Some((input_chars, output_chars));
+    pub fn agent_bytes(mut self, input_bytes: usize, output_bytes: usize) -> Self {
+        if input_bytes > 0 || output_bytes > 0 {
+            self.agent_bytes = Some((input_bytes, output_bytes));
+        }
+        self
+    }
+
+    pub fn session_bytes(mut self, input_bytes: usize, output_bytes: usize) -> Self {
+        if input_bytes > 0 || output_bytes > 0 {
+            self.session_bytes = Some((input_bytes, output_bytes));
         }
         self
     }
@@ -87,6 +104,9 @@ impl Widget for StatusBar<'_> {
         let style_tokens = Style::default().fg(Color::White);
         let style_streaming = Style::default()
             .fg(Color::Green)
+            .add_modifier(Modifier::BOLD);
+        let style_waiting = Style::default()
+            .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
 
         let mut spans = Vec::new();
@@ -110,10 +130,10 @@ impl Widget for StatusBar<'_> {
                 format!("Agent[{}] turn {}/{}", agent_name, iteration, max_iterations),
                 style_agent,
             ));
-            // Show character counts for agent
-            if let Some((input_chars, output_chars)) = self.agent_chars {
+            // Show byte counts for agent
+            if let Some((input_bytes, output_bytes)) = self.agent_bytes {
                 spans.push(Span::styled(
-                    format!(" {}c", format_char_count(input_chars + output_chars)),
+                    format!(" {}", format_bytes(input_bytes + output_bytes)),
                     style_dim,
                 ));
             }
@@ -122,33 +142,54 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled(format!(" (turn {})", self.tool_iteration), style_dim));
         }
 
+        // Waiting indicator (before streaming indicator)
+        if self.is_waiting && self.is_streaming {
+            spans.push(Span::styled(" ", style_dim));
+            spans.push(Span::styled("Waiting...", style_waiting));
+        }
+
         // Streaming indicator
         if self.is_streaming {
             spans.push(Span::styled(" ", style_dim));
             spans.push(Span::styled("●", style_streaming));
         }
 
-        // Push tokens to the right side
-        let total = self.prompt_tokens + self.completion_tokens;
-        if total > 0 {
-            // Calculate space needed for right-aligned tokens
-            let tokens_text = format!("{}t", total);
-            let tokens_detail = format!(" ({}p/{}c)", self.prompt_tokens, self.completion_tokens);
+        // Build right side content: session bytes and/or tokens
+        let mut right_content = Vec::new();
 
-            // Add flexible space before tokens
+        // Session bytes
+        if let Some((input_bytes, output_bytes)) = self.session_bytes {
+            let total = input_bytes + output_bytes;
+            right_content.push(Span::styled(format_bytes(total), style_tokens));
+            right_content.push(Span::styled(
+                format!(" ({}↑/{}↓)", format_bytes(input_bytes), format_bytes(output_bytes)),
+                style_dim,
+            ));
+        }
+
+        // Tokens (if we have them)
+        let total_tokens = self.prompt_tokens + self.completion_tokens;
+        if total_tokens > 0 {
+            if !right_content.is_empty() {
+                right_content.push(Span::styled(" | ", style_dim));
+            }
+            right_content.push(Span::styled(format!("{}t", total_tokens), style_tokens));
+        }
+
+        // Add right-aligned content
+        if !right_content.is_empty() {
             let current_len: usize = spans.iter().map(|s| s.content.len()).sum();
-            let tokens_len = tokens_text.len() + tokens_detail.len() + 2; // +2 for padding
+            let right_len: usize = right_content.iter().map(|s| s.content.len()).sum();
             let available = area.width as usize;
 
-            if current_len + tokens_len < available {
-                let padding = available - current_len - tokens_len;
+            if current_len + right_len + 2 < available {
+                let padding = available - current_len - right_len - 2;
                 spans.push(Span::styled(" ".repeat(padding), style_dim));
             } else {
                 spans.push(Span::styled(" | ", style_dim));
             }
 
-            spans.push(Span::styled(tokens_text, style_tokens));
-            spans.push(Span::styled(tokens_detail, style_dim));
+            spans.extend(right_content);
             spans.push(Span::styled(" ", style_dim));
         }
 
@@ -159,14 +200,14 @@ impl Widget for StatusBar<'_> {
     }
 }
 
-/// Format character count with K/M suffixes for readability
-fn format_char_count(chars: usize) -> String {
-    if chars >= 1_000_000 {
-        format!("{:.1}M", chars as f64 / 1_000_000.0)
-    } else if chars >= 1_000 {
-        format!("{:.1}K", chars as f64 / 1_000.0)
+/// Format byte count with Kb/Mb suffixes for readability
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1}Mb", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1}Kb", bytes as f64 / 1_000.0)
     } else {
-        format!("{}", chars)
+        format!("{}b", bytes)
     }
 }
 

@@ -25,10 +25,12 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     let mut status_bar = StatusBar::new(&app.profile)
         .tokens(app.prompt_tokens, app.completion_tokens)
         .streaming(app.is_streaming)
+        .waiting(app.is_waiting)
         .execution_context(&app.execution_context)
         .iteration(app.tool_iteration)
         .agent_progress(agent_progress)
-        .agent_chars(app.agent_input_chars, app.agent_output_chars);
+        .agent_bytes(app.agent_input_bytes, app.agent_output_bytes)
+        .session_bytes(app.session_input_bytes, app.session_output_bytes);
 
     if let Some(ref msg) = app.status_message {
         status_bar = status_bar.status(msg);

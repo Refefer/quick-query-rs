@@ -351,13 +351,13 @@ pub enum AgentProgressEvent {
         agent_name: String,
         usage: Usage,
     },
-    /// Character count update (characters sent/received to LLM).
-    CharacterCount {
+    /// Byte count update (bytes sent/received to LLM).
+    ByteCount {
         agent_name: String,
-        /// Characters sent to the LLM (prompt/context)
-        input_chars: usize,
-        /// Characters received from the LLM (response)
-        output_chars: usize,
+        /// Bytes sent to the LLM (prompt/context)
+        input_bytes: usize,
+        /// Bytes received from the LLM (response)
+        output_bytes: usize,
     },
 }
 
@@ -502,8 +502,8 @@ impl Agent {
                 "Agent iteration starting"
             );
 
-            // Count input characters (messages being sent)
-            let input_chars: usize = messages.iter().map(|m| m.content.char_count()).sum();
+            // Count input bytes (messages being sent)
+            let input_bytes: usize = messages.iter().map(|m| m.content.byte_count()).sum();
 
             let request = CompletionRequest::new(messages.clone())
                 .with_tools(tools.definitions());
@@ -515,16 +515,16 @@ impl Agent {
                 run_complete_iteration(&provider, &config, request).await?
             };
 
-            // Count output characters (response received)
-            let output_chars = content.chars().count();
+            // Count output bytes (response received)
+            let output_bytes = content.len();
 
-            // Emit character count update
+            // Emit byte count update
             if let Some(ref handler) = progress {
                 handler
-                    .on_progress(AgentProgressEvent::CharacterCount {
+                    .on_progress(AgentProgressEvent::ByteCount {
                         agent_name: agent_name.clone(),
-                        input_chars,
-                        output_chars,
+                        input_bytes,
+                        output_bytes,
                     })
                     .await;
             }

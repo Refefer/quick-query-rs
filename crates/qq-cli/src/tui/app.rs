@@ -77,9 +77,16 @@ pub struct TuiApp {
     // Agent progress tracking (agent_name, iteration, max_iterations)
     pub agent_progress: Option<(String, u32, u32)>,
 
-    // Agent character counts (cumulative input/output chars)
-    pub agent_input_chars: usize,
-    pub agent_output_chars: usize,
+    // Agent byte counts (cumulative input/output bytes for current agent)
+    pub agent_input_bytes: usize,
+    pub agent_output_bytes: usize,
+
+    // Session-level byte counts (total across all LLM calls)
+    pub session_input_bytes: usize,
+    pub session_output_bytes: usize,
+
+    // Waiting for LLM response
+    pub is_waiting: bool,
 }
 
 impl Default for TuiApp {
@@ -112,8 +119,11 @@ impl TuiApp {
             should_quit: false,
             execution_context,
             agent_progress: None,
-            agent_input_chars: 0,
-            agent_output_chars: 0,
+            agent_input_bytes: 0,
+            agent_output_bytes: 0,
+            session_input_bytes: 0,
+            session_output_bytes: 0,
+            is_waiting: false,
         }
     }
 
@@ -123,13 +133,14 @@ impl TuiApp {
         self.thinking_content.clear();
         self.thinking_collapsed = false;
         self.is_streaming = true;
+        self.is_waiting = true;
         self.tool_calls.clear();
         self.scroll_offset = 0;
         self.auto_scroll = true;
         self.status_message = None;
         self.agent_progress = None;
-        self.agent_input_chars = 0;
-        self.agent_output_chars = 0;
+        self.agent_input_bytes = 0;
+        self.agent_output_bytes = 0;
     }
 
     /// Handle a stream event
@@ -137,11 +148,15 @@ impl TuiApp {
         match event {
             StreamEvent::Start { model: _ } => {
                 // Model info is available but we display profile name
+                // We're now waiting for content
+                self.is_waiting = true;
             }
             StreamEvent::ThinkingDelta(delta) => {
+                self.is_waiting = false;
                 self.thinking_content.push_str(&delta);
             }
             StreamEvent::ContentDelta(delta) => {
+                self.is_waiting = false;
                 self.content.push_str(&delta);
                 // Auto-scroll if enabled
                 if self.auto_scroll {
@@ -161,6 +176,7 @@ impl TuiApp {
             }
             StreamEvent::Done { usage, content: _ } => {
                 self.is_streaming = false;
+                self.is_waiting = false;
                 if let Some(u) = usage {
                     self.prompt_tokens = u.prompt_tokens;
                     self.completion_tokens = u.completion_tokens;
@@ -172,6 +188,7 @@ impl TuiApp {
             }
             StreamEvent::Error { message } => {
                 self.is_streaming = false;
+                self.is_waiting = false;
                 self.status_message = Some(format!("Error: {}", message));
             }
             StreamEvent::ToolExecuting { name } => {
@@ -198,6 +215,7 @@ impl TuiApp {
             }
             StreamEvent::IterationStart { iteration } => {
                 self.tool_iteration = iteration;
+                self.is_waiting = true;
             }
         }
     }
@@ -211,11 +229,14 @@ impl TuiApp {
                 max_iterations,
             } => {
                 self.agent_progress = Some((agent_name, iteration, max_iterations));
+                self.is_waiting = true;
             }
             AgentEvent::ThinkingDelta { agent_name: _, content } => {
+                self.is_waiting = false;
                 self.thinking_content.push_str(&content);
             }
             AgentEvent::ToolStart { agent_name: _, tool_name } => {
+                self.is_waiting = false;
                 self.tool_calls.push(ToolCallInfo {
                     name: tool_name.clone(),
                     args_preview: String::new(),
@@ -241,14 +262,16 @@ impl TuiApp {
                 self.prompt_tokens += usage.prompt_tokens;
                 self.completion_tokens += usage.completion_tokens;
             }
-            AgentEvent::CharacterCount {
+            AgentEvent::ByteCount {
                 agent_name: _,
-                input_chars,
-                output_chars,
+                input_bytes,
+                output_bytes,
             } => {
-                // Accumulate character counts from agent calls
-                self.agent_input_chars += input_chars;
-                self.agent_output_chars += output_chars;
+                // Accumulate byte counts from agent calls (both per-agent and session)
+                self.agent_input_bytes += input_bytes;
+                self.agent_output_bytes += output_bytes;
+                self.session_input_bytes += input_bytes;
+                self.session_output_bytes += output_bytes;
             }
         }
     }
