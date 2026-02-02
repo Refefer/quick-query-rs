@@ -82,9 +82,9 @@ root = "$PWD"
 # Default: ~/.config/qq/memory.db
 memory_db = "$HOME/.config/qq/memory.db"
 
-# Allow write operations (write_file, delete_file, etc.)
-# Default: false (read-only)
-allow_write = false
+# Allow write operations (write_file tool)
+# Default: true
+allow_write = true
 
 # Enable/disable specific tool categories
 enable_web = true

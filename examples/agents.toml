@@ -2,7 +2,7 @@
 # Copy to ~/.config/qq/agents.toml to use these external agents
 #
 # External agents extend the built-in agents with custom behavior.
-# Built-in agents: researcher, summarizer, coder, reviewer, explore, planner
+# Built-in agents: chat, coder, explore, planner, researcher, reviewer, summarizer, writer
 
 # Custom research agent focused on technical documentation
 [agents.doc-researcher]
@@ -51,12 +51,12 @@ You can:
 - Analyze code to suggest commit messages
 - Explain code changes
 - Help plan branch strategies
-- Suggest .gitignore patterns
+- Create or update .gitignore files
 
 Be concise and practical in your advice.
 """
 max_iterations = 10
-tools = ["read_file", "list_files", "search_files"]
+tools = ["read_file", "write_file", "list_files", "search_files"]
 
 # Security reviewer agent
 [agents.security-reviewer]
