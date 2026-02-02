@@ -1,18 +1,11 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
+use reqwest_eventsource::{Event, EventSource};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error};
-
-/// Log diagnostic message to file for streaming debug
-fn diag_log(msg: &str) {
-    let path = std::env::var("QQ_DIAG_LOG").unwrap_or_else(|_| "/tmp/qq-stream-diag.log".to_string());
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{}", msg);
-    }
-}
 
 use qq_core::{
     CompletionRequest, CompletionResponse, Content, Error, FinishReason, Message, Provider, Role,
@@ -30,19 +23,8 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
-        // Configure client for proper SSE streaming:
-        // - Use HTTP/1.1 to avoid HTTP/2 framing issues
-        // - Disable automatic decompression which can buffer entire response
-        let client = Client::builder()
-            .http1_only()
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .build()
-            .unwrap_or_else(|_| Client::new());
-
         Self {
-            client,
+            client: Client::new(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
@@ -285,141 +267,97 @@ impl Provider for OpenAIProvider {
         let api_request = self.build_request(&req);
         debug!("OpenAI stream request: {:?}", api_request);
 
-        // Make the request directly with reqwest for true streaming
-        // Disable compression and request SSE content type to prevent buffering
-        let response = self
+        let request_builder = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("Accept-Encoding", "identity") // Disable compression
-            .header("Cache-Control", "no-cache")
-            .json(&api_request)
-            .send()
-            .await
-            .map_err(|e| Error::network(e.to_string()))?;
+            .json(&api_request);
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(self.parse_error(status.as_u16(), &error_text));
-        }
-
-        // Log response headers for debugging
-        diag_log(&format!("[SSE] Response status: {}", status));
-        diag_log(&format!("[SSE] Content-Type: {:?}", response.headers().get("content-type")));
-        diag_log(&format!("[SSE] Transfer-Encoding: {:?}", response.headers().get("transfer-encoding")));
-        diag_log(&format!("[SSE] Content-Length: {:?}", response.headers().get("content-length")));
+        let es = EventSource::new(request_builder).map_err(|e| Error::stream(e.to_string()))?;
 
         let (tx, rx) = mpsc::channel::<Result<StreamChunk, Error>>(100);
 
-        // Use response.chunk() directly instead of bytes_stream() for more direct access
         tokio::spawn(async move {
-            let stream_start = std::time::Instant::now();
-            let mut message_count = 0u32;
-            let mut buffer = String::new();
-            let mut byte_count = 0usize;
-            let mut response = response;
+            let mut es = es;
 
-            diag_log(&format!("[{:?}] SSE: Starting to read chunks", stream_start.elapsed()));
+            while let Some(event) = es.next().await {
+                match event {
+                    Ok(Event::Open) => {
+                        debug!("SSE connection opened");
+                    }
+                    Ok(Event::Message(msg)) => {
+                        if msg.data == "[DONE]" {
+                            let _ = tx.send(Ok(StreamChunk::Done { usage: None })).await;
+                            break;
+                        }
 
-            // Use chunk() which reads directly from the connection
-            while let Ok(Some(chunk)) = response.chunk().await {
-                let elapsed = stream_start.elapsed();
-                byte_count += chunk.len();
-                diag_log(&format!("[{:?}] SSE: Received {} bytes (total: {})", elapsed, chunk.len(), byte_count));
+                        match serde_json::from_str::<OpenAIStreamResponse>(&msg.data) {
+                            Ok(response) => {
+                                for choice in response.choices {
+                                    // Handle reasoning/thinking content (o1 models)
+                                    if let Some(reasoning) = choice.delta.reasoning_content {
+                                        if !reasoning.is_empty() {
+                                            let _ = tx
+                                                .send(Ok(StreamChunk::ThinkingDelta { content: reasoning }))
+                                                .await;
+                                        }
+                                    }
 
-                // Append chunk to buffer
-                if let Ok(text) = std::str::from_utf8(&chunk) {
-                    buffer.push_str(text);
-                } else {
-                    error!("Invalid UTF-8 in SSE stream");
-                    continue;
-                }
+                                    if let Some(content) = choice.delta.content {
+                                        if !content.is_empty() {
+                                            let _ = tx
+                                                .send(Ok(StreamChunk::Delta { content }))
+                                                .await;
+                                        }
+                                    }
 
-                // Process complete SSE events (separated by \n\n)
-                while let Some(event_end) = buffer.find("\n\n") {
-                    let event_data = buffer[..event_end].to_string();
-                    buffer = buffer[event_end + 2..].to_string();
-
-                    // Parse SSE event - look for "data: " lines
-                    for line in event_data.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            message_count += 1;
-                            diag_log(&format!("[{:?}] SSE: Message #{} parsed, {} bytes", elapsed, message_count, data.len()));
-
-                            if data == "[DONE]" {
-                                diag_log(&format!("[{:?}] SSE: Stream complete, {} total messages", elapsed, message_count));
-                                let _ = tx.send(Ok(StreamChunk::Done { usage: None })).await;
-                                return;
-                            }
-
-                            match serde_json::from_str::<OpenAIStreamResponse>(data) {
-                                Ok(response) => {
-                                    for choice in response.choices {
-                                        // Handle reasoning/thinking content (o1 models)
-                                        if let Some(reasoning) = choice.delta.reasoning_content {
-                                            if !reasoning.is_empty() {
+                                    if let Some(tool_calls) = choice.delta.tool_calls {
+                                        for tc in tool_calls {
+                                            if let Some(id) = tc.id {
+                                                let name =
+                                                    tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
                                                 let _ = tx
-                                                    .send(Ok(StreamChunk::ThinkingDelta { content: reasoning }))
+                                                    .send(Ok(StreamChunk::ToolCallStart {
+                                                        id,
+                                                        name,
+                                                    }))
                                                     .await;
                                             }
-                                        }
-
-                                        if let Some(content) = choice.delta.content {
-                                            if !content.is_empty() {
-                                                let _ = tx
-                                                    .send(Ok(StreamChunk::Delta { content }))
-                                                    .await;
-                                            }
-                                        }
-
-                                        if let Some(tool_calls) = choice.delta.tool_calls {
-                                            for tc in tool_calls {
-                                                if let Some(id) = tc.id {
-                                                    let name =
-                                                        tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
+                                            if let Some(args) = tc.function.and_then(|f| f.arguments) {
+                                                if !args.is_empty() {
                                                     let _ = tx
-                                                        .send(Ok(StreamChunk::ToolCallStart {
-                                                            id,
-                                                            name,
+                                                        .send(Ok(StreamChunk::ToolCallDelta {
+                                                            arguments: args,
                                                         }))
                                                         .await;
                                                 }
-                                                if let Some(args) = tc.function.and_then(|f| f.arguments) {
-                                                    if !args.is_empty() {
-                                                        let _ = tx
-                                                            .send(Ok(StreamChunk::ToolCallDelta {
-                                                                arguments: args,
-                                                            }))
-                                                            .await;
-                                                    }
-                                                }
                                             }
                                         }
+                                    }
 
-                                        if choice.finish_reason.is_some() {
-                                            let usage = response.usage.as_ref().map(|u| {
-                                                Usage::new(u.prompt_tokens, u.completion_tokens)
-                                            });
-                                            let _ = tx.send(Ok(StreamChunk::Done { usage })).await;
-                                        }
+                                    if choice.finish_reason.is_some() {
+                                        let usage = response.usage.as_ref().map(|u| {
+                                            Usage::new(u.prompt_tokens, u.completion_tokens)
+                                        });
+                                        let _ = tx.send(Ok(StreamChunk::Done { usage })).await;
                                     }
                                 }
-                                Err(e) => {
-                                    error!("Failed to parse SSE message: {} - data: {}", e, data);
-                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to parse SSE message: {} - data: {}", e, msg.data);
                             }
                         }
                     }
+                    Err(e) => {
+                        error!("SSE error: {:?}", e);
+                        let _ = tx
+                            .send(Err(Error::stream(format!("SSE error: {:?}", e))))
+                            .await;
+                        break;
+                    }
                 }
             }
-
-            // Stream ended
-            let elapsed = stream_start.elapsed();
-            diag_log(&format!("[{:?}] SSE: Byte stream ended, {} total bytes, {} messages", elapsed, byte_count, message_count));
-            let _ = tx.send(Ok(StreamChunk::Done { usage: None })).await;
         });
 
         let stream = ReceiverStream::new(rx);
