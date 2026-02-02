@@ -90,7 +90,7 @@ pub struct ToolsConfigEntry {
     pub memory_db: Option<String>,
 
     /// Allow write operations for filesystem tools
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub allow_write: bool,
 
     /// Enable web tools
