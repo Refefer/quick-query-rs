@@ -191,7 +191,7 @@ fn create_layout(area: Rect, app: &TuiApp) -> LayoutRegions {
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     // Create centered overlay
     let overlay_width = 60u16.min(area.width.saturating_sub(4));
-    let overlay_height = 18u16.min(area.height.saturating_sub(4));
+    let overlay_height = 20u16.min(area.height.saturating_sub(4));
 
     let x = (area.width.saturating_sub(overlay_width)) / 2;
     let y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -211,8 +211,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled("Navigation:", Style::default().fg(Color::Cyan))),
-        Line::from("  PgUp/PgDn    Scroll content"),
-        Line::from("  Home/End     Scroll to top/bottom"),
+        Line::from("  PgUp/Ctrl+B  Page up"),
+        Line::from("  PgDn/Ctrl+F  Page down"),
+        Line::from("  Ctrl+Home    Scroll to top"),
+        Line::from("  Ctrl+End     Scroll to bottom"),
         Line::from("  Ctrl+T       Expand/shrink thinking panel"),
         Line::from(""),
         Line::from(Span::styled("Commands:", Style::default().fg(Color::Cyan))),

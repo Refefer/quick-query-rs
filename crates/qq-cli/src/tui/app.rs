@@ -746,6 +746,8 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
         // Scrolling
         (KeyCode::PageUp, _) => Some(InputAction::PageUp),
         (KeyCode::PageDown, _) => Some(InputAction::PageDown),
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(InputAction::PageUp),
+        (KeyCode::Char('f'), KeyModifiers::CONTROL) => Some(InputAction::PageDown),
         (KeyCode::Home, KeyModifiers::CONTROL) => Some(InputAction::ScrollToTop),
         (KeyCode::End, KeyModifiers::CONTROL) => Some(InputAction::ScrollToBottom),
 
