@@ -90,7 +90,7 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn max_iterations(&self) -> usize {
-        1 // Planning typically completes in one turn
+        100
     }
 }
 

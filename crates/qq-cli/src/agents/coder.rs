@@ -72,7 +72,7 @@ impl InternalAgent for CoderAgent {
     }
 
     fn max_iterations(&self) -> usize {
-        10 // Reduced for safety
+        100
     }
 }
 

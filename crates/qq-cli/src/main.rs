@@ -14,10 +14,12 @@ mod agents;
 mod chat;
 mod config;
 mod debug_log;
+mod event_bus;
 mod execution_context;
 mod markdown;
 mod tui;
 
+pub use event_bus::AgentEventBus;
 pub use execution_context::ExecutionContext;
 
 use agents::{create_agent_tools, AgentExecutor, DEFAULT_MAX_AGENT_DEPTH};
@@ -353,6 +355,16 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Create execution context for tracking agent/tool call stack
     let execution_context = ExecutionContext::new();
 
+    // Determine whether to use TUI mode (needed early for event bus decision)
+    let use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout);
+
+    // Create event bus for TUI mode (for agent progress reporting)
+    let event_bus = if use_tui {
+        Some(AgentEventBus::new(256))
+    } else {
+        None
+    };
+
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
         if cli.debug && disable_agents {
@@ -368,6 +380,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             0, // Start at depth 0
             DEFAULT_MAX_AGENT_DEPTH,
             Some(execution_context.clone()),
+            event_bus.clone(),
         )
     };
 
@@ -417,9 +430,6 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         Some(Arc::new(tokio::sync::RwLock::new(executor)))
     };
 
-    // Determine whether to use TUI mode
-    let use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout);
-
     if use_tui {
         tui::run_tui(
             cli,
@@ -432,6 +442,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             agent_executor,
             execution_context,
             chunker_config,
+            event_bus,
         )
         .await
     } else {

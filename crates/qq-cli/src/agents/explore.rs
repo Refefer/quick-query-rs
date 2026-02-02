@@ -71,7 +71,7 @@ impl InternalAgent for ExploreAgent {
     }
 
     fn max_iterations(&self) -> usize {
-        8 // Reduced for safety
+        100
     }
 }
 

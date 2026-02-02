@@ -26,6 +26,7 @@ use crate::agents::AgentExecutor;
 use crate::chat::ChatSession;
 use crate::config::Config as AppConfig;
 use crate::debug_log::DebugLogger;
+use crate::event_bus::{AgentEvent, AgentEventBus};
 use crate::execution_context::ExecutionContext;
 use crate::Cli;
 
@@ -72,6 +73,9 @@ pub struct TuiApp {
 
     // Execution context (for displaying call stack)
     pub execution_context: ExecutionContext,
+
+    // Agent progress tracking (agent_name, iteration, max_iterations)
+    pub agent_progress: Option<(String, u32, u32)>,
 }
 
 impl Default for TuiApp {
@@ -103,6 +107,7 @@ impl TuiApp {
             show_help: false,
             should_quit: false,
             execution_context,
+            agent_progress: None,
         }
     }
 
@@ -116,6 +121,7 @@ impl TuiApp {
         self.scroll_offset = 0;
         self.auto_scroll = true;
         self.status_message = None;
+        self.agent_progress = None;
     }
 
     /// Handle a stream event
@@ -186,6 +192,53 @@ impl TuiApp {
                 self.tool_iteration = iteration;
             }
         }
+    }
+
+    /// Handle an agent event from the event bus
+    pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::IterationStart {
+                agent_name,
+                iteration,
+                max_iterations,
+            } => {
+                self.agent_progress = Some((agent_name, iteration, max_iterations));
+            }
+            AgentEvent::ThinkingDelta { agent_name: _, content } => {
+                self.thinking_content.push_str(&content);
+            }
+            AgentEvent::ToolStart { agent_name: _, tool_name } => {
+                self.tool_calls.push(ToolCallInfo {
+                    name: tool_name.clone(),
+                    args_preview: String::new(),
+                    status: ToolStatus::Executing,
+                });
+                self.status_message = Some(format!("Agent tool: {}", tool_name));
+            }
+            AgentEvent::ToolComplete {
+                agent_name: _,
+                tool_name,
+                is_error,
+            } => {
+                if let Some(tool) = self.tool_calls.iter_mut().find(|t| t.name == tool_name) {
+                    tool.status = if is_error {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Complete
+                    };
+                }
+            }
+            AgentEvent::UsageUpdate { agent_name: _, usage } => {
+                // Accumulate tokens from agent calls
+                self.prompt_tokens += usage.prompt_tokens;
+                self.completion_tokens += usage.completion_tokens;
+            }
+        }
+    }
+
+    /// Clear agent progress when agent completes
+    pub fn clear_agent_progress(&mut self) {
+        self.agent_progress = None;
     }
 
     /// Handle input action
@@ -387,6 +440,7 @@ pub async fn run_tui(
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
     execution_context: ExecutionContext,
     chunker_config: ChunkerConfig,
+    event_bus: Option<AgentEventBus>,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -416,6 +470,9 @@ pub async fn run_tui(
 
     // Channel for stream events
     let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(100);
+
+    // Subscribe to agent event bus if available
+    let mut agent_event_rx = event_bus.as_ref().map(|bus| bus.subscribe());
 
     // Cancellation token for stopping streams
     let cancel_token = CancellationToken::new();
@@ -449,6 +506,8 @@ pub async fn run_tui(
                     if !content.is_empty() {
                         session.add_assistant_message(content);
                     }
+                    // Clear agent progress when main completion is done
+                    app.clear_agent_progress();
                 }
                 StreamEvent::SessionUpdate { messages } => {
                     // Add messages to session (tool calls and results)
@@ -466,6 +525,13 @@ pub async fn run_tui(
                 _ => {}
             }
             app.handle_stream_event(event);
+        }
+
+        // Check for agent events (non-blocking)
+        if let Some(ref mut rx) = agent_event_rx {
+            while let Ok(event) = rx.try_recv() {
+                app.handle_agent_event(event);
+            }
         }
 
         // Poll for keyboard events

@@ -71,7 +71,7 @@ impl InternalAgent for SummarizerAgent {
     }
 
     fn max_iterations(&self) -> usize {
-        1 // Summarization typically completes in one turn
+        100
     }
 }
 

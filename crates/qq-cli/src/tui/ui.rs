@@ -21,11 +21,13 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
     let chunks = create_layout(area, app);
 
     // Status bar at top
+    let agent_progress = app.agent_progress.as_ref().map(|(name, iter, max)| (name.as_str(), *iter, *max));
     let mut status_bar = StatusBar::new(&app.profile)
         .tokens(app.prompt_tokens, app.completion_tokens)
         .streaming(app.is_streaming)
         .execution_context(&app.execution_context)
-        .iteration(app.tool_iteration);
+        .iteration(app.tool_iteration)
+        .agent_progress(agent_progress);
 
     if let Some(ref msg) = app.status_message {
         status_bar = status_bar.status(msg);

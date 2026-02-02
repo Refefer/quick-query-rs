@@ -13,6 +13,7 @@ use qq_core::{Agent, AgentConfig, Error, PropertySchema, Provider, Tool, ToolDef
 
 use super::InternalAgent;
 use crate::config::{AgentDefinition, AgentsConfig};
+use crate::event_bus::AgentEventBus;
 use crate::ExecutionContext;
 
 /// Maximum nesting depth for agent calls.
@@ -39,6 +40,8 @@ pub struct InternalAgentTool {
     max_depth: u32,
     /// Execution context for tracking the call stack
     execution_context: Option<ExecutionContext>,
+    /// Event bus for progress reporting
+    event_bus: Option<AgentEventBus>,
 }
 
 impl InternalAgentTool {
@@ -51,6 +54,7 @@ impl InternalAgentTool {
         current_depth: u32,
         max_depth: u32,
         execution_context: Option<ExecutionContext>,
+        event_bus: Option<AgentEventBus>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -64,6 +68,7 @@ impl InternalAgentTool {
             current_depth,
             max_depth,
             execution_context,
+            event_bus,
         }
     }
 
@@ -176,6 +181,7 @@ impl Tool for InternalAgentTool {
                 next_depth,
                 self.max_depth,
                 self.execution_context.clone(),
+                self.event_bus.clone(),
             );
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
@@ -191,11 +197,15 @@ impl Tool for InternalAgentTool {
         // Context is ONLY the task - no chat history, no chat system prompt
         let context = vec![qq_core::Message::user(args.task.as_str())];
 
-        let result = match Agent::run_once(
+        // Create progress handler if event bus is available
+        let progress = self.event_bus.as_ref().map(|bus| bus.create_handler());
+
+        let result = match Agent::run_once_with_progress(
             Arc::clone(&self.provider),
             agent_tools,
             config,
             context,
+            progress,
         ).await {
             Ok(result) => Ok(ToolOutput::success(result)),
             Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
@@ -232,6 +242,8 @@ pub struct ExternalAgentTool {
     max_depth: u32,
     /// Execution context for tracking the call stack
     execution_context: Option<ExecutionContext>,
+    /// Event bus for progress reporting
+    event_bus: Option<AgentEventBus>,
 }
 
 impl ExternalAgentTool {
@@ -245,6 +257,7 @@ impl ExternalAgentTool {
         current_depth: u32,
         max_depth: u32,
         execution_context: Option<ExecutionContext>,
+        event_bus: Option<AgentEventBus>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -259,6 +272,7 @@ impl ExternalAgentTool {
             current_depth,
             max_depth,
             execution_context,
+            event_bus,
         }
     }
 
@@ -312,6 +326,7 @@ impl Tool for ExternalAgentTool {
                 next_depth,
                 self.max_depth,
                 self.execution_context.clone(),
+                self.event_bus.clone(),
             );
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
@@ -327,11 +342,15 @@ impl Tool for ExternalAgentTool {
         // Context is ONLY the task - no chat history, no chat system prompt
         let context = vec![qq_core::Message::user(args.task.as_str())];
 
-        let result = match Agent::run_once(
+        // Create progress handler if event bus is available
+        let progress = self.event_bus.as_ref().map(|bus| bus.create_handler());
+
+        let result = match Agent::run_once_with_progress(
             Arc::clone(&self.provider),
             agent_tools,
             config,
             context,
+            progress,
         ).await {
             Ok(result) => Ok(ToolOutput::success(result)),
             Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
@@ -358,6 +377,7 @@ impl Tool for ExternalAgentTool {
 /// * `current_depth` - Current nesting depth (0 = top level)
 /// * `max_depth` - Maximum allowed nesting depth
 /// * `execution_context` - Optional context for tracking execution stack
+/// * `event_bus` - Optional event bus for progress reporting
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
     provider: Arc<dyn Provider>,
@@ -366,6 +386,7 @@ pub fn create_agent_tools(
     current_depth: u32,
     max_depth: u32,
     execution_context: Option<ExecutionContext>,
+    event_bus: Option<AgentEventBus>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -391,6 +412,7 @@ pub fn create_agent_tools(
                 current_depth,
                 max_depth,
                 execution_context.clone(),
+                event_bus.clone(),
             )));
         }
     }
@@ -408,6 +430,7 @@ pub fn create_agent_tools(
                 current_depth,
                 max_depth,
                 execution_context.clone(),
+                event_bus.clone(),
             )));
         }
     }

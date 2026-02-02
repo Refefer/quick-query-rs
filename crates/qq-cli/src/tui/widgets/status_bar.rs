@@ -19,6 +19,8 @@ pub struct StatusBar<'a> {
     status_message: Option<&'a str>,
     execution_context: Option<&'a ExecutionContext>,
     tool_iteration: u32,
+    /// Agent progress: (agent_name, current_iteration, max_iterations)
+    agent_progress: Option<(&'a str, u32, u32)>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -31,6 +33,7 @@ impl<'a> StatusBar<'a> {
             status_message: None,
             execution_context: None,
             tool_iteration: 0,
+            agent_progress: None,
         }
     }
 
@@ -59,6 +62,11 @@ impl<'a> StatusBar<'a> {
         self.tool_iteration = iteration;
         self
     }
+
+    pub fn agent_progress(mut self, progress: Option<(&'a str, u32, u32)>) -> Self {
+        self.agent_progress = progress;
+        self
+    }
 }
 
 impl Widget for StatusBar<'_> {
@@ -84,8 +92,16 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled(activity, style_activity));
         }
 
-        // Show iteration count if in a tool loop
-        if self.tool_iteration > 1 {
+        // Show agent progress if an agent is running
+        if let Some((agent_name, iteration, max_iterations)) = self.agent_progress {
+            let style_agent = Style::default().fg(Color::Magenta);
+            spans.push(Span::styled(" › ", style_dim));
+            spans.push(Span::styled(
+                format!("Agent[{}] turn {}/{}", agent_name, iteration, max_iterations),
+                style_agent,
+            ));
+        } else if self.tool_iteration > 1 {
+            // Show iteration count if in a tool loop (but not when agent is running)
             spans.push(Span::styled(format!(" (turn {})", self.tool_iteration), style_dim));
         }
 

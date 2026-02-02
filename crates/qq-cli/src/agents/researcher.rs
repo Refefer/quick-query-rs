@@ -69,7 +69,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn max_iterations(&self) -> usize {
-        6 // Reduced for safety
+        100
     }
 }
 

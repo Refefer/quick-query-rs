@@ -9,10 +9,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::error::Error;
-use crate::message::Message;
+use crate::message::{Message, StreamChunk, Usage};
 use crate::provider::{CompletionRequest, Provider};
 use crate::tool::ToolRegistry;
 
@@ -319,6 +321,48 @@ impl AgentConfig {
     }
 }
 
+/// Events emitted during agent execution for progress reporting.
+#[derive(Debug, Clone)]
+pub enum AgentProgressEvent {
+    /// An iteration of the agent loop has started.
+    IterationStart {
+        agent_name: String,
+        iteration: u32,
+        max_iterations: u32,
+    },
+    /// A chunk of thinking/reasoning content.
+    ThinkingDelta {
+        agent_name: String,
+        content: String,
+    },
+    /// A tool execution has started.
+    ToolStart {
+        agent_name: String,
+        tool_name: String,
+    },
+    /// A tool execution has completed.
+    ToolComplete {
+        agent_name: String,
+        tool_name: String,
+        is_error: bool,
+    },
+    /// Usage statistics update after an LLM call.
+    UsageUpdate {
+        agent_name: String,
+        usage: Usage,
+    },
+}
+
+/// Handler for receiving agent progress events.
+///
+/// Implement this trait to receive real-time updates during agent execution.
+/// The TUI uses this to display thinking content, token counts, and iteration progress.
+#[async_trait]
+pub trait AgentProgressHandler: Send + Sync {
+    /// Called when a progress event occurs during agent execution.
+    async fn on_progress(&self, event: AgentProgressEvent);
+}
+
 /// An LLM-powered agent that can run tasks and communicate with other agents.
 pub struct Agent {
     /// Agent configuration.
@@ -385,12 +429,29 @@ impl Agent {
         config: AgentConfig,
         context: Vec<Message>,
     ) -> Result<String, Error> {
+        Self::run_once_with_progress(provider, tools, config, context, None).await
+    }
+
+    /// Run a one-shot task with progress reporting.
+    ///
+    /// When a progress handler is provided, this uses streaming for LLM calls
+    /// and emits progress events for thinking content, tool execution, and usage.
+    pub async fn run_once_with_progress(
+        provider: Arc<dyn Provider>,
+        tools: Arc<ToolRegistry>,
+        config: AgentConfig,
+        context: Vec<Message>,
+        progress: Option<Arc<dyn AgentProgressHandler>>,
+    ) -> Result<String, Error> {
         use tracing::debug;
+
+        let agent_name = config.id.0.clone();
 
         debug!(
             agent = %config.id,
             context_messages = context.len(),
             tools_available = tools.definitions().len(),
+            has_progress_handler = progress.is_some(),
             "Agent run_once starting"
         );
 
@@ -411,8 +472,21 @@ impl Agent {
         // Add provided context
         messages.extend(context);
 
+        let max_iterations = config.max_iterations as u32;
+
         // Run agentic loop
         for iteration in 0..config.max_iterations {
+            // Emit iteration start event
+            if let Some(ref handler) = progress {
+                handler
+                    .on_progress(AgentProgressEvent::IterationStart {
+                        agent_name: agent_name.clone(),
+                        iteration: iteration as u32 + 1,
+                        max_iterations,
+                    })
+                    .await;
+            }
+
             debug!(
                 agent = %config.id,
                 iteration = iteration,
@@ -420,42 +494,69 @@ impl Agent {
                 "Agent iteration starting"
             );
 
-            let mut request = CompletionRequest::new(messages.clone())
+            let request = CompletionRequest::new(messages.clone())
                 .with_tools(tools.definitions());
 
-            request.stream = false;
+            // Use streaming if we have a progress handler, otherwise use complete()
+            let (content, tool_calls, usage) = if progress.is_some() {
+                run_streaming_iteration(&provider, &agent_name, request, progress.as_ref()).await?
+            } else {
+                run_complete_iteration(&provider, &config, request).await?
+            };
 
-            let response = provider.complete(request).await?;
-
-            // Log if thinking was extracted
-            if let Some(ref thinking) = response.thinking {
-                debug!(
-                    agent = %config.id,
-                    thinking_len = thinking.len(),
-                    "Extracted thinking content (not stored)"
-                );
+            // Emit usage update
+            if let Some(ref handler) = progress {
+                handler
+                    .on_progress(AgentProgressEvent::UsageUpdate {
+                        agent_name: agent_name.clone(),
+                        usage,
+                    })
+                    .await;
             }
 
             // Check for tool calls
-            if !response.message.tool_calls.is_empty() {
+            if !tool_calls.is_empty() {
                 debug!(
                     agent = %config.id,
-                    tool_count = response.message.tool_calls.len(),
+                    tool_count = tool_calls.len(),
                     "Agent executing tools"
                 );
 
                 // Store message with tool calls but NO content (don't store thinking)
-                let msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
+                let msg = Message::assistant_with_tool_calls("", tool_calls.clone());
                 messages.push(msg);
 
                 // Execute tools
-                for tool_call in &response.message.tool_calls {
+                for tool_call in &tool_calls {
+                    // Emit tool start event
+                    if let Some(ref handler) = progress {
+                        handler
+                            .on_progress(AgentProgressEvent::ToolStart {
+                                agent_name: agent_name.clone(),
+                                tool_name: tool_call.name.clone(),
+                            })
+                            .await;
+                    }
+
                     debug!(
                         agent = %config.id,
                         tool = %tool_call.name,
                         "Executing tool"
                     );
                     let result = execute_tool(&tools, tool_call).await;
+                    let is_error = result.starts_with("Error:");
+
+                    // Emit tool complete event
+                    if let Some(ref handler) = progress {
+                        handler
+                            .on_progress(AgentProgressEvent::ToolComplete {
+                                agent_name: agent_name.clone(),
+                                tool_name: tool_call.name.clone(),
+                                is_error,
+                            })
+                            .await;
+                    }
+
                     messages.push(Message::tool_result(&tool_call.id, result));
                 }
 
@@ -463,7 +564,6 @@ impl Agent {
             }
 
             // No tool calls - return final response
-            let content = response.message.content.to_string_lossy();
             debug!(
                 agent = %config.id,
                 iterations = iteration + 1,
@@ -598,6 +698,108 @@ impl Agent {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
+}
+
+/// Run a single iteration using streaming (for progress reporting).
+async fn run_streaming_iteration(
+    provider: &Arc<dyn Provider>,
+    agent_name: &str,
+    request: CompletionRequest,
+    progress: Option<&Arc<dyn AgentProgressHandler>>,
+) -> Result<(String, Vec<crate::message::ToolCall>, Usage), Error> {
+    use tracing::debug;
+
+    let mut stream = provider.stream(request).await?;
+
+    let mut content = String::new();
+    let mut tool_calls: Vec<crate::message::ToolCall> = Vec::new();
+    let mut current_tool_call: Option<(String, String, String)> = None;
+    let mut usage = Usage::default();
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(StreamChunk::Start { model: _ }) => {
+                // Model started
+            }
+            Ok(StreamChunk::ThinkingDelta { content: delta }) => {
+                // Emit thinking delta event
+                if let Some(handler) = progress {
+                    handler
+                        .on_progress(AgentProgressEvent::ThinkingDelta {
+                            agent_name: agent_name.to_string(),
+                            content: delta,
+                        })
+                        .await;
+                }
+            }
+            Ok(StreamChunk::Delta { content: delta }) => {
+                content.push_str(&delta);
+            }
+            Ok(StreamChunk::ToolCallStart { id, name }) => {
+                // Finish pending tool call
+                if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                    tool_calls.push(crate::message::ToolCall::new(tc_id, tc_name, args));
+                }
+                current_tool_call = Some((id, name, String::new()));
+            }
+            Ok(StreamChunk::ToolCallDelta { arguments }) => {
+                if let Some((_, _, ref mut args)) = current_tool_call {
+                    args.push_str(&arguments);
+                }
+            }
+            Ok(StreamChunk::Done { usage: u }) => {
+                // Finish pending tool call
+                if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                    tool_calls.push(crate::message::ToolCall::new(tc_id, tc_name, args));
+                }
+                if let Some(u) = u {
+                    usage = u;
+                }
+            }
+            Ok(StreamChunk::Error { message }) => {
+                debug!(agent = agent_name, error = %message, "Stream error");
+                return Err(Error::stream(message));
+            }
+            Err(e) => {
+                debug!(agent = agent_name, error = %e, "Stream error");
+                return Err(e);
+            }
+        }
+    }
+
+    Ok((content, tool_calls, usage))
+}
+
+/// Run a single iteration using non-streaming complete() (when no progress handler).
+async fn run_complete_iteration(
+    provider: &Arc<dyn Provider>,
+    config: &AgentConfig,
+    mut request: CompletionRequest,
+) -> Result<(String, Vec<crate::message::ToolCall>, Usage), Error> {
+    use tracing::debug;
+
+    request.stream = false;
+
+    let response = provider.complete(request).await?;
+
+    // Log if thinking was extracted
+    if let Some(ref thinking) = response.thinking {
+        debug!(
+            agent = %config.id,
+            thinking_len = thinking.len(),
+            "Extracted thinking content (not stored)"
+        );
+    }
+
+    let content = response.message.content.to_string_lossy();
+    let tool_calls = response.message.tool_calls;
+    let usage = response.usage;
+
+    Ok((content, tool_calls, usage))
 }
 
 /// Execute a single tool call.
