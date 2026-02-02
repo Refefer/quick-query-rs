@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -466,6 +466,7 @@ fn setup_panic_hook() {
         let _ = execute!(
             io::stdout(),
             LeaveAlternateScreen,
+            DisableMouseCapture,
             crossterm::cursor::Show
         );
         // Call original hook
@@ -501,9 +502,10 @@ pub async fn run_tui(
     };
 
     // Initialize terminal
+    // Explicitly disable mouse capture to allow normal terminal selection for copy/paste
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
+    execute!(stdout, EnterAlternateScreen, DisableMouseCapture, crossterm::cursor::Hide)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -698,6 +700,7 @@ pub async fn run_tui(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
+        DisableMouseCapture,
         crossterm::cursor::Show
     )?;
     terminal.show_cursor()?;
