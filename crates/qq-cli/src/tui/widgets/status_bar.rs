@@ -21,6 +21,8 @@ pub struct StatusBar<'a> {
     tool_iteration: u32,
     /// Agent progress: (agent_name, current_iteration, max_iterations)
     agent_progress: Option<(&'a str, u32, u32)>,
+    /// Agent character counts: (input_chars, output_chars)
+    agent_chars: Option<(usize, usize)>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -34,6 +36,7 @@ impl<'a> StatusBar<'a> {
             execution_context: None,
             tool_iteration: 0,
             agent_progress: None,
+            agent_chars: None,
         }
     }
 
@@ -65,6 +68,13 @@ impl<'a> StatusBar<'a> {
 
     pub fn agent_progress(mut self, progress: Option<(&'a str, u32, u32)>) -> Self {
         self.agent_progress = progress;
+        self
+    }
+
+    pub fn agent_chars(mut self, input_chars: usize, output_chars: usize) -> Self {
+        if input_chars > 0 || output_chars > 0 {
+            self.agent_chars = Some((input_chars, output_chars));
+        }
         self
     }
 }
@@ -100,6 +110,13 @@ impl Widget for StatusBar<'_> {
                 format!("Agent[{}] turn {}/{}", agent_name, iteration, max_iterations),
                 style_agent,
             ));
+            // Show character counts for agent
+            if let Some((input_chars, output_chars)) = self.agent_chars {
+                spans.push(Span::styled(
+                    format!(" {}c", format_char_count(input_chars + output_chars)),
+                    style_dim,
+                ));
+            }
         } else if self.tool_iteration > 1 {
             // Show iteration count if in a tool loop (but not when agent is running)
             spans.push(Span::styled(format!(" (turn {})", self.tool_iteration), style_dim));
@@ -139,6 +156,17 @@ impl Widget for StatusBar<'_> {
             .block(Block::default().borders(Borders::BOTTOM).border_style(style_dim));
 
         paragraph.render(area, buf);
+    }
+}
+
+/// Format character count with K/M suffixes for readability
+fn format_char_count(chars: usize) -> String {
+    if chars >= 1_000_000 {
+        format!("{:.1}M", chars as f64 / 1_000_000.0)
+    } else if chars >= 1_000 {
+        format!("{:.1}K", chars as f64 / 1_000.0)
+    } else {
+        format!("{}", chars)
     }
 }
 

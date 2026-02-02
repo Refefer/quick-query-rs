@@ -76,6 +76,10 @@ pub struct TuiApp {
 
     // Agent progress tracking (agent_name, iteration, max_iterations)
     pub agent_progress: Option<(String, u32, u32)>,
+
+    // Agent character counts (cumulative input/output chars)
+    pub agent_input_chars: usize,
+    pub agent_output_chars: usize,
 }
 
 impl Default for TuiApp {
@@ -108,6 +112,8 @@ impl TuiApp {
             should_quit: false,
             execution_context,
             agent_progress: None,
+            agent_input_chars: 0,
+            agent_output_chars: 0,
         }
     }
 
@@ -122,6 +128,8 @@ impl TuiApp {
         self.auto_scroll = true;
         self.status_message = None;
         self.agent_progress = None;
+        self.agent_input_chars = 0;
+        self.agent_output_chars = 0;
     }
 
     /// Handle a stream event
@@ -232,6 +240,15 @@ impl TuiApp {
                 // Accumulate tokens from agent calls
                 self.prompt_tokens += usage.prompt_tokens;
                 self.completion_tokens += usage.completion_tokens;
+            }
+            AgentEvent::CharacterCount {
+                agent_name: _,
+                input_chars,
+                output_chars,
+            } => {
+                // Accumulate character counts from agent calls
+                self.agent_input_chars += input_chars;
+                self.agent_output_chars += output_chars;
             }
         }
     }

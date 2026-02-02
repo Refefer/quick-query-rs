@@ -351,6 +351,14 @@ pub enum AgentProgressEvent {
         agent_name: String,
         usage: Usage,
     },
+    /// Character count update (characters sent/received to LLM).
+    CharacterCount {
+        agent_name: String,
+        /// Characters sent to the LLM (prompt/context)
+        input_chars: usize,
+        /// Characters received from the LLM (response)
+        output_chars: usize,
+    },
 }
 
 /// Handler for receiving agent progress events.
@@ -494,6 +502,9 @@ impl Agent {
                 "Agent iteration starting"
             );
 
+            // Count input characters (messages being sent)
+            let input_chars: usize = messages.iter().map(|m| m.content.char_count()).sum();
+
             let request = CompletionRequest::new(messages.clone())
                 .with_tools(tools.definitions());
 
@@ -503,6 +514,20 @@ impl Agent {
             } else {
                 run_complete_iteration(&provider, &config, request).await?
             };
+
+            // Count output characters (response received)
+            let output_chars = content.chars().count();
+
+            // Emit character count update
+            if let Some(ref handler) = progress {
+                handler
+                    .on_progress(AgentProgressEvent::CharacterCount {
+                        agent_name: agent_name.clone(),
+                        input_chars,
+                        output_chars,
+                    })
+                    .await;
+            }
 
             // Emit usage update
             if let Some(ref handler) = progress {

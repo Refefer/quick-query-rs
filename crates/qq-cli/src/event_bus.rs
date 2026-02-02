@@ -40,6 +40,12 @@ pub enum AgentEvent {
         agent_name: String,
         usage: Usage,
     },
+    /// Character count update from an agent.
+    CharacterCount {
+        agent_name: String,
+        input_chars: usize,
+        output_chars: usize,
+    },
 }
 
 impl From<AgentProgressEvent> for AgentEvent {
@@ -76,6 +82,15 @@ impl From<AgentProgressEvent> for AgentEvent {
             AgentProgressEvent::UsageUpdate { agent_name, usage } => {
                 AgentEvent::UsageUpdate { agent_name, usage }
             }
+            AgentProgressEvent::CharacterCount {
+                agent_name,
+                input_chars,
+                output_chars,
+            } => AgentEvent::CharacterCount {
+                agent_name,
+                input_chars,
+                output_chars,
+            },
         }
     }
 }
