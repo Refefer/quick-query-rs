@@ -89,9 +89,8 @@ impl<'a> StatusBar<'a> {
     }
 
     pub fn session_bytes(mut self, input_bytes: usize, output_bytes: usize) -> Self {
-        if input_bytes > 0 || output_bytes > 0 {
-            self.session_bytes = Some((input_bytes, output_bytes));
-        }
+        // Always set session bytes so the counter is always visible
+        self.session_bytes = Some((input_bytes, output_bytes));
         self
     }
 }
