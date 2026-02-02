@@ -32,6 +32,7 @@ impl Default for ScrollState {
     }
 }
 
+#[allow(dead_code)] // Some methods used only in tests or for future use
 impl ScrollState {
     /// Create new scroll state with initial viewport height.
     pub fn new(viewport_height: u16) -> Self {
@@ -46,11 +47,6 @@ impl ScrollState {
     /// Get the current scroll offset.
     pub fn offset(&self) -> u16 {
         self.offset
-    }
-
-    /// Get the content height.
-    pub fn content_height(&self) -> u16 {
-        self.content_height
     }
 
     /// Get the viewport height.

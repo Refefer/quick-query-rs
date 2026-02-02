@@ -368,6 +368,7 @@ struct SearchResponse {
 
 #[derive(Deserialize)]
 struct SearchSource {
+    #[allow(dead_code)]
     content: String,
     metadata: SourceMetadata,
 }

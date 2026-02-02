@@ -10,11 +10,7 @@ pub mod agent_tool;
 pub use agent_tool::{create_agent_tools, DEFAULT_MAX_AGENT_DEPTH};
 
 // Re-export everything from qq-agents
-pub use qq_agents::{
-    AgentDefinition, AgentInfo, AgentsConfig, ChatAgent, CoderAgent, ExploreAgent,
-    InternalAgent, InternalAgentType, PlannerAgent, ResearcherAgent, ReviewerAgent,
-    SummarizerAgent, WriterAgent,
-};
+pub use qq_agents::{AgentDefinition, AgentInfo, AgentsConfig, InternalAgent, InternalAgentType};
 
 use std::collections::HashMap;
 use std::sync::Arc;

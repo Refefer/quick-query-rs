@@ -167,18 +167,3 @@ impl ExecutionContext {
     }
 }
 
-/// RAII guard for context entries - automatically pops when dropped
-pub struct ContextGuard {
-    context: ExecutionContext,
-}
-
-impl ContextGuard {
-    pub fn new(context: ExecutionContext) -> Self {
-        Self { context }
-    }
-
-    /// Pop the context entry (called on drop or explicitly)
-    pub async fn pop(self) {
-        self.context.pop().await;
-    }
-}

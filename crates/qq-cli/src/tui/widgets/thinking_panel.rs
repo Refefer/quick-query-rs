@@ -39,11 +39,6 @@ impl ToolNotification {
         }
     }
 
-    pub fn with_preview(mut self, preview: String) -> Self {
-        self.preview = preview;
-        self
-    }
-
     /// Get the status icon for this notification.
     fn icon(&self) -> (&'static str, Style) {
         match self.status {

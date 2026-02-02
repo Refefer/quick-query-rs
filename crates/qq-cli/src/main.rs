@@ -16,9 +16,7 @@ mod config;
 mod debug_log;
 mod event_bus;
 mod execution_context;
-mod interface;
 mod markdown;
-mod runner;
 mod tui;
 
 pub use event_bus::AgentEventBus;

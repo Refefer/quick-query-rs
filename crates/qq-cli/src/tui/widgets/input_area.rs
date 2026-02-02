@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Widget},
 };
 use tui_input::Input;
 
@@ -25,11 +25,6 @@ impl<'a> InputArea<'a> {
             is_active: true,
             hint: None,
         }
-    }
-
-    pub fn prompt(mut self, prompt: &'a str) -> Self {
-        self.prompt = prompt;
-        self
     }
 
     pub fn active(mut self, active: bool) -> Self {

@@ -17,7 +17,7 @@ use crate::ExecutionContext;
 
 /// Maximum nesting depth for agent calls.
 /// At depth 0, agents can call other agents. At max_depth, they only get base tools.
-pub const DEFAULT_MAX_AGENT_DEPTH: u32 = 3;
+pub const DEFAULT_MAX_AGENT_DEPTH: u32 = 5;
 
 /// A tool that wraps an internal agent.
 pub struct InternalAgentTool {
@@ -71,10 +71,6 @@ impl InternalAgentTool {
         }
     }
 
-    /// Get the agent name without the wrapper (for display purposes)
-    pub fn agent_name(&self) -> &str {
-        self.agent.name()
-    }
 }
 
 #[derive(Deserialize)]
@@ -275,10 +271,6 @@ impl ExternalAgentTool {
         }
     }
 
-    /// Get the agent name without the wrapper (for display purposes)
-    pub fn agent_name(&self) -> &str {
-        &self.agent_name
-    }
 }
 
 #[async_trait]

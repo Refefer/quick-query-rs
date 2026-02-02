@@ -71,18 +71,6 @@ impl PaneSpec {
         }
     }
 
-    pub fn hidden(id: PaneId) -> Self {
-        Self {
-            id,
-            visible: false,
-            size: PaneSize::Fixed(0),
-        }
-    }
-
-    pub fn with_visible(mut self, visible: bool) -> Self {
-        self.visible = visible;
-        self
-    }
 }
 
 /// Layout configuration defining pane arrangement.
@@ -193,15 +181,6 @@ impl LayoutConfig {
         }
 
         result
-    }
-
-    /// Get the content pane's height from a computed layout.
-    /// Useful for viewport height calculations.
-    pub fn content_height(&self, layout: &HashMap<PaneId, Rect>) -> u16 {
-        layout
-            .get(&PaneId::Content)
-            .map(|r| r.height.saturating_sub(2)) // Subtract borders
-            .unwrap_or(0)
     }
 }
 

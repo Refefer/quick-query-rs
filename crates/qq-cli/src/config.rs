@@ -318,7 +318,7 @@ pub struct ResolvedProfile {
 }
 
 // Re-export agent config types from qq-agents
-pub use qq_agents::{AgentDefinition, AgentsConfig};
+pub use qq_agents::AgentsConfig;
 
 #[cfg(test)]
 mod tests {

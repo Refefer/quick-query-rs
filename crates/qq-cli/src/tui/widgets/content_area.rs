@@ -42,21 +42,6 @@ impl<'a> ContentArea<'a> {
         self.auto_scroll = auto;
         self
     }
-
-    /// Calculate total lines when rendered at given width
-    pub fn content_height(&self, width: u16) -> u16 {
-        let styles = MarkdownStyles::default();
-        let lines = markdown_to_lines(self.content, &styles);
-
-        // Estimate wrapped line count
-        let mut total = 0u16;
-        for line in &lines {
-            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            let wrapped_lines = ((line_len as u16).max(1) + width.saturating_sub(1)) / width.max(1);
-            total = total.saturating_add(wrapped_lines.max(1));
-        }
-        total
-    }
 }
 
 impl Widget for ContentArea<'_> {
@@ -157,76 +142,5 @@ impl Widget for ContentArea<'_> {
                 }
             }
         }
-    }
-}
-
-/// Stateful content area that tracks scroll position
-pub struct ContentAreaState {
-    pub scroll_offset: u16,
-    pub auto_scroll: bool,
-    pub content_height: u16,
-    pub viewport_height: u16,
-}
-
-impl Default for ContentAreaState {
-    fn default() -> Self {
-        Self {
-            scroll_offset: 0,
-            auto_scroll: true,
-            content_height: 0,
-            viewport_height: 0,
-        }
-    }
-}
-
-impl ContentAreaState {
-    pub fn scroll_up(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        if self.scroll_offset > 0 {
-            self.auto_scroll = false;
-        }
-    }
-
-    pub fn scroll_down(&mut self, amount: u16) {
-        let max_scroll = self.content_height.saturating_sub(self.viewport_height);
-        self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
-
-        // Re-enable auto-scroll if we're at the bottom
-        if self.scroll_offset >= max_scroll {
-            self.auto_scroll = true;
-        }
-    }
-
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll = false;
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        let max_scroll = self.content_height.saturating_sub(self.viewport_height);
-        self.scroll_offset = max_scroll;
-        self.auto_scroll = true;
-    }
-
-    pub fn page_up(&mut self) {
-        let amount = (self.viewport_height / 2).max(5);
-        self.scroll_up(amount);
-    }
-
-    pub fn page_down(&mut self) {
-        let amount = (self.viewport_height / 2).max(5);
-        self.scroll_down(amount);
-    }
-
-    pub fn update_content_height(&mut self, height: u16) {
-        self.content_height = height;
-        if self.auto_scroll {
-            let max_scroll = height.saturating_sub(self.viewport_height);
-            self.scroll_offset = max_scroll;
-        }
-    }
-
-    pub fn update_viewport(&mut self, height: u16) {
-        self.viewport_height = height;
     }
 }

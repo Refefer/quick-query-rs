@@ -91,25 +91,6 @@ impl DebugLogger {
         });
     }
 
-    /// Log agent start.
-    pub fn log_agent_start(&self, agent_name: &str, task_preview: &str, tool_count: usize) {
-        self.log("agent_start", AgentStartEvent {
-            agent_name: agent_name.to_string(),
-            task_preview: task_preview.to_string(),
-            tool_count,
-        });
-    }
-
-    /// Log agent completion.
-    pub fn log_agent_end(&self, agent_name: &str, success: bool, iterations: usize, response_len: usize) {
-        self.log("agent_end", AgentEndEvent {
-            agent_name: agent_name.to_string(),
-            success,
-            iterations,
-            response_length: response_len,
-        });
-    }
-
     /// Log message being stored in history.
     pub fn log_message_stored(&self, role: &str, content_len: usize, has_tool_calls: bool) {
         self.log("message_stored", MessageStoredEvent {
@@ -196,21 +177,6 @@ struct ToolResultEvent {
     tool_call_id: String,
     result_length: usize,
     is_error: bool,
-}
-
-#[derive(Serialize)]
-struct AgentStartEvent {
-    agent_name: String,
-    task_preview: String,
-    tool_count: usize,
-}
-
-#[derive(Serialize)]
-struct AgentEndEvent {
-    agent_name: String,
-    success: bool,
-    iterations: usize,
-    response_length: usize,
 }
 
 #[derive(Serialize)]
