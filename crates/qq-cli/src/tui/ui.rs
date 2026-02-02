@@ -103,30 +103,21 @@ fn create_layout(area: Rect, app: &TuiApp) -> LayoutRegions {
 
     // Thinking panel - normal or expanded
     // Normal: min 8 lines (6 content + 2 border), max 10
-    // Expanded: takes most of the space, leaving min 6 lines for content
-    let thinking_height = if has_thinking {
+    // Expanded: takes ~70% of the space
+    if has_thinking {
         if app.thinking_expanded {
-            // Expanded: take most of the screen
-            // Reserve: status (2) + min content (6) + tools (2 if present) + input (3)
-            let reserved = 2 + 6 + if has_tools { 2 } else { 0 } + 3;
-            area.height.saturating_sub(reserved).max(8)
+            // Expanded: use percentage to take most of the screen
+            constraints.push(Constraint::Percentage(70));
         } else {
             // Normal: based on content, min 8 (6 content lines), max 10
             let lines = app.thinking_content.lines().count() as u16;
-            (lines + 2).min(10).max(8) // +2 for borders, min 8, max 10
+            let thinking_height = (lines + 2).min(10).max(8); // +2 for borders, min 8, max 10
+            constraints.push(Constraint::Length(thinking_height));
         }
-    } else {
-        0
-    };
-
-    // Content area minimum depends on whether thinking is expanded
-    let min_content_height = if has_thinking && app.thinking_expanded { 6 } else { 5 };
-
-    if has_thinking {
-        constraints.push(Constraint::Length(thinking_height));
     }
 
-    // Main content - takes remaining space
+    // Main content - takes remaining space (min 6 lines when thinking expanded)
+    let min_content_height = if has_thinking && app.thinking_expanded { 6 } else { 5 };
     constraints.push(Constraint::Min(min_content_height));
 
     // Tool bar
