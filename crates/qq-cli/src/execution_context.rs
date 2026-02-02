@@ -142,26 +142,25 @@ impl ExecutionContext {
         }
     }
 
-    /// Get the current activity description (innermost non-Chat entry)
-    /// Returns a human-readable string like "list_files" or "explore › list_files"
+    /// Get the current activity description as full call stack
+    /// Returns a human-readable string like "Chat > Tool[list_files]"
     pub fn current_activity_blocking(&self) -> Option<String> {
         if let Ok(stack) = self.stack.try_read() {
             if stack.len() <= 1 {
                 return None; // Only Chat, no activity
             }
 
-            // Build activity string from non-Chat entries
-            let activities: Vec<&str> = stack
+            // Build full call stack string with type prefixes
+            let formatted: Vec<String> = stack
                 .iter()
-                .skip(1) // Skip "Chat"
-                .map(|entry| entry.name.as_str())
+                .map(|entry| match entry.context_type {
+                    ContextType::Chat => "Chat".to_string(),
+                    ContextType::Agent => format!("Agent[{}]", entry.name),
+                    ContextType::Tool => format!("Tool[{}]", entry.name),
+                })
                 .collect();
 
-            if activities.is_empty() {
-                None
-            } else {
-                Some(activities.join(" › "))
-            }
+            Some(formatted.join(" > "))
         } else {
             None
         }
