@@ -85,11 +85,8 @@ pub fn markdown_to_lines(text: &str, styles: &MarkdownStyles) -> Vec<Line<'stati
 
             // Check if this is a separator row (|---|---|)
             if is_table_separator(trimmed) {
-                // Render separator as a dimmed line
-                lines.push(Line::from(Span::styled(
-                    trimmed.to_string(),
-                    styles.table_border,
-                )));
+                // Render separator with box-drawing characters
+                lines.push(render_table_separator(trimmed, styles));
                 is_table_header = false;
                 continue;
             }
@@ -180,6 +177,37 @@ fn is_table_separator(line: &str) -> bool {
         && trimmed.contains('-')
 }
 
+/// Render a table separator row with box-drawing characters
+fn render_table_separator(line: &str, styles: &MarkdownStyles) -> Line<'static> {
+    let mut spans = Vec::new();
+    let parts: Vec<&str> = line.split('|').collect();
+
+    for (i, part) in parts.iter().enumerate() {
+        let trimmed = part.trim();
+
+        // Skip empty parts at start/end from leading/trailing |
+        if i == 0 && trimmed.is_empty() {
+            spans.push(Span::styled("├", styles.table_border));
+            continue;
+        }
+        if i == parts.len() - 1 && trimmed.is_empty() {
+            spans.push(Span::styled("┤", styles.table_border));
+            continue;
+        }
+
+        if i > 0 && i < parts.len() - 1 {
+            spans.push(Span::styled("┼", styles.table_border));
+        }
+
+        // Replace dashes with horizontal line, preserving width
+        let width = part.len();
+        let separator = "─".repeat(width);
+        spans.push(Span::styled(separator, styles.table_border));
+    }
+
+    Line::from(spans)
+}
+
 /// Render a table row with styled cells
 fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Line<'static> {
     let mut spans = Vec::new();
@@ -193,12 +221,29 @@ fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Lin
     let parts: Vec<&str> = line.split('|').collect();
 
     for (i, part) in parts.iter().enumerate() {
+        // Skip empty parts at start/end from leading/trailing |
+        if (i == 0 || i == parts.len() - 1) && part.trim().is_empty() {
+            if i == 0 {
+                spans.push(Span::styled("│", styles.table_border));
+            }
+            continue;
+        }
+
         if i > 0 {
             spans.push(Span::styled("│", styles.table_border));
         }
 
+        // Preserve the original spacing/padding in the cell
         let cell_content = part.trim();
-        if !cell_content.is_empty() || (i > 0 && i < parts.len() - 1) {
+        let padding_left = part.len() - part.trim_start().len();
+        let padding_right = part.len() - part.trim_end().len();
+
+        // Add left padding
+        if padding_left > 0 {
+            spans.push(Span::styled(" ".repeat(padding_left), styles.normal));
+        }
+
+        if !cell_content.is_empty() {
             // Apply inline styling to cell content
             let cell_spans = style_inline(cell_content, styles);
             for mut span in cell_spans {
@@ -208,6 +253,16 @@ fn render_table_row(line: &str, styles: &MarkdownStyles, is_header: bool) -> Lin
                 spans.push(span);
             }
         }
+
+        // Add right padding
+        if padding_right > 0 {
+            spans.push(Span::styled(" ".repeat(padding_right), styles.normal));
+        }
+    }
+
+    // Close the row with │ if the original had trailing |
+    if line.trim().ends_with('|') && !spans.is_empty() {
+        spans.push(Span::styled("│", styles.table_border));
     }
 
     Line::from(spans)
