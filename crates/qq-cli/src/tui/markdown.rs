@@ -181,23 +181,28 @@ fn is_table_separator(line: &str) -> bool {
 fn render_table_separator(line: &str, styles: &MarkdownStyles) -> Line<'static> {
     let mut spans = Vec::new();
     let parts: Vec<&str> = line.split('|').collect();
+    let mut is_first_content = true;
 
     for (i, part) in parts.iter().enumerate() {
         let trimmed = part.trim();
 
-        // Skip empty parts at start/end from leading/trailing |
+        // Handle leading empty part (from leading |)
         if i == 0 && trimmed.is_empty() {
             spans.push(Span::styled("├", styles.table_border));
             continue;
         }
+
+        // Handle trailing empty part (from trailing |)
         if i == parts.len() - 1 && trimmed.is_empty() {
             spans.push(Span::styled("┤", styles.table_border));
             continue;
         }
 
-        if i > 0 && i < parts.len() - 1 {
+        // Add intersection before content cells (except the first one)
+        if !is_first_content {
             spans.push(Span::styled("┼", styles.table_border));
         }
+        is_first_content = false;
 
         // Replace dashes with horizontal line, preserving width
         let width = part.len();
@@ -456,5 +461,32 @@ mod tests {
         assert!(is_table_separator("|:---:|:---:|"));
         assert!(!is_table_separator("| text | text |"));
         assert!(!is_table_separator("not a table"));
+    }
+
+    #[test]
+    fn test_table_separator_rendering() {
+        let styles = MarkdownStyles::default();
+        let line = render_table_separator("|----------|----------|", &styles);
+
+        // Should render as: ├──────────┼──────────┤
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(rendered.starts_with('├'), "Should start with ├, got: {}", rendered);
+        assert!(rendered.ends_with('┤'), "Should end with ┤, got: {}", rendered);
+        assert!(rendered.contains('┼'), "Should contain ┼, got: {}", rendered);
+        assert!(rendered.contains('─'), "Should contain ─, got: {}", rendered);
+        // Verify no double intersections
+        assert!(!rendered.contains("┼┼"), "Should not have double ┼, got: {}", rendered);
+    }
+
+    #[test]
+    fn test_table_row_rendering() {
+        let styles = MarkdownStyles::default();
+        let line = render_table_row("| Header 1 | Header 2 |", &styles, true);
+
+        // Should have │ separators
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(rendered.contains('│'), "Should contain │, got: {}", rendered);
+        assert!(rendered.contains("Header 1"), "Should contain Header 1, got: {}", rendered);
+        assert!(rendered.contains("Header 2"), "Should contain Header 2, got: {}", rendered);
     }
 }
