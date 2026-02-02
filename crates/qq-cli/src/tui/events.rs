@@ -31,6 +31,8 @@ pub enum StreamEvent {
     IterationStart { iteration: u32 },
     /// Messages to add to session (for tool calls and results)
     SessionUpdate { messages: Vec<Message> },
+    /// Byte counts for input/output
+    ByteCount { input_bytes: usize, output_bytes: usize },
 }
 
 /// Input action from keyboard events

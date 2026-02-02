@@ -225,6 +225,11 @@ impl TuiApp {
                 self.tool_iteration = iteration;
                 self.is_waiting = true;
             }
+            StreamEvent::ByteCount { input_bytes, output_bytes } => {
+                // Accumulate byte counts from main streaming
+                self.session_input_bytes += input_bytes;
+                self.session_output_bytes += output_bytes;
+            }
         }
     }
 
@@ -841,6 +846,11 @@ async fn run_streaming_completion(
             logger.log_iteration(iteration as usize, "tui_completion");
         }
 
+        // Calculate input bytes from messages
+        let input_bytes = serde_json::to_string(&messages)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
         let mut request = CompletionRequest::new(messages.clone());
 
         if let Some(ref m) = model {
@@ -874,6 +884,7 @@ async fn run_streaming_completion(
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None;
+        let mut output_bytes: usize = 0;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -881,9 +892,11 @@ async fn run_streaming_completion(
                     let _ = tx.send(StreamEvent::Start { model }).await;
                 }
                 Ok(StreamChunk::ThinkingDelta { content: delta }) => {
+                    output_bytes += delta.len();
                     let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
                 }
                 Ok(StreamChunk::Delta { content: delta }) => {
+                    output_bytes += delta.len();
                     content.push_str(&delta);
                     let _ = tx.send(StreamEvent::ContentDelta(delta)).await;
                 }
@@ -898,6 +911,7 @@ async fn run_streaming_completion(
                     let _ = tx.send(StreamEvent::ToolCallStart { id, name }).await;
                 }
                 Ok(StreamChunk::ToolCallDelta { arguments }) => {
+                    output_bytes += arguments.len();
                     if let Some((_, _, ref mut args)) = current_tool_call {
                         args.push_str(&arguments);
                     }
@@ -910,6 +924,9 @@ async fn run_streaming_completion(
                             serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
                         tool_calls.push(ToolCall::new(tc_id, tc_name, args));
                     }
+
+                    // Send byte counts for this iteration
+                    let _ = tx.send(StreamEvent::ByteCount { input_bytes, output_bytes }).await;
 
                     if tool_calls.is_empty() {
                         // No tool calls - we're done, send final content for session
@@ -1025,7 +1042,8 @@ async fn run_streaming_completion(
             continue;
         }
 
-        // No tool calls, we're done - send final content
+        // No tool calls, we're done - send byte counts and final content
+        let _ = tx.send(StreamEvent::ByteCount { input_bytes, output_bytes }).await;
         execution_context.reset().await;
         let _ = tx.send(StreamEvent::Done { usage: None, content: content.clone() }).await;
         return;
