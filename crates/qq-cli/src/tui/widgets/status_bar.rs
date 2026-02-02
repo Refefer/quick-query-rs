@@ -206,7 +206,7 @@ impl Widget for StatusBar<'_> {
         }
 
         let paragraph = Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::BOTTOM).border_style(style_dim));
+            .block(Block::default().borders(Borders::NONE));
 
         paragraph.render(area, buf);
     }
