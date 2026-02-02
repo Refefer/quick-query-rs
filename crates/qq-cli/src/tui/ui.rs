@@ -44,7 +44,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
         let thinking = ThinkingPanel::new(&app.thinking_content)
             .collapsed(app.thinking_collapsed)
             .streaming(is_thinking_streaming)
-            .auto_scroll(is_thinking_streaming);
+            .auto_scroll(true); // Always auto-scroll thinking panel
 
         frame.render_widget(thinking, chunks.thinking);
     }

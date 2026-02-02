@@ -31,6 +31,7 @@ use crate::execution_context::ExecutionContext;
 use crate::Cli;
 
 use super::events::{InputAction, StreamEvent};
+use super::markdown::{markdown_to_lines, MarkdownStyles};
 use super::ui;
 use super::widgets::{InputHistory, ToolCallInfo, ToolStatus};
 
@@ -413,17 +414,19 @@ impl TuiApp {
     /// Scroll up by amount
     pub fn scroll_up(&mut self, amount: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        if self.scroll_offset > 0 {
-            self.auto_scroll = false;
-        }
+        // Any manual scroll up disables auto-scroll
+        self.auto_scroll = false;
     }
 
     /// Scroll down by amount
     pub fn scroll_down(&mut self, amount: u16) {
         let max_scroll = self.content_height.saturating_sub(self.viewport_height);
         self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
-        if self.scroll_offset >= max_scroll {
+        // Re-enable auto-scroll only when we reach the bottom
+        if self.scroll_offset >= max_scroll && max_scroll > 0 {
             self.auto_scroll = true;
+        } else {
+            self.auto_scroll = false;
         }
     }
 
@@ -533,7 +536,10 @@ pub async fn run_tui(
             // Update viewport height for scrolling
             let content_area_height = f.area().height.saturating_sub(10); // Rough estimate
             app.viewport_height = content_area_height;
-            app.content_height = app.content.lines().count() as u16;
+            // Calculate content height using markdown processing (same as ContentArea)
+            let styles = MarkdownStyles::default();
+            let lines = markdown_to_lines(&app.content, &styles);
+            app.content_height = lines.len() as u16;
 
             ui::render(&app, f);
         })?;
