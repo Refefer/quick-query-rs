@@ -60,7 +60,16 @@ impl InternalAgent for CoderAgent {
     }
 
     fn description(&self) -> &str {
-        "Write and modify code"
+        concat!(
+            "Autonomous coding agent that implements features, fixes bugs, and modifies code by understanding context and following existing patterns.\n\n",
+            "Use when you need: new features implemented, bugs fixed, code refactored, files created, or existing code modified.\n\n",
+            "Examples:\n",
+            "  - 'Add input validation to the login form'\n",
+            "  - 'Implement a retry mechanism for API calls'\n",
+            "  - 'Refactor the config module to support multiple profiles'\n",
+            "  - 'Create a new REST endpoint for user settings'\n\n",
+            "Returns: Confirmation of changes with list of modified files and any design decisions made"
+        )
     }
 
     fn system_prompt(&self) -> &str {

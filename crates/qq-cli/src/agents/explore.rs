@@ -59,7 +59,16 @@ impl InternalAgent for ExploreAgent {
     }
 
     fn description(&self) -> &str {
-        "Explore and understand codebases"
+        concat!(
+            "Autonomous codebase exploration agent that answers questions about code structure, architecture, and implementation details.\n\n",
+            "Use when you need: to understand how something works, find where code lives, trace data flow, or explore unfamiliar codebases.\n\n",
+            "Examples:\n",
+            "  - 'How does user authentication work in this project?'\n",
+            "  - 'Where is the database schema defined?'\n",
+            "  - 'Find all API endpoints and explain the routing'\n",
+            "  - 'What's the architecture of this application?'\n\n",
+            "Returns: Detailed explanation with file references and line numbers"
+        )
     }
 
     fn system_prompt(&self) -> &str {

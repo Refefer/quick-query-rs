@@ -60,7 +60,16 @@ impl InternalAgent for ReviewerAgent {
     }
 
     fn description(&self) -> &str {
-        "Review code for bugs, style, and improvements"
+        concat!(
+            "Autonomous code review agent that analyzes code for bugs, security issues, performance problems, and maintainability concerns.\n\n",
+            "Use when you need: code reviewed before merging, security audit, bug hunting, performance analysis, or quality assessment.\n\n",
+            "Examples:\n",
+            "  - 'Review src/auth.rs for security issues'\n",
+            "  - 'Check this function for potential bugs'\n",
+            "  - 'Review the new payment module before we ship'\n",
+            "  - 'Analyze this code for performance bottlenecks'\n\n",
+            "Returns: Structured feedback grouped by severity (critical/important/moderate/minor) with specific file:line references and suggested fixes"
+        )
     }
 
     fn system_prompt(&self) -> &str {

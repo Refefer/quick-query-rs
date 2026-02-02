@@ -77,7 +77,16 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn description(&self) -> &str {
-        "Plan and decompose tasks into steps"
+        concat!(
+            "Agent that creates detailed, actionable implementation plans by breaking down complex goals into sequenced steps with dependencies.\n\n",
+            "Use when you need: complex tasks broken down, migration plans created, project phases defined, or implementation strategies designed.\n\n",
+            "Examples:\n",
+            "  - 'Plan the migration from SQLite to PostgreSQL'\n",
+            "  - 'Create a plan to add user authentication to the API'\n",
+            "  - 'Break down the steps to implement real-time notifications'\n",
+            "  - 'Plan the refactoring of our monolith into microservices'\n\n",
+            "Returns: Structured plan with phases, ordered steps, dependencies, prerequisites, risks, and verification checkpoints"
+        )
     }
 
     fn system_prompt(&self) -> &str {

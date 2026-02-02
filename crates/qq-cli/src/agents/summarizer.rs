@@ -58,7 +58,16 @@ impl InternalAgent for SummarizerAgent {
     }
 
     fn description(&self) -> &str {
-        "Summarize long content into concise summaries"
+        concat!(
+            "Agent that creates tailored summaries of content, adapting format and focus based on the content type and purpose.\n\n",
+            "Use when you need: long documents condensed, meeting notes summarized, error logs distilled, or technical content explained concisely.\n\n",
+            "Examples:\n",
+            "  - 'Summarize this error log focusing on the root cause'\n",
+            "  - 'Summarize this meeting transcript highlighting action items'\n",
+            "  - 'Give me an executive summary of this RFC'\n",
+            "  - 'Condense these release notes into key changes'\n\n",
+            "Returns: Appropriately formatted summary (bullet points, structured sections, or prose) scaled to content length"
+        )
     }
 
     fn system_prompt(&self) -> &str {
