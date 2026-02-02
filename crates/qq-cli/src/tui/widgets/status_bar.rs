@@ -115,14 +115,7 @@ impl Widget for StatusBar<'_> {
         spans.push(Span::styled(" ", style_dim));
         spans.push(Span::styled(self.profile, style_profile));
 
-        // Show activity: either from execution context or status message
-        let activity = self.get_activity();
-        if let Some(activity) = activity {
-            spans.push(Span::styled(" › ", style_dim));
-            spans.push(Span::styled(activity, style_activity));
-        }
-
-        // Show agent progress if an agent is running
+        // Show agent progress if an agent is running (takes precedence over execution context)
         if let Some((agent_name, iteration, max_iterations)) = self.agent_progress {
             let style_agent = Style::default().fg(Color::Magenta);
             spans.push(Span::styled(" › ", style_dim));
@@ -137,9 +130,18 @@ impl Widget for StatusBar<'_> {
                     style_dim,
                 ));
             }
-        } else if self.tool_iteration > 1 {
-            // Show iteration count if in a tool loop (but not when agent is running)
-            spans.push(Span::styled(format!(" (turn {})", self.tool_iteration), style_dim));
+        } else {
+            // No agent running - show activity from execution context or status message
+            let activity = self.get_activity();
+            if let Some(activity) = activity {
+                spans.push(Span::styled(" › ", style_dim));
+                spans.push(Span::styled(activity, style_activity));
+            }
+
+            // Show iteration count if in a tool loop
+            if self.tool_iteration > 1 {
+                spans.push(Span::styled(format!(" (turn {})", self.tool_iteration), style_dim));
+            }
         }
 
         // Waiting indicator (before streaming indicator)
