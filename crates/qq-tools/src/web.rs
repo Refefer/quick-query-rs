@@ -383,6 +383,30 @@ struct WebSearchArgs {
     query: String,
 }
 
+const WEB_SEARCH_DESCRIPTION: &str = r#"Perform a web search using natural language queries via the Perplexica API.
+
+Parameters
+----------
+query : str
+    The search query string. Can be natural language (e.g., "What is the capital of France?").
+
+Returns
+-------
+The response contains two parts:
+
+message (str)
+    The fully generated answer to the user's query. This string may contain
+    Markdown formatting (headings, lists, links, code blocks, etc.) and is
+    produced by the configured chat model.
+
+sources (list)
+    A list of all external resources that contributed to the answer.
+    Each source contains:
+    - title: The title of the web page where the snippet was found
+    - url: The absolute URL pointing to the original source
+
+    The sources list may be empty if no external material could be retrieved."#;
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -390,13 +414,13 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web using natural language queries. Returns a synthesized answer with sources."
+        WEB_SEARCH_DESCRIPTION
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
-                .add_property("query", PropertySchema::string("The search query (can be natural language)"), true),
+                .add_property("query", PropertySchema::string("The search query string (can be natural language)"), true),
         )
     }
 
