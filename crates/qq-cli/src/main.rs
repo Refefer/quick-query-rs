@@ -94,7 +94,7 @@ pub struct Cli {
     pub no_tui: bool,
 
     /// Primary agent to use for interactive sessions (overrides profile)
-    /// Can be any internal agent: chat, explore, researcher, coder, reviewer, summarizer, planner
+    /// Can be any internal agent: chat, explore, researcher, coder, reviewer, summarizer, planner, writer
     #[arg(short = 'A', long)]
     pub agent: Option<String>,
 

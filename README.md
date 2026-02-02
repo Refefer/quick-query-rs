@@ -21,7 +21,7 @@ A fast, extensible command-line interface for interacting with Large Language Mo
 # Clone and install
 git clone https://github.com/andrew/quick-query-rs.git
 cd quick-query-rs
-cargo install --path .
+cargo install --path crates/qq-cli
 
 # Verify installation
 qq --version
@@ -80,8 +80,19 @@ Options:
   -p, --prompt <PROMPT>      Prompt for quick completion
   -P, --profile <PROFILE>    Profile to use
   -m, --model <MODEL>        Model override
+      --provider <PROVIDER>  Provider override
+      --base-url <URL>       Base URL for API
+  -s, --system <SYSTEM>      System prompt override
+  -t, --temperature <TEMP>   Temperature (0.0-2.0)
+      --max-tokens <N>       Maximum tokens to generate
   -A, --agent <AGENT>        Primary agent
   -d, --debug                Enable debug output
+      --debug-file <PATH>    Write debug log to file
+      --no-stream            Disable streaming output
+      --no-tui               Disable TUI, use readline
+      --no-tools             Disable all tools
+      --no-agents            Disable all agents
+      --minimal              No tools, no agents
 
 Commands:
   chat       Interactive chat mode
@@ -141,7 +152,7 @@ temperature = 0.2
 ```toml
 [tools]
 root = "$PWD"           # Filesystem sandbox root
-allow_write = false     # Write operations disabled by default
+allow_write = true      # Write operations enabled by default
 enable_filesystem = true
 enable_memory = true
 enable_web = true
@@ -154,6 +165,9 @@ See the [examples/](examples/) directory:
 - `config.full.toml` — All options
 - `config.local-llm.toml` — Ollama/vLLM setup
 - `config.multi-provider.toml` — Multiple providers
+- `config.openai-compatible.toml` — OpenAI-compatible APIs
+- `config.profiles.toml` — Profile examples
+- `agents.toml` — Agent customization
 
 ## Building from Source
 
