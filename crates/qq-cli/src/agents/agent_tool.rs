@@ -89,52 +89,7 @@ impl Tool for InternalAgentTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        // Build descriptions that guide proper agent usage:
-        // - Agents are autonomous workers, not simple tools
-        // - Give high-level goals, not mechanical commands
-        // - The agent decides HOW to accomplish the task
-        let description = match self.agent.name() {
-            "explore" => concat!(
-                "Autonomous agent for understanding codebases and file structures. ",
-                "Give it a GOAL or QUESTION, not a mechanical command. ",
-                "GOOD: 'Find where user authentication is implemented' or 'Understand the project architecture'. ",
-                "BAD: 'List files in src/' or 'Read main.rs'. ",
-                "The agent will systematically explore, read files, and synthesize an answer."
-            ).to_string(),
-            "researcher" => concat!(
-                "Autonomous agent for web research. ",
-                "Give it a RESEARCH QUESTION, not a URL to fetch. ",
-                "GOOD: 'What are best practices for Rust error handling?' or 'Compare React vs Vue for this use case'. ",
-                "BAD: 'Fetch https://example.com'. ",
-                "The agent will search, read multiple sources, and synthesize findings."
-            ).to_string(),
-            "coder" => concat!(
-                "Autonomous agent for writing or modifying code. ",
-                "Give it a GOAL describing what you want built or changed. ",
-                "GOOD: 'Add input validation to the login form' or 'Refactor the database module to use connection pooling'. ",
-                "BAD: 'Write a function called validate_input'. ",
-                "The agent will read existing code for context, then implement following project patterns."
-            ).to_string(),
-            "reviewer" => concat!(
-                "Autonomous agent for code review. ",
-                "Give it CODE or a FILE PATH and ask for specific feedback. ",
-                "GOOD: 'Review src/auth.rs for security issues' or 'Check this PR for potential bugs'. ",
-                "The agent will thoroughly analyze and provide actionable feedback."
-            ).to_string(),
-            "summarizer" => concat!(
-                "Autonomous agent for summarizing content. ",
-                "Give it CONTENT and specify what aspects to focus on. ",
-                "GOOD: 'Summarize this error log, focusing on the root cause' or 'Summarize this document's key decisions'. ",
-                "The agent will produce a concise, accurate summary."
-            ).to_string(),
-            "planner" => concat!(
-                "Autonomous agent for breaking down complex tasks. ",
-                "Give it a GOAL and ask for a plan. ",
-                "GOOD: 'Plan how to migrate from SQLite to PostgreSQL' or 'Plan the implementation of user roles'. ",
-                "The agent will produce clear, actionable steps."
-            ).to_string(),
-            _ => self.agent.description().to_string(),
-        };
+        let description = self.agent.tool_description().to_string();
 
         // The task parameter description also guides proper usage
         let task_description = concat!(

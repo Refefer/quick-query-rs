@@ -62,27 +62,29 @@ impl Default for WriterAgent {
     }
 }
 
+const TOOL_DESCRIPTION: &str = concat!(
+    "Autonomous writing agent that creates documentation, README files, guides, articles, and other written content.\n\n",
+    "Use when you need: README files, documentation, tutorials, guides, changelog entries, or any prose content created.\n\n",
+    "IMPORTANT: Give it a GOAL describing what to write and for whom, not literal text to output.\n\n",
+    "Examples with context:\n",
+    "  - 'Write a README for this project - target audience is developers, include setup instructions'\n",
+    "  - 'Create API documentation for src/api/users.rs - document all public functions with examples'\n\n",
+    "Detailed example:\n",
+    "  'Write a getting started guide for our CLI tool. The audience is developers who have never used it before. ",
+    "Include: 1) Installation (we support cargo install and homebrew), 2) Basic usage with the three most common ",
+    "commands (init, run, deploy), 3) Configuration file format (TOML, lives in ~/.config/mytool/), 4) One complete ",
+    "example workflow from init to deploy. Keep it under 1000 words - link to full docs for advanced topics. ",
+    "The existing docs are in docs/ and follow a similar style to Rust documentation.'\n\n",
+    "Returns: Confirmation of content created with file locations and any scope decisions made"
+);
+
 impl InternalAgent for WriterAgent {
     fn name(&self) -> &str {
         "writer"
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Autonomous writing agent that creates documentation, README files, guides, articles, and other written content.\n\n",
-            "Use when you need: README files, documentation, tutorials, guides, changelog entries, or any prose content created.\n\n",
-            "IMPORTANT: Always provide full context in your prompt so the agent understands what to write and for whom.\n\n",
-            "Examples with context:\n",
-            "  - 'Write a README for this project - target audience is developers, include setup instructions'\n",
-            "  - 'Create API documentation for src/api/users.rs - document all public functions with examples'\n\n",
-            "Detailed example:\n",
-            "  'Write a getting started guide for our CLI tool. The audience is developers who have never used it before. ",
-            "Include: 1) Installation (we support cargo install and homebrew), 2) Basic usage with the three most common ",
-            "commands (init, run, deploy), 3) Configuration file format (TOML, lives in ~/.config/mytool/), 4) One complete ",
-            "example workflow from init to deploy. Keep it under 1000 words - link to full docs for advanced topics. ",
-            "The existing docs are in docs/ and follow a similar style to Rust documentation.'\n\n",
-            "Returns: Confirmation of content created with file locations and any scope decisions made"
-        )
+        "Creates documentation, READMEs, guides, and other written content"
     }
 
     fn system_prompt(&self) -> &str {
@@ -95,6 +97,10 @@ impl InternalAgent for WriterAgent {
 
     fn max_iterations(&self) -> usize {
         100
+    }
+
+    fn tool_description(&self) -> &str {
+        TOOL_DESCRIPTION
     }
 }
 

@@ -52,28 +52,30 @@ impl Default for SummarizerAgent {
     }
 }
 
+const TOOL_DESCRIPTION: &str = concat!(
+    "Agent that creates tailored summaries of content, adapting format and focus based on the content type and purpose.\n\n",
+    "Use when you need: long documents condensed, meeting notes summarized, error logs distilled, or technical content explained concisely.\n\n",
+    "IMPORTANT: Give it CONTENT and specify what aspects to focus on.\n\n",
+    "Examples with context:\n",
+    "  - 'Summarize this error log focusing on root cause - the app crashed during deployment: <log content>'\n",
+    "  - 'Executive summary of this RFC for my manager who has 5 minutes - focus on timeline and resource needs: <rfc>'\n\n",
+    "Detailed example:\n",
+    "  'Summarize this 2-hour incident postmortem meeting transcript for the team wiki. The audience is engineers who ",
+    "were not on-call. Structure it as: 1) What happened (timeline with timestamps), 2) Impact (users affected, duration, ",
+    "revenue loss), 3) Root cause (technical details are fine, this is for engineers), 4) What we did to fix it, ",
+    "5) Action items with owners and due dates. Skip the parts where we were debugging live - just the conclusions. ",
+    "Flag any action items that are still unassigned. The incident was a database connection pool exhaustion that ",
+    "caused 503 errors for 47 minutes. Here is the transcript: <transcript>'\n\n",
+    "Returns: Appropriately formatted summary (bullet points, structured sections, or prose) scaled to content length"
+);
+
 impl InternalAgent for SummarizerAgent {
     fn name(&self) -> &str {
         "summarizer"
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Agent that creates tailored summaries of content, adapting format and focus based on the content type and purpose.\n\n",
-            "Use when you need: long documents condensed, meeting notes summarized, error logs distilled, or technical content explained concisely.\n\n",
-            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
-            "Examples with context:\n",
-            "  - 'Summarize this error log focusing on root cause - the app crashed during deployment: <log content>'\n",
-            "  - 'Executive summary of this RFC for my manager who has 5 minutes - focus on timeline and resource needs: <rfc>'\n\n",
-            "Detailed example:\n",
-            "  'Summarize this 2-hour incident postmortem meeting transcript for the team wiki. The audience is engineers who ",
-            "were not on-call. Structure it as: 1) What happened (timeline with timestamps), 2) Impact (users affected, duration, ",
-            "revenue loss), 3) Root cause (technical details are fine, this is for engineers), 4) What we did to fix it, ",
-            "5) Action items with owners and due dates. Skip the parts where we were debugging live - just the conclusions. ",
-            "Flag any action items that are still unassigned. The incident was a database connection pool exhaustion that ",
-            "caused 503 errors for 47 minutes. Here is the transcript: <transcript>'\n\n",
-            "Returns: Appropriately formatted summary (bullet points, structured sections, or prose) scaled to content length"
-        )
+        "Summarizes content with tailored format and focus"
     }
 
     fn system_prompt(&self) -> &str {
@@ -87,6 +89,10 @@ impl InternalAgent for SummarizerAgent {
 
     fn max_iterations(&self) -> usize {
         100
+    }
+
+    fn tool_description(&self) -> &str {
+        TOOL_DESCRIPTION
     }
 }
 

@@ -80,29 +80,31 @@ impl Default for PlannerAgent {
     }
 }
 
+const TOOL_DESCRIPTION: &str = concat!(
+    "Agent that creates detailed, actionable implementation plans by breaking down complex goals into sequenced steps with dependencies.\n\n",
+    "Use when you need: complex tasks broken down, migration plans created, project phases defined, or implementation strategies designed.\n\n",
+    "IMPORTANT: Give it a GOAL and ask for a plan, not step-by-step instructions.\n\n",
+    "Examples with context:\n",
+    "  - 'Plan migration from SQLite to PostgreSQL - we have 50GB of data, can tolerate 1hr downtime, using Rust with sqlx'\n",
+    "  - 'Plan adding auth to our API - we need OAuth2 with Google/GitHub, have 12 endpoints, currently no auth at all'\n\n",
+    "Detailed example:\n",
+    "  'Create a plan to migrate our monolithic Django app to microservices. Current state: 150k LOC Python, PostgreSQL ",
+    "database with 80 tables, serves 10k requests/minute peak, deployed on AWS ECS. Team: 6 backend engineers, 2 DevOps. ",
+    "Constraints: cannot have more than 5 minutes downtime, must maintain backwards compatibility with mobile apps for ",
+    "6 months, budget for infrastructure is flexible but need to justify costs. We want to start by extracting the ",
+    "user authentication service since it is the most stable and well-tested. Future services will be: payments, ",
+    "notifications, search, and content. Plan should cover: service boundaries, data migration strategy, API gateway ",
+    "setup, inter-service communication (we are leaning toward gRPC), observability, and rollback procedures.'\n\n",
+    "Returns: Structured plan with phases, ordered steps, dependencies, prerequisites, risks, and verification checkpoints"
+);
+
 impl InternalAgent for PlannerAgent {
     fn name(&self) -> &str {
         "planner"
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Agent that creates detailed, actionable implementation plans by breaking down complex goals into sequenced steps with dependencies.\n\n",
-            "Use when you need: complex tasks broken down, migration plans created, project phases defined, or implementation strategies designed.\n\n",
-            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
-            "Examples with context:\n",
-            "  - 'Plan migration from SQLite to PostgreSQL - we have 50GB of data, can tolerate 1hr downtime, using Rust with sqlx'\n",
-            "  - 'Plan adding auth to our API - we need OAuth2 with Google/GitHub, have 12 endpoints, currently no auth at all'\n\n",
-            "Detailed example:\n",
-            "  'Create a plan to migrate our monolithic Django app to microservices. Current state: 150k LOC Python, PostgreSQL ",
-            "database with 80 tables, serves 10k requests/minute peak, deployed on AWS ECS. Team: 6 backend engineers, 2 DevOps. ",
-            "Constraints: cannot have more than 5 minutes downtime, must maintain backwards compatibility with mobile apps for ",
-            "6 months, budget for infrastructure is flexible but need to justify costs. We want to start by extracting the ",
-            "user authentication service since it is the most stable and well-tested. Future services will be: payments, ",
-            "notifications, search, and content. Plan should cover: service boundaries, data migration strategy, API gateway ",
-            "setup, inter-service communication (we are leaning toward gRPC), observability, and rollback procedures.'\n\n",
-            "Returns: Structured plan with phases, ordered steps, dependencies, prerequisites, risks, and verification checkpoints"
-        )
+        "Creates detailed implementation plans for complex tasks"
     }
 
     fn system_prompt(&self) -> &str {
@@ -116,6 +118,10 @@ impl InternalAgent for PlannerAgent {
 
     fn max_iterations(&self) -> usize {
         100
+    }
+
+    fn tool_description(&self) -> &str {
+        TOOL_DESCRIPTION
     }
 }
 

@@ -139,19 +139,21 @@ impl Default for ChatAgent {
     }
 }
 
+const TOOL_DESCRIPTION: &str = concat!(
+    "Interactive chat agent for general-purpose conversations and task delegation.\n\n",
+    "This is the default agent for interactive sessions. It can respond to questions, ",
+    "help with various tasks, and delegate to specialized agents when appropriate.\n\n",
+    "The chat agent serves as a coordinator, understanding user intent and either ",
+    "responding directly or delegating to the most suitable specialized agent."
+);
+
 impl InternalAgent for ChatAgent {
     fn name(&self) -> &str {
         "chat"
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Interactive chat agent for general-purpose conversations and task delegation.\n\n",
-            "This is the default agent for interactive sessions. It can respond to questions, ",
-            "help with various tasks, and delegate to specialized agents when appropriate.\n\n",
-            "The chat agent serves as a coordinator, understanding user intent and either ",
-            "responding directly or delegating to the most suitable specialized agent."
-        )
+        "Coordinates tasks by delegating to specialized agents"
     }
 
     fn system_prompt(&self) -> &str {
@@ -165,6 +167,10 @@ impl InternalAgent for ChatAgent {
 
     fn max_iterations(&self) -> usize {
         100 // Allow many iterations for complex conversations
+    }
+
+    fn tool_description(&self) -> &str {
+        TOOL_DESCRIPTION
     }
 }
 

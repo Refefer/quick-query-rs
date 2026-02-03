@@ -46,26 +46,28 @@ impl Default for ExploreAgent {
     }
 }
 
+const TOOL_DESCRIPTION: &str = concat!(
+    "Autonomous filesystem exploration agent that finds and analyzes files and directories.\n\n",
+    "Use when you need: to find files, understand directory contents, search for specific content, or explore unfamiliar filesystem areas.\n\n",
+    "IMPORTANT: Give it a GOAL or QUESTION, not a mechanical command.\n\n",
+    "Examples with context:\n",
+    "  - 'Find config files in ~/.config related to terminal emulators (I use alacritty and kitty)'\n",
+    "  - 'Search /var/log for errors from the last hour. The service is called nginx and logs to access.log and error.log'\n\n",
+    "Detailed example:\n",
+    "  'I need to clean up my development environment. Search through ~/Projects and find all node_modules directories, ",
+    ".venv Python virtual environments, and target/ Rust build directories. For each project, tell me the size of these ",
+    "directories and when the project was last modified. I want to delete build artifacts for projects I haven't touched ",
+    "in over 6 months. Also check for any .env files that might contain secrets I should back up before deleting.'\n\n",
+    "Returns: Summary of findings with file paths and relevant content excerpts"
+);
+
 impl InternalAgent for ExploreAgent {
     fn name(&self) -> &str {
         "explore"
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Autonomous filesystem exploration agent that finds and analyzes files and directories.\n\n",
-            "Use when you need: to find files, understand directory contents, search for specific content, or explore unfamiliar filesystem areas.\n\n",
-            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
-            "Examples with context:\n",
-            "  - 'Find config files in ~/.config related to terminal emulators (I use alacritty and kitty)'\n",
-            "  - 'Search /var/log for errors from the last hour. The service is called nginx and logs to access.log and error.log'\n\n",
-            "Detailed example:\n",
-            "  'I need to clean up my development environment. Search through ~/Projects and find all node_modules directories, ",
-            ".venv Python virtual environments, and target/ Rust build directories. For each project, tell me the size of these ",
-            "directories and when the project was last modified. I want to delete build artifacts for projects I haven't touched ",
-            "in over 6 months. Also check for any .env files that might contain secrets I should back up before deleting.'\n\n",
-            "Returns: Summary of findings with file paths and relevant content excerpts"
-        )
+        "Explores filesystems to find and analyze files and directories"
     }
 
     fn system_prompt(&self) -> &str {
@@ -78,6 +80,10 @@ impl InternalAgent for ExploreAgent {
 
     fn max_iterations(&self) -> usize {
         100
+    }
+
+    fn tool_description(&self) -> &str {
+        TOOL_DESCRIPTION
     }
 }
 

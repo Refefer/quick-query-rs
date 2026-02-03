@@ -61,30 +61,32 @@ impl Default for ResearcherAgent {
     }
 }
 
+const TOOL_DESCRIPTION: &str = concat!(
+    "Autonomous web research agent that answers questions by searching the internet and synthesizing information.\n\n",
+    "Use when you need: current information, external knowledge, best practices research, comparisons, or answers to questions not in the codebase.\n\n",
+    "Modes:\n",
+    "  - Default: Fast search with synthesized summary (one query, quick answer)\n",
+    "  - In-depth: Request 'thorough' or 'in-depth' research for comprehensive multi-source analysis\n\n",
+    "IMPORTANT: Give it a RESEARCH QUESTION, not a URL to fetch.\n\n",
+    "Examples with context:\n",
+    "  - 'Best practices for Rust error handling - I'm building a CLI tool and want to decide between anyhow and thiserror'\n",
+    "  - 'What's the current status of the log4j vulnerability? We're running Java 11 with log4j 2.14'\n\n",
+    "Detailed example:\n",
+    "  'In-depth research: We are building a real-time collaborative document editor like Google Docs. Our stack is React ",
+    "frontend with a Rust backend. We need to choose between CRDTs (like Yjs or Automerge) and Operational Transformation. ",
+    "Our requirements: support 50+ concurrent editors, offline editing with sync, and we need to store revision history. ",
+    "The team has no experience with either approach. Research the tradeoffs, implementation complexity, library maturity, ",
+    "and any production war stories. We prefer Rust-native solutions but will consider WASM if necessary.'\n\n",
+    "Returns: Synthesized answer with citations and source URLs"
+);
+
 impl InternalAgent for ResearcherAgent {
     fn name(&self) -> &str {
         "researcher"
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Autonomous web research agent that answers questions by searching the internet and synthesizing information.\n\n",
-            "Use when you need: current information, external knowledge, best practices research, comparisons, or answers to questions not in the codebase.\n\n",
-            "Modes:\n",
-            "  - Default: Fast search with synthesized summary (one query, quick answer)\n",
-            "  - In-depth: Request 'thorough' or 'in-depth' research for comprehensive multi-source analysis\n\n",
-            "IMPORTANT: Always provide full context in your prompt so the agent understands the task.\n\n",
-            "Examples with context:\n",
-            "  - 'Best practices for Rust error handling - I'm building a CLI tool and want to decide between anyhow and thiserror'\n",
-            "  - 'What's the current status of the log4j vulnerability? We're running Java 11 with log4j 2.14'\n\n",
-            "Detailed example:\n",
-            "  'In-depth research: We are building a real-time collaborative document editor like Google Docs. Our stack is React ",
-            "frontend with a Rust backend. We need to choose between CRDTs (like Yjs or Automerge) and Operational Transformation. ",
-            "Our requirements: support 50+ concurrent editors, offline editing with sync, and we need to store revision history. ",
-            "The team has no experience with either approach. Research the tradeoffs, implementation complexity, library maturity, ",
-            "and any production war stories. We prefer Rust-native solutions but will consider WASM if necessary.'\n\n",
-            "Returns: Synthesized answer with citations and source URLs"
-        )
+        "Researches topics on the web and synthesizes findings"
     }
 
     fn system_prompt(&self) -> &str {
@@ -97,6 +99,10 @@ impl InternalAgent for ResearcherAgent {
 
     fn max_iterations(&self) -> usize {
         100
+    }
+
+    fn tool_description(&self) -> &str {
+        TOOL_DESCRIPTION
     }
 }
 

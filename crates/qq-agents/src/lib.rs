@@ -47,6 +47,14 @@ pub trait InternalAgent: Send + Sync {
     fn max_iterations(&self) -> usize {
         20
     }
+
+    /// Get the description for when this agent is exposed as a tool to an LLM.
+    ///
+    /// This should be concise and guide proper usage (goals not commands).
+    /// Default: falls back to `description()`.
+    fn tool_description(&self) -> &str {
+        self.description()
+    }
 }
 
 /// Information about an available agent.
@@ -183,5 +191,17 @@ mod tests {
         assert!(InternalAgentType::from_name("planner").is_some());
         assert!(InternalAgentType::from_name("writer").is_some());
         assert!(InternalAgentType::from_name("unknown").is_none());
+    }
+
+    #[test]
+    fn test_agent_tool_descriptions() {
+        for t in InternalAgentType::all_with_chat() {
+            let agent = t.create();
+            assert!(
+                !agent.tool_description().is_empty(),
+                "Agent {} should have a tool description",
+                agent.name()
+            );
+        }
     }
 }
