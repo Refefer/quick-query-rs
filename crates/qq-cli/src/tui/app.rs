@@ -93,7 +93,7 @@ pub struct TuiApp {
     // Execution context (for displaying call stack)
     pub execution_context: ExecutionContext,
 
-    // Agent progress tracking (agent_name, iteration, max_iterations)
+    // Agent progress tracking (agent_name, iteration, max_turns)
     pub agent_progress: Option<(String, u32, u32)>,
 
     // Agent byte counts (cumulative input/output bytes for current agent)
@@ -131,7 +131,7 @@ impl TuiApp {
             scroll: ScrollState::default(),
             tool_notifications: Vec::new(),
             input: Input::default(),
-            input_history: InputHistory::new(),
+            input_history: InputHistory::load(),
             show_help: false,
             should_quit: false,
             execution_context,
@@ -264,9 +264,9 @@ impl TuiApp {
             AgentEvent::IterationStart {
                 agent_name,
                 iteration,
-                max_iterations,
+                max_turns,
             } => {
-                self.agent_progress = Some((agent_name, iteration, max_iterations));
+                self.agent_progress = Some((agent_name, iteration, max_turns));
                 self.streaming_state = StreamingState::Asking;
             }
             AgentEvent::ThinkingDelta {
@@ -762,6 +762,9 @@ pub async fn run_tui(
         }
     }
 
+    // Save input history before exiting
+    app.input_history.save();
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -905,9 +908,9 @@ async fn run_streaming_completion(
 ) {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
-    let max_iterations = 100u32;
+    let max_turns = 100u32;
 
-    for iteration in 0..max_iterations {
+    for iteration in 0..max_turns {
         let _ = tx
             .send(StreamEvent::IterationStart {
                 iteration: iteration + 1,
@@ -1164,7 +1167,7 @@ async fn run_streaming_completion(
     execution_context.reset().await;
     let _ = tx
         .send(StreamEvent::Error {
-            message: format!("Max iterations ({}) reached", max_iterations),
+            message: format!("Max iterations ({}) reached", max_turns),
         })
         .await;
 }

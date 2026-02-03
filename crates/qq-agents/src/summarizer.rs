@@ -87,7 +87,7 @@ impl InternalAgent for SummarizerAgent {
         &[]
     }
 
-    fn max_iterations(&self) -> usize {
+    fn max_turns(&self) -> usize {
         100
     }
 

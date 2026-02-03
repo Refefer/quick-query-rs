@@ -95,7 +95,7 @@ impl InternalAgent for WriterAgent {
         &["read_file", "write_file", "list_files", "search_files"]
     }
 
-    fn max_iterations(&self) -> usize {
+    fn max_turns(&self) -> usize {
         100
     }
 

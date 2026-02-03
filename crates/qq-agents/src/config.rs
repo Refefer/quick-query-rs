@@ -1,4 +1,4 @@
-//! Configuration types for external agents.
+//! Configuration types for agents.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -6,8 +6,23 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-fn default_max_iterations() -> usize {
+fn default_max_turns() -> usize {
     20
+}
+
+/// Configuration overrides for built-in agents.
+///
+/// Allows customizing tool limits and other settings for internal agents
+/// without modifying the source code.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuiltinAgentOverride {
+    /// Maximum agentic loop iterations (number of turns)
+    #[serde(default)]
+    pub max_turns: Option<usize>,
+
+    /// Per-tool call limits (tool_name -> max_calls)
+    #[serde(default)]
+    pub tool_limits: HashMap<String, usize>,
 }
 
 /// External agent definition from agents.toml.
@@ -32,8 +47,13 @@ pub struct AgentDefinition {
     pub tools: Vec<String>,
 
     /// Maximum agentic loop iterations
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: usize,
+    #[serde(default = "default_max_turns")]
+    pub max_turns: usize,
+
+    /// Per-tool call limits (tool_name -> max_calls)
+    /// When a tool reaches its limit, the agent receives an error message instead
+    #[serde(default)]
+    pub tool_limits: HashMap<String, usize>,
 }
 
 /// Agents configuration file (agents.toml).
@@ -42,6 +62,10 @@ pub struct AgentsConfig {
     /// External agent definitions
     #[serde(default)]
     pub agents: HashMap<String, AgentDefinition>,
+
+    /// Overrides for built-in agents (e.g., tool_limits)
+    #[serde(default)]
+    pub builtin: HashMap<String, BuiltinAgentOverride>,
 }
 
 impl AgentsConfig {
@@ -79,5 +103,139 @@ impl AgentsConfig {
     /// Get all agent names.
     pub fn names(&self) -> Vec<&str> {
         self.agents.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Get override configuration for a built-in agent.
+    pub fn get_builtin_override(&self, name: &str) -> Option<&BuiltinAgentOverride> {
+        self.builtin.get(name)
+    }
+
+    /// Get tool limits for a built-in agent from config overrides.
+    ///
+    /// Returns None if no override is configured.
+    pub fn get_builtin_tool_limits(&self, name: &str) -> Option<&HashMap<String, usize>> {
+        self.builtin
+            .get(name)
+            .map(|o| &o.tool_limits)
+            .filter(|limits| !limits.is_empty())
+    }
+
+    /// Get max_turns for a built-in agent from config overrides.
+    ///
+    /// Returns None if no override is configured.
+    pub fn get_builtin_max_turns(&self, name: &str) -> Option<usize> {
+        self.builtin.get(name).and_then(|o| o.max_turns)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_builtin_overrides() {
+        let toml_content = r#"
+[builtin.researcher]
+max_turns = 15
+tool_limits = { web_search = 2, fetch_webpage = 5 }
+
+[builtin.coder]
+max_turns = 50
+tool_limits = { write_file = 10 }
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        // Check researcher
+        assert_eq!(config.get_builtin_max_turns("researcher"), Some(15));
+        let researcher_limits = config.get_builtin_tool_limits("researcher").unwrap();
+        assert_eq!(researcher_limits.get("web_search"), Some(&2));
+        assert_eq!(researcher_limits.get("fetch_webpage"), Some(&5));
+
+        // Check coder
+        assert_eq!(config.get_builtin_max_turns("coder"), Some(50));
+        let coder_limits = config.get_builtin_tool_limits("coder").unwrap();
+        assert_eq!(coder_limits.get("write_file"), Some(&10));
+
+        // Check non-existent agent returns None
+        assert!(config.get_builtin_tool_limits("nonexistent").is_none());
+        assert!(config.get_builtin_max_turns("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_parse_external_agent_with_tool_limits() {
+        let toml_content = r#"
+[agents.my-agent]
+description = "Test agent"
+system_prompt = "You are a test agent"
+tools = ["read_file", "write_file"]
+tool_limits = { read_file = 10, write_file = 5 }
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("my-agent").unwrap();
+        assert_eq!(agent.tool_limits.get("read_file"), Some(&10));
+        assert_eq!(agent.tool_limits.get("write_file"), Some(&5));
+    }
+
+    #[test]
+    fn test_parse_mixed_config() {
+        let toml_content = r#"
+[builtin.researcher]
+tool_limits = { web_search = 3 }
+
+[agents.custom-agent]
+description = "Custom agent"
+system_prompt = "You are custom"
+tools = ["fetch_webpage"]
+tool_limits = { fetch_webpage = 2 }
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        // Builtin override
+        let researcher_limits = config.get_builtin_tool_limits("researcher").unwrap();
+        assert_eq!(researcher_limits.get("web_search"), Some(&3));
+
+        // External agent
+        let custom = config.get("custom-agent").unwrap();
+        assert_eq!(custom.tool_limits.get("fetch_webpage"), Some(&2));
+    }
+
+    #[test]
+    fn test_empty_tool_limits_returns_none() {
+        let toml_content = r#"
+[builtin.researcher]
+# Empty tool_limits
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        // Empty limits should return None
+        assert!(config.get_builtin_tool_limits("researcher").is_none());
+    }
+
+    #[test]
+    fn test_max_turns_only() {
+        let toml_content = r#"
+[builtin.explore]
+max_turns = 100
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        // Should have max_turns but no tool_limits
+        assert_eq!(config.get_builtin_max_turns("explore"), Some(100));
+        assert!(config.get_builtin_tool_limits("explore").is_none());
+    }
+
+    #[test]
+    fn test_tool_limits_only() {
+        let toml_content = r#"
+[builtin.reviewer]
+tool_limits = { read_file = 25 }
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        // Should have tool_limits but no max_turns
+        assert!(config.get_builtin_max_turns("reviewer").is_none());
+        let limits = config.get_builtin_tool_limits("reviewer").unwrap();
+        assert_eq!(limits.get("read_file"), Some(&25));
     }
 }

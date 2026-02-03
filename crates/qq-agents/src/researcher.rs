@@ -1,5 +1,7 @@
 //! Researcher agent for web research and information synthesis.
 
+use std::collections::HashMap;
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous web research agent. You receive HIGH-LEVEL RESEARCH QUESTIONS, not URLs to fetch.
@@ -97,12 +99,19 @@ impl InternalAgent for ResearcherAgent {
         &["web_search", "fetch_webpage"]
     }
 
-    fn max_iterations(&self) -> usize {
+    fn max_turns(&self) -> usize {
         100
     }
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("web_search".to_string(), 2);
+        limits.insert("fetch_webpage".to_string(), 5);
+        Some(limits)
     }
 }
 
@@ -118,5 +127,13 @@ mod tests {
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
+    }
+
+    #[test]
+    fn test_researcher_tool_limits() {
+        let agent = ResearcherAgent::new();
+        let limits = agent.tool_limits().expect("researcher should have tool limits");
+        assert_eq!(limits.get("web_search"), Some(&2));
+        assert_eq!(limits.get("fetch_webpage"), Some(&5));
     }
 }

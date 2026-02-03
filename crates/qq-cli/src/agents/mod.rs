@@ -141,7 +141,7 @@ impl AgentExecutor {
         // Build config
         let config = AgentConfig::new(agent.name())
             .with_system_prompt(agent.system_prompt())
-            .with_max_iterations(agent.max_iterations());
+            .with_max_turns(agent.max_turns());
 
         // Build context with the task
         let context = vec![qq_core::Message::user(task)];
@@ -167,7 +167,7 @@ impl AgentExecutor {
         // Build config
         let config = AgentConfig::new("external")
             .with_system_prompt(&def.system_prompt)
-            .with_max_iterations(def.max_iterations);
+            .with_max_turns(def.max_turns);
 
         // Build context with the task
         let context = vec![qq_core::Message::user(task)];

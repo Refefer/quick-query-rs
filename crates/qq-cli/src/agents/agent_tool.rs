@@ -140,9 +140,24 @@ impl Tool for InternalAgentTool {
 
         let agent_tools = Arc::new(agent_tools);
 
-        let config = AgentConfig::new(self.agent.name())
+        // Get max_turns: config override takes precedence over hardcoded default
+        let max_turns = self
+            .external_agents
+            .get_builtin_max_turns(self.agent.name())
+            .unwrap_or_else(|| self.agent.max_turns());
+
+        let mut config = AgentConfig::new(self.agent.name())
             .with_system_prompt(self.agent.system_prompt())
-            .with_max_iterations(self.agent.max_iterations());
+            .with_max_turns(max_turns);
+
+        // Apply tool limits: config overrides take precedence over hardcoded defaults
+        if let Some(limits) = self.external_agents.get_builtin_tool_limits(self.agent.name()) {
+            // Use config override
+            config = config.with_tool_limits(limits.clone());
+        } else if let Some(limits) = self.agent.tool_limits() {
+            // Fall back to hardcoded defaults
+            config = config.with_tool_limits(limits);
+        }
 
         // Context is ONLY the task - no chat history, no chat system prompt
         let context = vec![qq_core::Message::user(args.task.as_str())];
@@ -281,9 +296,14 @@ impl Tool for ExternalAgentTool {
 
         let agent_tools = Arc::new(agent_tools);
 
-        let config = AgentConfig::new(self.agent_name.as_str())
+        let mut config = AgentConfig::new(self.agent_name.as_str())
             .with_system_prompt(&self.definition.system_prompt)
-            .with_max_iterations(self.definition.max_iterations);
+            .with_max_turns(self.definition.max_turns);
+
+        // Apply tool limits if configured for this external agent
+        if !self.definition.tool_limits.is_empty() {
+            config = config.with_tool_limits(self.definition.tool_limits.clone());
+        }
 
         // Context is ONLY the task - no chat history, no chat system prompt
         let context = vec![qq_core::Message::user(args.task.as_str())];

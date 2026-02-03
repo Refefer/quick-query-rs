@@ -5,6 +5,8 @@
 //! - Built-in agent implementations (chat, coder, explore, etc.)
 //! - Configuration types for external agents
 
+use std::collections::HashMap;
+
 mod chat;
 mod coder;
 mod config;
@@ -17,7 +19,7 @@ mod writer;
 
 pub use chat::ChatAgent;
 pub use coder::CoderAgent;
-pub use config::{AgentDefinition, AgentsConfig};
+pub use config::{AgentDefinition, AgentsConfig, BuiltinAgentOverride};
 pub use explore::ExploreAgent;
 pub use planner::PlannerAgent;
 pub use researcher::ResearcherAgent;
@@ -44,7 +46,7 @@ pub trait InternalAgent: Send + Sync {
     fn tool_names(&self) -> &[&str];
 
     /// Get the default max iterations for the agentic loop
-    fn max_iterations(&self) -> usize {
+    fn max_turns(&self) -> usize {
         20
     }
 
@@ -54,6 +56,15 @@ pub trait InternalAgent: Send + Sync {
     /// Default: falls back to `description()`.
     fn tool_description(&self) -> &str {
         self.description()
+    }
+
+    /// Get per-tool call limits for this agent.
+    ///
+    /// Returns a map of tool names to maximum allowed calls per agent execution.
+    /// When a tool reaches its limit, the agent receives an error message instead.
+    /// Default: None (no limits).
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        None
     }
 }
 

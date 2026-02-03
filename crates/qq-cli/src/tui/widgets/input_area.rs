@@ -1,5 +1,8 @@
 //! Input area widget with line editing support.
 
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -7,7 +10,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Widget},
 };
+use serde::{Deserialize, Serialize};
 use tui_input::Input;
+
+/// Maximum number of history entries to persist
+const MAX_HISTORY_ENTRIES: usize = 1000;
 
 /// Input area widget with basic line editing
 pub struct InputArea<'a> {
@@ -161,10 +168,33 @@ impl Widget for InputArea<'_> {
     }
 }
 
+/// A single history entry with metadata
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub text: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl HistoryEntry {
+    pub fn new(text: String) -> Self {
+        Self {
+            text,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+/// File format for persisted history
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedHistory {
+    version: u32,
+    entries: Vec<HistoryEntry>,
+}
+
 /// Input history for up/down arrow navigation
 #[derive(Clone)]
 pub struct InputHistory {
-    entries: Vec<String>,
+    entries: Vec<HistoryEntry>,
     position: Option<usize>,
     current_input: String,
 }
@@ -184,13 +214,85 @@ impl InputHistory {
         }
     }
 
-    pub fn add(&mut self, entry: String) {
-        if !entry.is_empty() {
-            // Don't add duplicates of the last entry
-            if self.entries.last() != Some(&entry) {
-                self.entries.push(entry);
-            }
+    /// Returns the default history file path: ~/.config/qq/input_history.json
+    fn history_file_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|p| p.join("qq").join("input_history.json"))
+    }
+
+    /// Load history from the default path, returning empty history on any error
+    pub fn load() -> Self {
+        Self::load_from_path(Self::history_file_path())
+    }
+
+    /// Load history from a specific path (for testing)
+    pub fn load_from_path(path: Option<PathBuf>) -> Self {
+        let Some(path) = path else {
+            return Self::new();
+        };
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Self::new(),
+        };
+
+        let persisted: PersistedHistory = match serde_json::from_str(&content) {
+            Ok(p) => p,
+            Err(_) => return Self::new(),
+        };
+
+        Self {
+            entries: persisted.entries,
+            position: None,
+            current_input: String::new(),
         }
+    }
+
+    /// Save history to the default path, silently ignoring errors
+    pub fn save(&self) {
+        self.save_to_path(Self::history_file_path());
+    }
+
+    /// Save history to a specific path (for testing)
+    pub fn save_to_path(&self, path: Option<PathBuf>) {
+        let Some(path) = path else {
+            return;
+        };
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let persisted = PersistedHistory {
+            version: 1,
+            entries: self.entries.clone(),
+        };
+
+        if let Ok(content) = serde_json::to_string_pretty(&persisted) {
+            let _ = std::fs::write(&path, content);
+        }
+    }
+
+    pub fn add(&mut self, entry: String) {
+        // Skip empty/whitespace-only entries
+        if entry.trim().is_empty() {
+            self.position = None;
+            self.current_input.clear();
+            return;
+        }
+
+        // Remove existing entry with same text (full deduplication)
+        self.entries.retain(|e| e.text != entry);
+
+        // Add new entry with current timestamp
+        self.entries.push(HistoryEntry::new(entry));
+
+        // Prune oldest entries if over limit
+        if self.entries.len() > MAX_HISTORY_ENTRIES {
+            let excess = self.entries.len() - MAX_HISTORY_ENTRIES;
+            self.entries.drain(0..excess);
+        }
+
         self.position = None;
         self.current_input.clear();
     }
@@ -205,16 +307,16 @@ impl InputHistory {
                 // First up press - save current input and go to last entry
                 self.current_input = current.to_string();
                 self.position = Some(self.entries.len() - 1);
-                Some(&self.entries[self.entries.len() - 1])
+                Some(&self.entries[self.entries.len() - 1].text)
             }
             Some(pos) if pos > 0 => {
                 // Go to earlier entry
                 self.position = Some(pos - 1);
-                Some(&self.entries[pos - 1])
+                Some(&self.entries[pos - 1].text)
             }
             _ => {
                 // Already at oldest entry
-                Some(&self.entries[0])
+                Some(&self.entries[0].text)
             }
         }
     }
@@ -225,7 +327,7 @@ impl InputHistory {
             Some(pos) if pos + 1 < self.entries.len() => {
                 // Go to newer entry
                 self.position = Some(pos + 1);
-                Some(&self.entries[pos + 1])
+                Some(&self.entries[pos + 1].text)
             }
             Some(_) => {
                 // At newest entry, return to current input
@@ -238,5 +340,125 @@ impl InputHistory {
     pub fn reset(&mut self) {
         self.position = None;
         self.current_input.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_history_entry_creation() {
+        let before = Utc::now();
+        let entry = HistoryEntry::new("test query".to_string());
+        let after = Utc::now();
+
+        assert_eq!(entry.text, "test query");
+        assert!(entry.timestamp >= before);
+        assert!(entry.timestamp <= after);
+    }
+
+    #[test]
+    fn test_add_and_navigate() {
+        let mut history = InputHistory::new();
+        history.add("first".to_string());
+        history.add("second".to_string());
+        history.add("third".to_string());
+
+        // Navigate up through history
+        assert_eq!(history.navigate_up("current"), Some("third"));
+        assert_eq!(history.navigate_up("current"), Some("second"));
+        assert_eq!(history.navigate_up("current"), Some("first"));
+        // At oldest, should stay at first
+        assert_eq!(history.navigate_up("current"), Some("first"));
+
+        // Navigate back down
+        assert_eq!(history.navigate_down("current"), Some("second"));
+        assert_eq!(history.navigate_down("current"), Some("third"));
+        // Past newest, back to current input
+        assert_eq!(history.navigate_down("current"), Some("current"));
+    }
+
+    #[test]
+    fn test_deduplication() {
+        let mut history = InputHistory::new();
+        history.add("first".to_string());
+        history.add("second".to_string());
+        history.add("first".to_string()); // Re-add "first"
+
+        // Should have 2 entries, with "first" moved to the end
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(history.entries[0].text, "second");
+        assert_eq!(history.entries[1].text, "first");
+    }
+
+    #[test]
+    fn test_max_entries_pruning() {
+        let mut history = InputHistory::new();
+
+        // Add more than MAX_HISTORY_ENTRIES
+        for i in 0..MAX_HISTORY_ENTRIES + 50 {
+            history.add(format!("entry {}", i));
+        }
+
+        assert_eq!(history.entries.len(), MAX_HISTORY_ENTRIES);
+        // Oldest entries should be pruned
+        assert_eq!(history.entries[0].text, "entry 50");
+        assert_eq!(
+            history.entries[MAX_HISTORY_ENTRIES - 1].text,
+            format!("entry {}", MAX_HISTORY_ENTRIES + 49)
+        );
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test_history.json");
+
+        // Create and save history
+        let mut history = InputHistory::new();
+        history.add("query one".to_string());
+        history.add("query two".to_string());
+        history.save_to_path(Some(path.clone()));
+
+        // Load history
+        let loaded = InputHistory::load_from_path(Some(path));
+
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.entries[0].text, "query one");
+        assert_eq!(loaded.entries[1].text, "query two");
+    }
+
+    #[test]
+    fn test_load_missing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("nonexistent.json");
+
+        let history = InputHistory::load_from_path(Some(path));
+        assert!(history.entries.is_empty());
+    }
+
+    #[test]
+    fn test_load_corrupt_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("corrupt.json");
+
+        std::fs::write(&path, "not valid json {{{").unwrap();
+
+        let history = InputHistory::load_from_path(Some(path));
+        assert!(history.entries.is_empty());
+    }
+
+    #[test]
+    fn test_empty_input_not_added() {
+        let mut history = InputHistory::new();
+        history.add("valid".to_string());
+        history.add("".to_string());
+        history.add("   ".to_string());
+        history.add("\t\n".to_string());
+
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].text, "valid");
     }
 }

@@ -286,9 +286,12 @@ pub struct AgentConfig {
     /// System prompt for the agent.
     pub system_prompt: Option<String>,
     /// Maximum agentic loop iterations.
-    pub max_iterations: usize,
+    pub max_turns: usize,
     /// Whether to maintain message history (stateful mode).
     pub stateful: bool,
+    /// Per-tool call limits (tool_name -> max_calls).
+    /// When a tool reaches its limit, the agent receives an error instead.
+    pub tool_limits: Option<HashMap<String, usize>>,
 }
 
 impl AgentConfig {
@@ -297,8 +300,9 @@ impl AgentConfig {
         Self {
             id: id.into(),
             system_prompt: None,
-            max_iterations: 20,
+            max_turns: 20,
             stateful: false,
+            tool_limits: None,
         }
     }
 
@@ -309,14 +313,23 @@ impl AgentConfig {
     }
 
     /// Set the maximum iterations.
-    pub fn with_max_iterations(mut self, max: usize) -> Self {
-        self.max_iterations = max;
+    pub fn with_max_turns(mut self, max: usize) -> Self {
+        self.max_turns = max;
         self
     }
 
     /// Enable stateful mode (maintains message history).
     pub fn stateful(mut self) -> Self {
         self.stateful = true;
+        self
+    }
+
+    /// Set per-tool call limits.
+    ///
+    /// When a tool reaches its limit, the agent receives an error message
+    /// instead of executing the tool.
+    pub fn with_tool_limits(mut self, limits: HashMap<String, usize>) -> Self {
+        self.tool_limits = Some(limits);
         self
     }
 }
@@ -328,7 +341,7 @@ pub enum AgentProgressEvent {
     IterationStart {
         agent_name: String,
         iteration: u32,
-        max_iterations: u32,
+        max_turns: u32,
     },
     /// A chunk of thinking/reasoning content.
     ThinkingDelta {
@@ -480,17 +493,20 @@ impl Agent {
         // Add provided context
         messages.extend(context);
 
-        let max_iterations = config.max_iterations as u32;
+        let max_turns = config.max_turns as u32;
+
+        // Track tool call counts for enforcing limits
+        let mut tool_call_counts: HashMap<String, usize> = HashMap::new();
 
         // Run agentic loop
-        for iteration in 0..config.max_iterations {
+        for iteration in 0..config.max_turns {
             // Emit iteration start event
             if let Some(ref handler) = progress {
                 handler
                     .on_progress(AgentProgressEvent::IterationStart {
                         agent_name: agent_name.clone(),
                         iteration: iteration as u32 + 1,
-                        max_iterations,
+                        max_turns,
                     })
                     .await;
             }
@@ -553,6 +569,66 @@ impl Agent {
 
                 // Execute tools
                 for tool_call in &tool_calls {
+                    // Check tool limits before executing
+                    let limit_exceeded = if let Some(ref limits) = config.tool_limits {
+                        if let Some(&limit) = limits.get(&tool_call.name) {
+                            let count = tool_call_counts.get(&tool_call.name).copied().unwrap_or(0);
+                            count >= limit
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if limit_exceeded {
+                        let limit = config.tool_limits.as_ref()
+                            .and_then(|l| l.get(&tool_call.name))
+                            .copied()
+                            .unwrap_or(0);
+
+                        debug!(
+                            agent = %config.id,
+                            tool = %tool_call.name,
+                            limit = limit,
+                            "Tool call limit exceeded"
+                        );
+
+                        // Emit tool start event (still shows the attempt)
+                        if let Some(ref handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::ToolStart {
+                                    agent_name: agent_name.clone(),
+                                    tool_name: tool_call.name.clone(),
+                                })
+                                .await;
+                        }
+
+                        let result = format!(
+                            "Error: Tool '{}' call limit exceeded (limit: {}). \
+                            You have already used this tool the maximum number of times allowed. \
+                            Please complete your task with the information you have gathered.",
+                            tool_call.name, limit
+                        );
+
+                        // Emit tool complete event (as error)
+                        if let Some(ref handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::ToolComplete {
+                                    agent_name: agent_name.clone(),
+                                    tool_name: tool_call.name.clone(),
+                                    is_error: true,
+                                })
+                                .await;
+                        }
+
+                        messages.push(Message::tool_result(&tool_call.id, result));
+                        continue;
+                    }
+
+                    // Increment tool call count
+                    *tool_call_counts.entry(tool_call.name.clone()).or_insert(0) += 1;
+
                     // Emit tool start event
                     if let Some(ref handler) = progress {
                         handler
@@ -600,7 +676,7 @@ impl Agent {
 
         Err(Error::Unknown(format!(
             "Agent {} exceeded max iterations ({})",
-            config.id, config.max_iterations
+            config.id, config.max_turns
         )))
     }
 
@@ -625,7 +701,7 @@ impl Agent {
         messages.extend(self.messages.clone());
 
         // Run agentic loop
-        for _iteration in 0..self.config.max_iterations {
+        for _iteration in 0..self.config.max_turns {
             let mut request = CompletionRequest::new(messages.clone())
                 .with_tools(self.tools.definitions());
 
@@ -660,7 +736,7 @@ impl Agent {
 
         Err(Error::Unknown(format!(
             "Agent {} exceeded max iterations ({})",
-            self.config.id, self.config.max_iterations
+            self.config.id, self.config.max_turns
         )))
     }
 
@@ -866,7 +942,7 @@ mod tests {
     fn test_agent_config() {
         let config = AgentConfig::new("my-agent")
             .with_system_prompt("You are a helpful assistant")
-            .with_max_iterations(10)
+            .with_max_turns(10)
             .stateful();
 
         assert_eq!(config.id.0, "my-agent");
@@ -874,7 +950,7 @@ mod tests {
             config.system_prompt,
             Some("You are a helpful assistant".to_string())
         );
-        assert_eq!(config.max_iterations, 10);
+        assert_eq!(config.max_turns, 10);
         assert!(config.stateful);
     }
 

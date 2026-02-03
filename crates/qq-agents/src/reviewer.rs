@@ -88,7 +88,7 @@ impl InternalAgent for ReviewerAgent {
         &["read_file", "list_files", "search_files"]
     }
 
-    fn max_iterations(&self) -> usize {
+    fn max_turns(&self) -> usize {
         100
     }
 

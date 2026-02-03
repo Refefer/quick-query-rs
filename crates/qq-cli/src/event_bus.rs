@@ -17,7 +17,7 @@ pub enum AgentEvent {
     IterationStart {
         agent_name: String,
         iteration: u32,
-        max_iterations: u32,
+        max_turns: u32,
     },
     /// Thinking content from an agent.
     ThinkingDelta {
@@ -54,11 +54,11 @@ impl From<AgentProgressEvent> for AgentEvent {
             AgentProgressEvent::IterationStart {
                 agent_name,
                 iteration,
-                max_iterations,
+                max_turns,
             } => AgentEvent::IterationStart {
                 agent_name,
                 iteration,
-                max_iterations,
+                max_turns,
             },
             AgentProgressEvent::ThinkingDelta { agent_name, content } => {
                 AgentEvent::ThinkingDelta { agent_name, content }

@@ -1,8 +1,61 @@
 # Example agents.toml configuration file
-# Copy to ~/.config/qq/agents.toml to use these external agents
+# Copy to ~/.config/qq/agents.toml to customize agent behavior
 #
-# External agents extend the built-in agents with custom behavior.
-# Built-in agents: chat, coder, explore, planner, researcher, reviewer, summarizer, writer
+# Built-in agents: chat, researcher, summarizer, coder, reviewer, explore, planner, writer
+#
+# Configuration options:
+#   max_turns - Maximum number of agentic loop turns per invocation
+#   tool_limits    - Per-tool call limits (tool_name -> max_calls)
+#
+# When a limit is reached, the agent receives an error prompting it to complete.
+
+# ============================================================================
+# BUILT-IN AGENT OVERRIDES
+# ============================================================================
+# Use [builtin.<agent_name>] sections to override settings for internal agents.
+# These take precedence over the hardcoded defaults.
+
+[builtin.researcher]
+# Default tools: web_search, fetch_webpage
+max_turns = 10
+tool_limits = { web_search = 2, fetch_webpage = 5 }
+
+[builtin.coder]
+# Default tools: read_file, write_file, list_files, search_files
+max_turns = 100
+tool_limits = { write_file = 20, read_file = 50, list_files = 20, search_files = 20 }
+
+[builtin.explore]
+# Default tools: read_file, list_files, search_files
+max_turns = 50
+tool_limits = { read_file = 50, list_files = 30, search_files = 30 }
+
+[builtin.reviewer]
+# Default tools: read_file, list_files, search_files
+max_turns = 20
+tool_limits = { read_file = 30, list_files = 15, search_files = 15 }
+
+[builtin.writer]
+# Default tools: read_file, write_file, list_files, search_files
+max_turns = 20
+tool_limits = { write_file = 10, read_file = 20, list_files = 10, search_files = 10 }
+
+[builtin.chat]
+# Default tools: read_file, write_file, list_files, search_files
+max_turns = 20
+tool_limits = { write_file = 20, read_file = 50, list_files = 20, search_files = 20 }
+
+[builtin.planner]
+# No tools (delegates to other agents)
+max_turns = 30
+
+[builtin.summarizer]
+# No tools (pure LLM)
+max_turns = 20
+
+# ============================================================================
+# EXTERNAL AGENT DEFINITIONS
+# ============================================================================
 
 # Custom research agent focused on technical documentation
 [agents.doc-researcher]
@@ -18,8 +71,9 @@ Guidelines:
 - Note version-specific information
 - Highlight common pitfalls or gotchas
 """
-max_iterations = 8
-tools = ["fetch_webpage"]
+max_turns = 8
+tools = ["fetch_webpage", "web_search"]
+tool_limits = { web_search = 3, fetch_webpage = 5 }
 
 # Code explanation agent
 [agents.explainer]
@@ -37,8 +91,8 @@ For each piece of code:
 
 Use simple language and analogies when helpful.
 """
-max_iterations = 1
-tools = []  # Pure LLM agent
+max_turns = 1
+tools = []  # Pure LLM agent - no tool limits needed
 
 # Git helper agent
 [agents.git-helper]
@@ -55,8 +109,9 @@ You can:
 
 Be concise and practical in your advice.
 """
-max_iterations = 10
+max_turns = 10
 tools = ["read_file", "write_file", "list_files", "search_files"]
+tool_limits = { read_file = 15, write_file = 5, list_files = 10, search_files = 10 }
 
 # Security reviewer agent
 [agents.security-reviewer]
@@ -79,5 +134,6 @@ For each issue found:
 3. Provide a specific fix recommendation
 4. Rate severity (Critical/High/Medium/Low)
 """
-max_iterations = 15
+max_turns = 15
 tools = ["read_file", "list_files", "search_files"]
+tool_limits = { read_file = 20, list_files = 10, search_files = 10 }
