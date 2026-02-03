@@ -5,17 +5,16 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
-use crate::tui::markdown::{markdown_to_lines, MarkdownStyles};
+use crate::tui::markdown::markdown_to_text;
 
 /// Main content display area with scrolling support
 pub struct ContentArea<'a> {
     content: &'a str,
     scroll_offset: u16,
     is_streaming: bool,
-    auto_scroll: bool,
 }
 
 impl<'a> ContentArea<'a> {
@@ -24,7 +23,6 @@ impl<'a> ContentArea<'a> {
             content,
             scroll_offset: 0,
             is_streaming: false,
-            auto_scroll: true,
         }
     }
 
@@ -35,11 +33,6 @@ impl<'a> ContentArea<'a> {
 
     pub fn streaming(mut self, streaming: bool) -> Self {
         self.is_streaming = streaming;
-        self
-    }
-
-    pub fn auto_scroll(mut self, auto: bool) -> Self {
-        self.auto_scroll = auto;
         self
     }
 }
@@ -77,70 +70,21 @@ impl Widget for ContentArea<'_> {
             return;
         }
 
-        let styles = MarkdownStyles::default();
-        let lines = markdown_to_lines(self.content, &styles);
-
-        // Estimate total wrapped lines for scroll calculations
         let inner_width = inner.width.max(1) as usize;
-        let mut total_lines: u16 = 0;
-        for line in &lines {
-            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            let wrapped = if line_len == 0 {
-                1
-            } else {
-                (line_len + inner_width - 1) / inner_width
-            };
-            total_lines = total_lines.saturating_add(wrapped.max(1) as u16);
-        }
+        let text = markdown_to_text(self.content, Some(inner_width));
 
-        // Calculate scroll offset
-        let effective_scroll = if self.auto_scroll {
-            // Auto-scroll: if content exceeds viewport, scroll to show bottom
-            if total_lines > inner.height {
-                total_lines.saturating_sub(inner.height)
-            } else {
-                0
-            }
-        } else {
-            // Manual scroll: respect user's scroll position
-            self.scroll_offset.min(total_lines.saturating_sub(inner.height))
-        };
+        // Calculate total lines for scroll calculations
+        let total_lines = text.lines.len() as u16;
 
-        let paragraph = Paragraph::new(lines)
+        // Use the scroll offset from ScrollState, clamping to valid range.
+        // ScrollState is the single source of truth for scroll position.
+        let max_scroll = total_lines.saturating_sub(inner.height);
+        let effective_scroll = self.scroll_offset.min(max_scroll);
+
+        let paragraph = Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((effective_scroll, 0));
 
         paragraph.render(inner, buf);
-
-        // Render scrollbar if content exceeds visible area
-        if total_lines > inner.height {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some(""))
-                .end_symbol(Some(""));
-
-            let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
-                .position(effective_scroll as usize)
-                .viewport_content_length(inner.height as usize);
-
-            scrollbar.render(
-                area.inner(ratatui::layout::Margin {
-                    vertical: 1,
-                    horizontal: 0,
-                }),
-                buf,
-                &mut scrollbar_state,
-            );
-
-            // Show scroll position indicator
-            if !self.auto_scroll && effective_scroll > 0 {
-                let percent = (effective_scroll as f32 / (total_lines.saturating_sub(inner.height)) as f32 * 100.0) as u16;
-                let indicator = format!(" {}% ", percent.min(100));
-                let x = area.right().saturating_sub(indicator.len() as u16 + 1);
-                let y = area.bottom().saturating_sub(1);
-                if x >= area.left() {
-                    buf.set_string(x, y, &indicator, Style::default().fg(Color::DarkGray));
-                }
-            }
-        }
     }
 }

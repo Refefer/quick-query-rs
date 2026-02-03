@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::execution_context::ExecutionContext;
+use crate::tui::app::StreamingState;
 
 /// Status bar display state
 pub struct StatusBar<'a> {
@@ -18,7 +19,7 @@ pub struct StatusBar<'a> {
     prompt_tokens: u32,
     completion_tokens: u32,
     is_streaming: bool,
-    is_waiting: bool,
+    streaming_state: StreamingState,
     status_message: Option<&'a str>,
     execution_context: Option<&'a ExecutionContext>,
     tool_iteration: u32,
@@ -38,7 +39,7 @@ impl<'a> StatusBar<'a> {
             prompt_tokens: 0,
             completion_tokens: 0,
             is_streaming: false,
-            is_waiting: false,
+            streaming_state: StreamingState::Idle,
             status_message: None,
             execution_context: None,
             tool_iteration: 0,
@@ -59,8 +60,8 @@ impl<'a> StatusBar<'a> {
         self
     }
 
-    pub fn waiting(mut self, is_waiting: bool) -> Self {
-        self.is_waiting = is_waiting;
+    pub fn streaming_state(mut self, state: StreamingState) -> Self {
+        self.streaming_state = state;
         self
     }
 
@@ -154,16 +155,21 @@ impl Widget for StatusBar<'_> {
             }
         }
 
-        // Waiting indicator (before streaming indicator)
-        if self.is_waiting && self.is_streaming {
-            spans.push(Span::styled(" ", style_dim));
-            spans.push(Span::styled("Waiting...", style_waiting));
-        }
-
-        // Streaming indicator
-        if self.is_streaming {
-            spans.push(Span::styled(" ", style_dim));
-            spans.push(Span::styled("●", style_streaming));
+        // Streaming state indicator
+        match self.streaming_state {
+            StreamingState::Idle => {}
+            StreamingState::Asking => {
+                spans.push(Span::styled(" ", style_dim));
+                spans.push(Span::styled("Asking...", style_waiting));
+            }
+            StreamingState::Thinking => {
+                spans.push(Span::styled(" ", style_dim));
+                spans.push(Span::styled("Thinking...", style_waiting));
+            }
+            StreamingState::Listening => {
+                spans.push(Span::styled(" ", style_dim));
+                spans.push(Span::styled("Listening...", style_streaming));
+            }
         }
 
         // Build right side content: session bytes and/or tokens

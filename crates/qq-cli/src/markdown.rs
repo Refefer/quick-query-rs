@@ -100,8 +100,17 @@ impl Default for MarkdownRenderer {
     }
 }
 
+/// Render markdown content to stdout (one-shot, non-streaming).
+pub fn render_markdown(content: &str) {
+    let (width, _) = terminal_size();
+    let term_width = (width as usize).saturating_sub(2).max(40);
+    let skin = create_skin();
+    let rendered = skin.text(content, Some(term_width));
+    println!("{}", rendered);
+}
+
 /// Create a styled markdown skin for terminal output.
-fn create_skin() -> MadSkin {
+pub fn create_skin() -> MadSkin {
     let mut skin = MadSkin::default();
 
     // Customize colors for better terminal appearance

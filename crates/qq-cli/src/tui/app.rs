@@ -35,10 +35,24 @@ use crate::Cli;
 
 use super::events::{InputAction, StreamEvent};
 use super::layout::{LayoutConfig, PaneId};
-use super::markdown::{markdown_to_lines, MarkdownStyles};
+use super::markdown::markdown_to_text;
 use super::scroll::ScrollState;
 use super::ui;
 use super::widgets::{InputHistory, ToolNotification, ToolNotificationStatus};
+
+/// State of the LLM request/response cycle
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamingState {
+    /// Not currently streaming
+    #[default]
+    Idle,
+    /// Request is being sent to the server
+    Asking,
+    /// Waiting for the LLM to start generating (time to first token)
+    Thinking,
+    /// Actively receiving streamed content
+    Listening,
+}
 
 /// TUI Application state
 pub struct TuiApp {
@@ -90,8 +104,8 @@ pub struct TuiApp {
     pub session_input_bytes: usize,
     pub session_output_bytes: usize,
 
-    // Waiting for LLM response
-    pub is_waiting: bool,
+    // Current streaming state
+    pub streaming_state: StreamingState,
 }
 
 impl Default for TuiApp {
@@ -126,7 +140,7 @@ impl TuiApp {
             agent_output_bytes: 0,
             session_input_bytes: 0,
             session_output_bytes: 0,
-            is_waiting: false,
+            streaming_state: StreamingState::Idle,
         }
     }
 
@@ -134,17 +148,20 @@ impl TuiApp {
     pub fn start_response(&mut self, user_input: &str) {
         // Add separator and user message to existing content
         if !self.content.is_empty() {
-            self.content.push_str("\n\n---\n\n");
+            self.content.push('\n');
         }
+        // Wrap user input with visual separators so it stands out
+        self.content.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
         self.content.push_str("**You:** ");
         self.content.push_str(user_input);
-        self.content.push_str("\n\n**Assistant:** ");
+        self.content.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+        self.content.push_str("**Assistant:** ");
 
         // Clear thinking for new response
         self.thinking_content.clear();
         self.thinking_expanded = false;
         self.is_streaming = true;
-        self.is_waiting = true;
+        self.streaming_state = StreamingState::Asking;
         self.tool_notifications.clear();
         self.scroll.enable_auto_scroll();
         self.status_message = None;
@@ -157,16 +174,15 @@ impl TuiApp {
     pub fn handle_stream_event(&mut self, event: StreamEvent) {
         match event {
             StreamEvent::Start { model: _ } => {
-                // Model info is available but we display profile name
-                // We're now waiting for content
-                self.is_waiting = true;
+                // Connection established, waiting for first token
+                self.streaming_state = StreamingState::Thinking;
             }
             StreamEvent::ThinkingDelta(delta) => {
-                self.is_waiting = false;
+                self.streaming_state = StreamingState::Listening;
                 self.thinking_content.push_str(&delta);
             }
             StreamEvent::ContentDelta(delta) => {
-                self.is_waiting = false;
+                self.streaming_state = StreamingState::Listening;
                 self.content.push_str(&delta);
                 // Auto-scroll if enabled (handled by ScrollState)
             }
@@ -182,7 +198,7 @@ impl TuiApp {
             }
             StreamEvent::Done { usage, content: _ } => {
                 self.is_streaming = false;
-                self.is_waiting = false;
+                self.streaming_state = StreamingState::Idle;
                 if let Some(u) = usage {
                     self.prompt_tokens = u.prompt_tokens;
                     self.completion_tokens = u.completion_tokens;
@@ -194,7 +210,7 @@ impl TuiApp {
             }
             StreamEvent::Error { message } => {
                 self.is_streaming = false;
-                self.is_waiting = false;
+                self.streaming_state = StreamingState::Idle;
                 self.status_message = Some(format!("Error: {}", message));
             }
             StreamEvent::ToolExecuting { name } => {
@@ -229,7 +245,7 @@ impl TuiApp {
             }
             StreamEvent::IterationStart { iteration } => {
                 self.tool_iteration = iteration;
-                self.is_waiting = true;
+                self.streaming_state = StreamingState::Asking;
             }
             StreamEvent::ByteCount {
                 input_bytes,
@@ -251,20 +267,20 @@ impl TuiApp {
                 max_iterations,
             } => {
                 self.agent_progress = Some((agent_name, iteration, max_iterations));
-                self.is_waiting = true;
+                self.streaming_state = StreamingState::Asking;
             }
             AgentEvent::ThinkingDelta {
                 agent_name: _,
                 content,
             } => {
-                self.is_waiting = false;
+                self.streaming_state = StreamingState::Listening;
                 self.thinking_content.push_str(&content);
             }
             AgentEvent::ToolStart {
                 agent_name: _,
                 tool_name,
             } => {
-                self.is_waiting = false;
+                self.streaming_state = StreamingState::Listening;
                 self.tool_notifications.push(ToolNotification::new(
                     tool_name.clone(),
                     ToolNotificationStatus::Executing,
@@ -442,9 +458,8 @@ impl TuiApp {
         self.scroll.set_viewport_height(viewport_height);
 
         // Calculate content height using markdown processing
-        let styles = MarkdownStyles::default();
-        let lines = markdown_to_lines(&self.content, &styles);
-        let content_height = calculate_wrapped_height(&lines, content_width);
+        let text = markdown_to_text(&self.content, Some(content_width as usize));
+        let content_height = text.lines.len() as u16;
 
         self.scroll.set_content_height(content_height);
     }
@@ -456,22 +471,6 @@ impl TuiApp {
         self.input = Input::default();
         value
     }
-}
-
-/// Calculate the total wrapped line height for a list of lines.
-fn calculate_wrapped_height(lines: &[ratatui::text::Line], width: u16) -> u16 {
-    let width = width.max(1) as usize;
-    lines
-        .iter()
-        .map(|line| {
-            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            if line_len == 0 {
-                1
-            } else {
-                ((line_len + width - 1) / width) as u16
-            }
-        })
-        .sum()
 }
 
 /// Set up panic hook to restore terminal on panic
@@ -554,13 +553,17 @@ pub async fn run_tui(
         terminal.draw(|f| {
             let area = f.area();
 
-            // Build layout config to compute viewport height BEFORE rendering
+            // Build layout config - must be identical to what ui::render expects
             let mut layout_config = LayoutConfig::new();
             let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
             let thinking_lines = app.thinking_content.lines().count() as u16;
             layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
 
-            // Compute layout to get content area dimensions
+            // Configure input pane based on text wrapping
+            let input_lines = ui::calculate_input_lines(app.input.value(), area.width);
+            layout_config.set_input_lines(input_lines);
+
+            // Compute layout ONCE and use for both scroll dimensions and rendering
             let layout = layout_config.compute(area);
             if let Some(&content_rect) = layout.get(&PaneId::Content) {
                 // Update scroll dimensions BEFORE rendering
@@ -570,7 +573,7 @@ pub async fn run_tui(
                 app.update_scroll_dimensions(viewport_height, content_width);
             }
 
-            ui::render(&app, f);
+            ui::render(&app, f, &layout);
         })?;
 
         // Handle events with timeout for render ticks
@@ -769,6 +772,11 @@ pub async fn run_tui(
     )?;
     terminal.show_cursor()?;
 
+    // Print the conversation to stdout so it's preserved after exit
+    if !app.content.is_empty() {
+        print_conversation(&app.content);
+    }
+
     Ok(())
 }
 
@@ -873,6 +881,11 @@ fn format_agents_list(executor: &AgentExecutor) -> String {
         ));
     }
     output
+}
+
+/// Print the conversation content to stdout using the shared markdown renderer.
+fn print_conversation(content: &str) {
+    crate::markdown::render_markdown(content);
 }
 
 /// Run streaming completion in a separate task

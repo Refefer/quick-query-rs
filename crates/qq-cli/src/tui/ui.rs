@@ -1,5 +1,7 @@
 //! UI layout rendering for the TUI.
 
+use std::collections::HashMap;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -9,35 +11,22 @@ use ratatui::{
 };
 
 use super::app::TuiApp;
-use super::layout::{LayoutConfig, PaneId};
+use super::layout::PaneId;
 use super::widgets::{ContentArea, InputArea, StatusBar, ThinkingPanel};
 
-/// Render the entire TUI
-pub fn render(app: &TuiApp, frame: &mut Frame) {
-    let area = frame.area();
-
-    // Build layout configuration based on current app state
-    let mut layout_config = LayoutConfig::new();
-
-    // Configure thinking pane
+/// Render the entire TUI using a pre-computed layout.
+///
+/// The layout must be computed by the caller to ensure scroll dimensions
+/// are calculated with the same layout used for rendering.
+pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
     let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
-    let thinking_lines = app.thinking_content.lines().count() as u16;
-    layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
-
-    // Configure input pane based on text wrapping
-    let input_lines = calculate_input_lines(app.input.value(), area.width);
-    layout_config.set_input_lines(input_lines);
-
-    // Compute layout
-    let layout = layout_config.compute(area);
 
     // Render Content area (at top now)
     if let Some(&content_rect) = layout.get(&PaneId::Content) {
         if content_rect.height > 0 {
             let content = ContentArea::new(&app.content)
                 .scroll(app.scroll.effective_offset())
-                .streaming(app.is_streaming)
-                .auto_scroll(app.scroll.is_auto_scroll());
+                .streaming(app.is_streaming);
 
             frame.render_widget(content, content_rect);
         }
@@ -67,7 +56,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
             let mut status_bar = StatusBar::new(&app.profile, &app.primary_agent)
                 .tokens(app.prompt_tokens, app.completion_tokens)
                 .streaming(app.is_streaming)
-                .waiting(app.is_waiting)
+                .streaming_state(app.streaming_state)
                 .execution_context(&app.execution_context)
                 .iteration(app.tool_iteration)
                 .agent_progress(agent_progress)
@@ -101,12 +90,12 @@ pub fn render(app: &TuiApp, frame: &mut Frame) {
 
     // Show help overlay if requested
     if app.show_help {
-        render_help_overlay(frame, area);
+        render_help_overlay(frame);
     }
 }
 
 /// Calculate the number of wrapped lines for input text.
-fn calculate_input_lines(input_text: &str, available_width: u16) -> u16 {
+pub fn calculate_input_lines(input_text: &str, available_width: u16) -> u16 {
     let prompt_len = 5; // "you> "
     let text_width = available_width.saturating_sub(prompt_len) as usize;
 
@@ -120,7 +109,9 @@ fn calculate_input_lines(input_text: &str, available_width: u16) -> u16 {
 }
 
 /// Render help overlay
-fn render_help_overlay(frame: &mut Frame, area: Rect) {
+fn render_help_overlay(frame: &mut Frame) {
+    let area = frame.area();
+
     // Create centered overlay
     let overlay_width = 60u16.min(area.width.saturating_sub(4));
     let overlay_height = 20u16.min(area.height.saturating_sub(4));

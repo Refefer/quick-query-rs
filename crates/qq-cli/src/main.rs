@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
+use qq_agents::{ChatAgent, InternalAgent};
 use qq_core::{
     execute_tools_parallel_with_chunker, ChunkProcessor, CompletionRequest, Message, Provider,
     ToolRegistry,
@@ -357,9 +358,26 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Determine system prompt: explicit arg > CLI > profile
-    let system_prompt = system
+    let user_system_prompt = system
         .or_else(|| cli.system.clone())
         .or(settings.system_prompt.clone());
+
+    // When using the chat agent, combine the Chat agent's delegation prompt
+    // with any user-specified prompt. The Chat agent's prompt ensures proper
+    // delegation behavior while the user's prompt can add additional context.
+    let system_prompt = if settings.agent == "chat" {
+        let chat_agent = ChatAgent::new();
+        let base_prompt = chat_agent.system_prompt();
+        match user_system_prompt {
+            Some(user_prompt) => Some(format!(
+                "{}\n\n---\n\n## Additional Instructions\n\n{}",
+                base_prompt, user_prompt
+            )),
+            None => Some(base_prompt.to_string()),
+        }
+    } else {
+        user_system_prompt
+    };
 
     // Check test mode flags
     let disable_tools = cli.no_tools || cli.minimal;
