@@ -1,5 +1,7 @@
 //! Explore agent for filesystem exploration and discovery.
 
+use std::collections::HashMap;
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous filesystem exploration agent. You receive HIGH-LEVEL GOALS about finding and understanding files, not mechanical commands.
@@ -13,8 +15,19 @@ You answer questions like "What config files are in this directory?" or "Find al
 3. **Explore strategically**: Start broad, follow promising leads, verify assumptions
 4. **Synthesize**: Summarize findings into a coherent answer
 
+## Your Tools
+- `find_files`: Primary discovery tool - recursive, supports patterns, extensions, depth limits
+  - Respects .gitignore by default
+  - Filter by file type (files, directories, or both)
+  - Example: find_files(extensions=["rs", "toml"], max_depth=2)
+- `search_files`: Find content patterns across files with regex
+- `read_file`: Inspect file contents
+  - Use `head`/`tail` for large files
+  - Use `grep` to filter lines
+  - Use line ranges for specific sections
+
 ## Exploration Strategies
-- **Top-down**: Start with directory listing, identify relevant areas, dive deeper
+- **Top-down**: Start with find_files, identify relevant areas, dive deeper
 - **Pattern search**: Search for file names, extensions, or content patterns
 - **Content inspection**: Read files to understand their purpose or find specific information
 - **Size/date filtering**: Focus on recent files or files of certain sizes
@@ -48,17 +61,23 @@ impl Default for ExploreAgent {
 
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous filesystem exploration agent that finds and analyzes files and directories.\n\n",
-    "Use when you need: to find files, understand directory contents, search for specific content, or explore unfamiliar filesystem areas.\n\n",
+    "Use when you need:\n",
+    "  - To find files by name, extension, or pattern\n",
+    "  - To understand directory contents and structure\n",
+    "  - To search for specific content across files\n",
+    "  - To explore unfamiliar filesystem areas\n\n",
     "IMPORTANT: Give it a GOAL or QUESTION, not a mechanical command.\n\n",
-    "Examples with context:\n",
-    "  - 'Find config files in ~/.config related to terminal emulators (I use alacritty and kitty)'\n",
-    "  - 'Search /var/log for errors from the last hour. The service is called nginx and logs to access.log and error.log'\n\n",
+    "Examples:\n",
+    "  - 'Find config files in ~/.config related to terminal emulators'\n",
+    "  - 'Search /var/log for nginx errors from the last hour'\n\n",
     "Detailed example:\n",
-    "  'I need to clean up my development environment. Search through ~/Projects and find all node_modules directories, ",
-    ".venv Python virtual environments, and target/ Rust build directories. For each project, tell me the size of these ",
-    "directories and when the project was last modified. I want to delete build artifacts for projects I haven't touched ",
-    "in over 6 months. Also check for any .env files that might contain secrets I should back up before deleting.'\n\n",
-    "Returns: Summary of findings with file paths and relevant content excerpts"
+    "  'Search through ~/Projects and find all node_modules directories, .venv Python virtual environments, ",
+    "and target/ Rust build directories. Tell me the size of these directories and when each project was last modified.'\n\n",
+    "Returns: Summary of findings with file paths and relevant content excerpts\n\n",
+    "DO NOT:\n",
+    "  - Use for modifying files (use coder agent)\n",
+    "  - Use for web research (use researcher agent)\n",
+    "  - Use for writing documentation (use writer agent)\n"
 );
 
 impl InternalAgent for ExploreAgent {
@@ -75,7 +94,14 @@ impl InternalAgent for ExploreAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "list_files", "search_files"]
+        &["read_file", "find_files", "search_files"]
+    }
+
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("read_file".to_string(), 30);
+        limits.insert("find_files".to_string(), 20);
+        Some(limits)
     }
 
     fn max_turns(&self) -> usize {
@@ -98,9 +124,17 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_file"));
-        assert!(agent.tool_names().contains(&"list_files"));
+        assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
         // Explorer doesn't write files
         assert!(!agent.tool_names().contains(&"write_file"));
+    }
+
+    #[test]
+    fn test_explore_tool_limits() {
+        let agent = ExploreAgent::new();
+        let limits = agent.tool_limits().expect("explore should have tool limits");
+        assert_eq!(limits.get("read_file"), Some(&30));
+        assert_eq!(limits.get("find_files"), Some(&20));
     }
 }

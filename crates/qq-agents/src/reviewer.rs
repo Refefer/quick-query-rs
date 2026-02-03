@@ -1,5 +1,7 @@
 //! Reviewer agent for code review.
 
+use std::collections::HashMap;
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous code review agent. You receive CODE or FILE PATHS to review, along with optional focus areas.
@@ -22,7 +24,7 @@ You provide thorough, actionable code reviews. Given a request like "Review src/
 
 ## Your Tools
 - `read_file`: Read the code being reviewed and related context
-- `list_files`: Understand module structure
+- `find_files`: Discover module structure (recursive, gitignore-aware)
 - `search_files`: Find how the code is used, related patterns
 
 ## Output Expectations
@@ -55,20 +57,24 @@ impl Default for ReviewerAgent {
 }
 
 const TOOL_DESCRIPTION: &str = concat!(
-    "Autonomous code review agent that analyzes code for bugs, security issues, performance problems, and maintainability concerns.\n\n",
-    "Use when you need: code reviewed before merging, security audit, bug hunting, performance analysis, or quality assessment.\n\n",
+    "Autonomous code review agent that analyzes code for bugs, security issues, and quality concerns.\n\n",
+    "Use when you need:\n",
+    "  - Code reviewed before merging\n",
+    "  - Security audit performed\n",
+    "  - Bug hunting in specific code\n",
+    "  - Performance or quality assessment\n\n",
     "IMPORTANT: Give it CODE or a FILE PATH and ask for specific feedback.\n\n",
-    "Examples with context:\n",
-    "  - 'Review src/auth.rs for security issues - this handles JWT validation and session management'\n",
-    "  - 'Check the parse_config function in src/config.rs - users are reporting crashes with malformed TOML'\n\n",
+    "Examples:\n",
+    "  - 'Review src/auth.rs for security issues - this handles JWT validation'\n",
+    "  - 'Check parse_config in src/config.rs - users report crashes with malformed TOML'\n\n",
     "Detailed example:\n",
-    "  'Security review of src/api/upload.rs before we go to production. This handles user file uploads for profile ",
-    "pictures and document attachments. Files are stored in S3 with presigned URLs. Concerns: we had a path traversal ",
-    "bug in the old PHP codebase so watch for that. Also check for: filename sanitization, content-type validation ",
-    "(users should only upload images and PDFs), file size limits (should be 10MB max), and make sure we are not ",
-    "vulnerable to zip bombs or XML external entity attacks if users upload those formats. The upload endpoint is ",
-    "public (authenticated users only) and we expect ~1000 uploads/day. Check that error messages do not leak internal paths.'\n\n",
-    "Returns: Structured feedback grouped by severity (critical/important/moderate/minor) with specific file:line references and suggested fixes"
+    "  'Security review of src/api/upload.rs before production. This handles user file uploads. ",
+    "Check for: path traversal, filename sanitization, content-type validation, file size limits.'\n\n",
+    "Returns: Structured feedback grouped by severity with file:line references and suggested fixes\n\n",
+    "DO NOT:\n",
+    "  - Use for implementing fixes (use coder agent after review)\n",
+    "  - Use for filesystem exploration (use explore agent)\n",
+    "  - Use for documentation (use writer agent)\n"
 );
 
 impl InternalAgent for ReviewerAgent {
@@ -85,7 +91,14 @@ impl InternalAgent for ReviewerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "list_files", "search_files"]
+        &["read_file", "find_files", "search_files"]
+    }
+
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("read_file".to_string(), 50);
+        limits.insert("find_files".to_string(), 15);
+        Some(limits)
     }
 
     fn max_turns(&self) -> usize {
@@ -108,9 +121,17 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_file"));
-        assert!(agent.tool_names().contains(&"list_files"));
+        assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
         // Reviewer doesn't write files
         assert!(!agent.tool_names().contains(&"write_file"));
+    }
+
+    #[test]
+    fn test_reviewer_tool_limits() {
+        let agent = ReviewerAgent::new();
+        let limits = agent.tool_limits().expect("reviewer should have tool limits");
+        assert_eq!(limits.get("read_file"), Some(&50));
+        assert_eq!(limits.get("find_files"), Some(&15));
     }
 }

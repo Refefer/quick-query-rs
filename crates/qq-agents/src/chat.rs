@@ -140,11 +140,20 @@ impl Default for ChatAgent {
 }
 
 const TOOL_DESCRIPTION: &str = concat!(
-    "Interactive chat agent for general-purpose conversations and task delegation.\n\n",
-    "This is the default agent for interactive sessions. It can respond to questions, ",
-    "help with various tasks, and delegate to specialized agents when appropriate.\n\n",
-    "The chat agent serves as a coordinator, understanding user intent and either ",
-    "responding directly or delegating to the most suitable specialized agent."
+    "Delegation coordinator that routes tasks to specialized agents.\n\n",
+    "Use when you need:\n",
+    "  - A conversational interface to the agent system\n",
+    "  - Tasks routed to the appropriate specialist\n",
+    "  - Multi-step workflows coordinated across agents\n\n",
+    "IMPORTANT: Chat does NOT perform work directly - it delegates everything.\n\n",
+    "Examples:\n",
+    "  - 'Help me refactor the auth module' (delegates to coder)\n",
+    "  - 'What files are in src/?' (delegates to explore)\n\n",
+    "Returns: Coordinated responses from specialized agents\n\n",
+    "DO NOT:\n",
+    "  - Use chat for direct file operations (use explore/coder instead)\n",
+    "  - Expect chat to write code (it delegates to coder)\n",
+    "  - Use chat when you know which specialist you need\n"
 );
 
 impl InternalAgent for ChatAgent {
@@ -161,8 +170,8 @@ impl InternalAgent for ChatAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // ChatAgent gets filesystem tools for reading and writing
-        &["read_file", "write_file", "list_files", "search_files"]
+        // Chat delegates all work - no direct tool access
+        &[]
     }
 
     fn max_turns(&self) -> usize {

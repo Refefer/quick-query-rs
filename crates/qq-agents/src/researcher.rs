@@ -43,6 +43,12 @@ Your response should:
 - Include practical, actionable takeaways when relevant
 - Cite sources with URLs
 
+## Memory Tools (Optional)
+- `read_memory`: Check if you've already researched this topic
+- `add_memory`: Save synthesized findings for future reference
+
+Use memory to avoid re-researching the same topics. Store key findings, not raw data.
+
 ## Anti-patterns to Avoid
 - Don't over-research simple questions - one good search is often enough
 - Don't copy-paste content - synthesize and explain
@@ -65,21 +71,26 @@ impl Default for ResearcherAgent {
 
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous web research agent that answers questions by searching the internet and synthesizing information.\n\n",
-    "Use when you need: current information, external knowledge, best practices research, comparisons, or answers to questions not in the codebase.\n\n",
-    "Modes:\n",
-    "  - Default: Fast search with synthesized summary (one query, quick answer)\n",
-    "  - In-depth: Request 'thorough' or 'in-depth' research for comprehensive multi-source analysis\n\n",
+    "Use when you need:\n",
+    "  - Current information from the web\n",
+    "  - External knowledge not in the codebase\n",
+    "  - Best practices research\n",
+    "  - Technology comparisons\n\n",
     "IMPORTANT: Give it a RESEARCH QUESTION, not a URL to fetch.\n\n",
-    "Examples with context:\n",
-    "  - 'Best practices for Rust error handling - I'm building a CLI tool and want to decide between anyhow and thiserror'\n",
-    "  - 'What's the current status of the log4j vulnerability? We're running Java 11 with log4j 2.14'\n\n",
+    "Modes:\n",
+    "  - Default: Fast search with synthesized summary\n",
+    "  - In-depth: Request 'thorough' research for comprehensive analysis\n\n",
+    "Examples:\n",
+    "  - 'Best practices for Rust error handling - anyhow vs thiserror'\n",
+    "  - 'Current status of log4j vulnerability for Java 11'\n\n",
     "Detailed example:\n",
-    "  'In-depth research: We are building a real-time collaborative document editor like Google Docs. Our stack is React ",
-    "frontend with a Rust backend. We need to choose between CRDTs (like Yjs or Automerge) and Operational Transformation. ",
-    "Our requirements: support 50+ concurrent editors, offline editing with sync, and we need to store revision history. ",
-    "The team has no experience with either approach. Research the tradeoffs, implementation complexity, library maturity, ",
-    "and any production war stories. We prefer Rust-native solutions but will consider WASM if necessary.'\n\n",
-    "Returns: Synthesized answer with citations and source URLs"
+    "  'In-depth research: Compare CRDTs vs Operational Transformation for real-time collaboration. ",
+    "Requirements: 50+ concurrent editors, offline editing, revision history. Prefer Rust-native solutions.'\n\n",
+    "Returns: Synthesized answer with citations and source URLs\n\n",
+    "DO NOT:\n",
+    "  - Use for filesystem exploration (use explore agent)\n",
+    "  - Use for code changes (use coder agent)\n",
+    "  - Use for code review (use reviewer agent)\n"
 );
 
 impl InternalAgent for ResearcherAgent {
@@ -96,7 +107,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["web_search", "fetch_webpage"]
+        &["web_search", "fetch_webpage", "read_memory", "add_memory"]
     }
 
     fn max_turns(&self) -> usize {
@@ -109,8 +120,9 @@ impl InternalAgent for ResearcherAgent {
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
-        limits.insert("web_search".to_string(), 2);
-        limits.insert("fetch_webpage".to_string(), 5);
+        limits.insert("web_search".to_string(), 5);
+        limits.insert("fetch_webpage".to_string(), 10);
+        limits.insert("add_memory".to_string(), 5);
         Some(limits)
     }
 }
@@ -127,13 +139,16 @@ mod tests {
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
+        assert!(agent.tool_names().contains(&"read_memory"));
+        assert!(agent.tool_names().contains(&"add_memory"));
     }
 
     #[test]
     fn test_researcher_tool_limits() {
         let agent = ResearcherAgent::new();
         let limits = agent.tool_limits().expect("researcher should have tool limits");
-        assert_eq!(limits.get("web_search"), Some(&2));
-        assert_eq!(limits.get("fetch_webpage"), Some(&5));
+        assert_eq!(limits.get("web_search"), Some(&5));
+        assert_eq!(limits.get("fetch_webpage"), Some(&10));
+        assert_eq!(limits.get("add_memory"), Some(&5));
     }
 }

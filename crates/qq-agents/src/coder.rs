@@ -1,5 +1,7 @@
 //! Coder agent for code generation and modification.
 
+use std::collections::HashMap;
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous coding agent. You receive HIGH-LEVEL GOALS about code to write or modify, not step-by-step instructions.
@@ -21,10 +23,21 @@ You implement features like "Add input validation to the login form" or "Refacto
 - **Incremental**: For complex tasks, build up in logical steps
 
 ## Your Tools
-- `list_files`: Understand project structure
-- `search_files`: Find relevant code, patterns, similar implementations
-- `read_file`: Understand existing code deeply before modifying
-- `write_file`: Create or update files (only after understanding context)
+- `find_files`: Discover project structure (recursive, gitignore-aware, extension filtering)
+- `search_files`: Find patterns, usages, similar implementations across codebase
+- `read_file`: Understand existing code deeply before modifying (supports line ranges, grep)
+- `edit_file`: Make precise modifications - PREFERRED for changes
+  - `replace`: Search/replace text (literal or regex)
+  - `insert`: Add lines at specific positions
+  - `delete`: Remove line ranges
+  - `replace_lines`: Replace entire line ranges
+- `write_file`: Create new files (use only when creating, not modifying)
+
+## Tool Usage Guidelines
+- ALWAYS use `edit_file` for modifying existing files (more precise, shows diff)
+- Use `write_file` only for creating new files
+- Use `find_files` instead of guessing file locations
+- Search first, read second, modify third
 
 ## Output Expectations
 Your response should:
@@ -56,19 +69,24 @@ impl Default for CoderAgent {
 
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous coding agent that implements features, fixes bugs, and modifies code by understanding context and following existing patterns.\n\n",
-    "Use when you need: new features implemented, bugs fixed, code refactored, files created, or existing code modified.\n\n",
+    "Use when you need:\n",
+    "  - New features implemented\n",
+    "  - Bugs fixed\n",
+    "  - Code refactored\n",
+    "  - Files created or modified\n\n",
     "IMPORTANT: Give it a GOAL describing what you want built or changed, not step-by-step instructions.\n\n",
-    "Examples with context:\n",
+    "Examples:\n",
     "  - 'Add input validation to src/components/LoginForm.tsx - email must be valid format, password min 8 chars'\n",
     "  - 'Implement retry with exponential backoff in src/api/client.rs - max 3 retries, start at 100ms'\n\n",
     "Detailed example:\n",
     "  'Implement a caching layer for our API client in src/api/. We make repeated calls to /users/:id and /products/:id ",
     "that rarely change. Add an in-memory LRU cache with configurable max size (default 1000 entries) and TTL (default 5 ",
-    "minutes). Cache keys should be the full URL including query params. Respect Cache-Control headers from responses - ",
-    "honor max-age and no-store directives. Add a way to manually invalidate specific keys or clear the whole cache. ",
-    "The existing code uses reqwest and tokio. Make sure the cache is thread-safe. Add cache hit/miss metrics that ",
-    "integrate with our existing metrics in src/telemetry.rs which uses the metrics crate.'\n\n",
-    "Returns: Confirmation of changes with list of modified files and any design decisions made"
+    "minutes). Cache keys should be the full URL including query params. Respect Cache-Control headers from responses.'\n\n",
+    "Returns: Confirmation of changes with list of modified files and any design decisions made\n\n",
+    "DO NOT:\n",
+    "  - Use for read-only exploration (use explore agent)\n",
+    "  - Use for documentation writing (use writer agent)\n",
+    "  - Use for code review without changes (use reviewer agent)\n"
 );
 
 impl InternalAgent for CoderAgent {
@@ -85,7 +103,15 @@ impl InternalAgent for CoderAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "write_file", "list_files", "search_files"]
+        &["read_file", "edit_file", "write_file", "find_files", "search_files"]
+    }
+
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("write_file".to_string(), 20);
+        limits.insert("edit_file".to_string(), 50);
+        limits.insert("find_files".to_string(), 10);
+        Some(limits)
     }
 
     fn max_turns(&self) -> usize {
@@ -108,8 +134,18 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_file"));
+        assert!(agent.tool_names().contains(&"edit_file"));
         assert!(agent.tool_names().contains(&"write_file"));
-        assert!(agent.tool_names().contains(&"list_files"));
+        assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
+    }
+
+    #[test]
+    fn test_coder_tool_limits() {
+        let agent = CoderAgent::new();
+        let limits = agent.tool_limits().expect("coder should have tool limits");
+        assert_eq!(limits.get("write_file"), Some(&20));
+        assert_eq!(limits.get("edit_file"), Some(&50));
+        assert_eq!(limits.get("find_files"), Some(&10));
     }
 }

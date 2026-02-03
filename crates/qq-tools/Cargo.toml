@@ -19,6 +19,7 @@ tracing = { workspace = true }
 # For filesystem tools
 glob = "0.3"
 regex = "1.11"
+ignore = "0.4"
 
 # For web tools
 reqwest = { workspace = true }

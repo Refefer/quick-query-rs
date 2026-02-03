@@ -1,11 +1,26 @@
 //! Writer agent for content creation.
 
+use std::collections::HashMap;
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous writing agent. You receive HIGH-LEVEL GOALS about content to create, not step-by-step instructions.
 
 ## Your Mission
 You create written content like "Write a README for this project" or "Create user documentation for the API" by understanding context, planning structure, and producing polished prose.
+
+## Output Destination (CRITICAL)
+The caller's prompt MUST specify where to put the output. Look for:
+- Explicit file path: "Write to README.md", "Save to docs/guide.md"
+- File type direction: "Write to an appropriate file"
+- Return directive: "Return as response", "Return as summary"
+
+Your behavior:
+1. If destination is specified → follow it exactly
+2. If destination is unclear or missing → STOP and respond asking where the output should go
+
+NEVER assume a destination. If the prompt says "Write a README" without specifying where, ask:
+"Where should I write the README? Please specify a file path (e.g., README.md) or tell me to return it as a response."
 
 ## How You Think
 1. **Understand the audience**: Who will read this? What do they need to know?
@@ -22,13 +37,14 @@ You create written content like "Write a README for this project" or "Create use
 - **Changelog/Release notes**: What changed, why it matters, migration steps
 
 ## Your Tools
-- `list_files`: Understand project structure for context
+- `find_files`: Discover project structure for context (recursive, gitignore-aware)
 - `search_files`: Find relevant code, patterns, existing docs
 - `read_file`: Understand what you're documenting deeply
 - `write_file`: Create or update content files
 
 ## Output Expectations
 Your response should:
+- Confirm the output destination was followed (or note that clarification was requested)
 - Confirm what you created
 - Note the target audience and scope decisions
 - List files created or modified
@@ -63,19 +79,27 @@ impl Default for WriterAgent {
 }
 
 const TOOL_DESCRIPTION: &str = concat!(
-    "Autonomous writing agent that creates documentation, README files, guides, articles, and other written content.\n\n",
-    "Use when you need: README files, documentation, tutorials, guides, changelog entries, or any prose content created.\n\n",
+    "Autonomous agent for creating written content: documentation, README files, guides, and articles.\n\n",
+    "Use when you need:\n",
+    "  - README files created or updated\n",
+    "  - Documentation written\n",
+    "  - Tutorials or guides created\n",
+    "  - Changelog entries generated\n\n",
     "IMPORTANT: Give it a GOAL describing what to write and for whom, not literal text to output.\n\n",
-    "Examples with context:\n",
-    "  - 'Write a README for this project - target audience is developers, include setup instructions'\n",
-    "  - 'Create API documentation for src/api/users.rs - document all public functions with examples'\n\n",
+    "OUTPUT DESTINATION (REQUIRED):\n",
+    "  - 'Write to <path>' - creates a file at the specified location\n",
+    "  - 'Return as response' - returns content directly without writing to disk\n\n",
+    "Examples:\n",
+    "  - 'Write a README for this project. Save to README.md'\n",
+    "  - 'Create API docs for src/api/users.rs. Return as response for review.'\n\n",
     "Detailed example:\n",
     "  'Write a getting started guide for our CLI tool. The audience is developers who have never used it before. ",
-    "Include: 1) Installation (we support cargo install and homebrew), 2) Basic usage with the three most common ",
-    "commands (init, run, deploy), 3) Configuration file format (TOML, lives in ~/.config/mytool/), 4) One complete ",
-    "example workflow from init to deploy. Keep it under 1000 words - link to full docs for advanced topics. ",
-    "The existing docs are in docs/ and follow a similar style to Rust documentation.'\n\n",
-    "Returns: Confirmation of content created with file locations and any scope decisions made"
+    "Include installation, basic usage, and configuration. Save to docs/getting-started.md'\n\n",
+    "Returns: Confirmation of content created with file locations and any scope decisions made\n\n",
+    "DO NOT:\n",
+    "  - Use for code changes (use coder agent)\n",
+    "  - Use for code review (use reviewer agent)\n",
+    "  - Use for web research (use researcher agent)\n"
 );
 
 impl InternalAgent for WriterAgent {
@@ -92,7 +116,14 @@ impl InternalAgent for WriterAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "write_file", "list_files", "search_files"]
+        &["read_file", "write_file", "find_files", "search_files"]
+    }
+
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("write_file".to_string(), 10);
+        limits.insert("find_files".to_string(), 10);
+        Some(limits)
     }
 
     fn max_turns(&self) -> usize {
@@ -116,7 +147,15 @@ mod tests {
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_file"));
         assert!(agent.tool_names().contains(&"write_file"));
-        assert!(agent.tool_names().contains(&"list_files"));
+        assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
+    }
+
+    #[test]
+    fn test_writer_tool_limits() {
+        let agent = WriterAgent::new();
+        let limits = agent.tool_limits().expect("writer should have tool limits");
+        assert_eq!(limits.get("write_file"), Some(&10));
+        assert_eq!(limits.get("find_files"), Some(&10));
     }
 }

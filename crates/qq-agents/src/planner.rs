@@ -1,5 +1,7 @@
 //! Planner agent for task planning and decomposition.
 
+use std::collections::HashMap;
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous planning agent. You receive HIGH-LEVEL GOALS and produce detailed, actionable implementation plans.
@@ -21,6 +23,12 @@ Use these agents when you need to understand the current state before creating a
 4. **Sequence logically**: What must happen before what?
 5. **Anticipate issues**: What could go wrong? What decisions need to be made?
 6. **Make it actionable**: Each step should be clear enough to execute
+
+## Memory Tools
+- `read_memory`: Check for existing plans before creating new ones
+- `add_memory`: Persist finalized plans for later reference
+
+Store plans with descriptive names like "migration-plan-postgres" or "auth-implementation-v2".
 
 ## Planning Strategies
 - **Top-down decomposition**: Break big goals into phases, phases into steps
@@ -81,21 +89,24 @@ impl Default for PlannerAgent {
 }
 
 const TOOL_DESCRIPTION: &str = concat!(
-    "Agent that creates detailed, actionable implementation plans by breaking down complex goals into sequenced steps with dependencies.\n\n",
-    "Use when you need: complex tasks broken down, migration plans created, project phases defined, or implementation strategies designed.\n\n",
+    "Agent that creates detailed, actionable implementation plans by breaking down complex goals into sequenced steps.\n\n",
+    "Use when you need:\n",
+    "  - Complex tasks broken down into steps\n",
+    "  - Migration plans created\n",
+    "  - Project phases defined\n",
+    "  - Implementation strategies designed\n\n",
     "IMPORTANT: Give it a GOAL and ask for a plan, not step-by-step instructions.\n\n",
-    "Examples with context:\n",
-    "  - 'Plan migration from SQLite to PostgreSQL - we have 50GB of data, can tolerate 1hr downtime, using Rust with sqlx'\n",
-    "  - 'Plan adding auth to our API - we need OAuth2 with Google/GitHub, have 12 endpoints, currently no auth at all'\n\n",
+    "Examples:\n",
+    "  - 'Plan migration from SQLite to PostgreSQL - 50GB data, 1hr downtime tolerance, using sqlx'\n",
+    "  - 'Plan adding OAuth2 auth to our API - Google/GitHub, 12 endpoints, currently no auth'\n\n",
     "Detailed example:\n",
-    "  'Create a plan to migrate our monolithic Django app to microservices. Current state: 150k LOC Python, PostgreSQL ",
-    "database with 80 tables, serves 10k requests/minute peak, deployed on AWS ECS. Team: 6 backend engineers, 2 DevOps. ",
-    "Constraints: cannot have more than 5 minutes downtime, must maintain backwards compatibility with mobile apps for ",
-    "6 months, budget for infrastructure is flexible but need to justify costs. We want to start by extracting the ",
-    "user authentication service since it is the most stable and well-tested. Future services will be: payments, ",
-    "notifications, search, and content. Plan should cover: service boundaries, data migration strategy, API gateway ",
-    "setup, inter-service communication (we are leaning toward gRPC), observability, and rollback procedures.'\n\n",
-    "Returns: Structured plan with phases, ordered steps, dependencies, prerequisites, risks, and verification checkpoints"
+    "  'Plan migrating our monolithic Django app to microservices. 150k LOC, PostgreSQL with 80 tables, ",
+    "10k req/min peak. Constraints: max 5 min downtime, backwards compatibility for 6 months.'\n\n",
+    "Returns: Structured plan with phases, ordered steps, dependencies, prerequisites, risks, and verification checkpoints\n\n",
+    "DO NOT:\n",
+    "  - Use for implementing code (use coder agent)\n",
+    "  - Use for web research (use researcher agent)\n",
+    "  - Use for simple tasks that don't need planning\n"
 );
 
 impl InternalAgent for PlannerAgent {
@@ -112,8 +123,15 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // Planner doesn't need base tools - it uses other agents for information gathering
-        &[]
+        // Planner uses memory tools for persisting plans; delegates to other agents for context
+        &["read_memory", "add_memory"]
+    }
+
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("read_memory".to_string(), 3);
+        limits.insert("add_memory".to_string(), 3);
+        Some(limits)
     }
 
     fn max_turns(&self) -> usize {
@@ -135,6 +153,15 @@ mod tests {
         assert_eq!(agent.name(), "planner");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
-        assert!(agent.tool_names().is_empty()); // Uses agents, not base tools
+        assert!(agent.tool_names().contains(&"read_memory"));
+        assert!(agent.tool_names().contains(&"add_memory"));
+    }
+
+    #[test]
+    fn test_planner_tool_limits() {
+        let agent = PlannerAgent::new();
+        let limits = agent.tool_limits().expect("planner should have tool limits");
+        assert_eq!(limits.get("read_memory"), Some(&3));
+        assert_eq!(limits.get("add_memory"), Some(&3));
     }
 }
