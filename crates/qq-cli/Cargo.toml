@@ -37,7 +37,7 @@ tui-input = { workspace = true }
 atty = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 regex = "1.11"
-unicode-width = "0.1"
+unicode-width = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = { version = "3.10", optional = true }
 
