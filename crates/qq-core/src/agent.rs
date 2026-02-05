@@ -835,6 +835,10 @@ impl Agent {
     }
 }
 
+/// Per-chunk inactivity timeout for streaming responses.
+/// If no data is received for this duration, the stream is considered stalled.
+const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Run a single iteration using streaming (for progress reporting).
 async fn run_streaming_iteration(
     provider: &Arc<dyn Provider>,
@@ -851,57 +855,72 @@ async fn run_streaming_iteration(
     let mut current_tool_call: Option<(String, String, String)> = None;
     let mut usage = Usage::default();
 
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(StreamChunk::Start { model: _ }) => {
-                // Model started
-            }
-            Ok(StreamChunk::ThinkingDelta { content: delta }) => {
-                // Emit thinking delta event
-                if let Some(handler) = progress {
-                    handler
-                        .on_progress(AgentProgressEvent::ThinkingDelta {
-                            agent_name: agent_name.to_string(),
-                            content: delta,
-                        })
-                        .await;
+    loop {
+        match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => {
+                match chunk {
+                    Ok(StreamChunk::Start { model: _ }) => {
+                        // Model started
+                    }
+                    Ok(StreamChunk::ThinkingDelta { content: delta }) => {
+                        // Emit thinking delta event
+                        if let Some(handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::ThinkingDelta {
+                                    agent_name: agent_name.to_string(),
+                                    content: delta,
+                                })
+                                .await;
+                        }
+                    }
+                    Ok(StreamChunk::Delta { content: delta }) => {
+                        content.push_str(&delta);
+                    }
+                    Ok(StreamChunk::ToolCallStart { id, name }) => {
+                        // Finish pending tool call
+                        if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                            tool_calls.push(crate::message::ToolCall::new(tc_id, tc_name, args));
+                        }
+                        current_tool_call = Some((id, name, String::new()));
+                    }
+                    Ok(StreamChunk::ToolCallDelta { arguments }) => {
+                        if let Some((_, _, ref mut args)) = current_tool_call {
+                            args.push_str(&arguments);
+                        }
+                    }
+                    Ok(StreamChunk::Done { usage: u }) => {
+                        // Finish pending tool call
+                        if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                            tool_calls.push(crate::message::ToolCall::new(tc_id, tc_name, args));
+                        }
+                        if let Some(u) = u {
+                            usage = u;
+                        }
+                    }
+                    Ok(StreamChunk::Error { message }) => {
+                        debug!(agent = agent_name, error = %message, "Stream error");
+                        return Err(Error::stream(message));
+                    }
+                    Err(e) => {
+                        debug!(agent = agent_name, error = %e, "Stream error");
+                        return Err(e);
+                    }
                 }
             }
-            Ok(StreamChunk::Delta { content: delta }) => {
-                content.push_str(&delta);
+            Ok(None) => {
+                // Stream ended normally
+                break;
             }
-            Ok(StreamChunk::ToolCallStart { id, name }) => {
-                // Finish pending tool call
-                if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
-                    tool_calls.push(crate::message::ToolCall::new(tc_id, tc_name, args));
-                }
-                current_tool_call = Some((id, name, String::new()));
-            }
-            Ok(StreamChunk::ToolCallDelta { arguments }) => {
-                if let Some((_, _, ref mut args)) = current_tool_call {
-                    args.push_str(&arguments);
-                }
-            }
-            Ok(StreamChunk::Done { usage: u }) => {
-                // Finish pending tool call
-                if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
-                    tool_calls.push(crate::message::ToolCall::new(tc_id, tc_name, args));
-                }
-                if let Some(u) = u {
-                    usage = u;
-                }
-            }
-            Ok(StreamChunk::Error { message }) => {
-                debug!(agent = agent_name, error = %message, "Stream error");
-                return Err(Error::stream(message));
-            }
-            Err(e) => {
-                debug!(agent = agent_name, error = %e, "Stream error");
-                return Err(e);
+            Err(_elapsed) => {
+                debug!(agent = agent_name, "Stream chunk timeout after {:?}", STREAM_CHUNK_TIMEOUT);
+                return Err(Error::stream(format!(
+                    "Stream timed out: no data received for {} seconds",
+                    STREAM_CHUNK_TIMEOUT.as_secs()
+                )));
             }
         }
     }

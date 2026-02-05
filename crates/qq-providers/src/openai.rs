@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
@@ -23,8 +25,12 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
@@ -409,6 +415,13 @@ impl Provider for OpenAIProvider {
                             }
                             Err(e) => {
                                 error!(error = %e, data = %msg.data, "Failed to parse SSE message");
+                                let _ = tx
+                                    .send(Err(Error::stream(format!(
+                                        "Failed to parse SSE message: {}",
+                                        e
+                                    ))))
+                                    .await;
+                                break;
                             }
                         }
                     }
@@ -571,6 +584,7 @@ struct OpenAIUsage {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamResponse {
+    #[serde(default)]
     model: String,
     choices: Vec<OpenAIStreamChoice>,
     usage: Option<OpenAIUsage>,

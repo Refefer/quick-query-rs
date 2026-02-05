@@ -1179,6 +1179,10 @@ fn print_conversation(content: &str) {
     crate::markdown::render_markdown(content);
 }
 
+/// Per-chunk inactivity timeout for streaming responses.
+/// If no data is received for this duration, the stream is considered stalled.
+const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Run streaming completion in a separate task
 async fn run_streaming_completion(
     provider: Arc<dyn Provider>,
@@ -1452,21 +1456,21 @@ async fn run_streaming_completion(
                     break;
                 }
 
-                chunk = stream.next() => {
-                    match chunk {
-                        Some(Ok(StreamChunk::Start { model })) => {
+                result = tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()) => {
+                    match result {
+                        Ok(Some(Ok(StreamChunk::Start { model }))) => {
                             let _ = tx.send(StreamEvent::Start { model }).await;
                         }
-                        Some(Ok(StreamChunk::ThinkingDelta { content: delta })) => {
+                        Ok(Some(Ok(StreamChunk::ThinkingDelta { content: delta }))) => {
                             output_bytes += delta.len();
                             let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
                         }
-                        Some(Ok(StreamChunk::Delta { content: delta })) => {
+                        Ok(Some(Ok(StreamChunk::Delta { content: delta }))) => {
                             output_bytes += delta.len();
                             content.push_str(&delta);
                             let _ = tx.send(StreamEvent::ContentDelta(delta)).await;
                         }
-                        Some(Ok(StreamChunk::ToolCallStart { id, name })) => {
+                        Ok(Some(Ok(StreamChunk::ToolCallStart { id, name }))) => {
                             // Finish pending tool call
                             if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
                                 let args: serde_json::Value =
@@ -1476,14 +1480,14 @@ async fn run_streaming_completion(
                             current_tool_call = Some((id.clone(), name.clone(), String::new()));
                             let _ = tx.send(StreamEvent::ToolCallStart { id, name }).await;
                         }
-                        Some(Ok(StreamChunk::ToolCallDelta { arguments })) => {
+                        Ok(Some(Ok(StreamChunk::ToolCallDelta { arguments }))) => {
                             output_bytes += arguments.len();
                             if let Some((_, _, ref mut args)) = current_tool_call {
                                 args.push_str(&arguments);
                             }
                             let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
                         }
-                        Some(Ok(StreamChunk::Done { usage })) => {
+                        Ok(Some(Ok(StreamChunk::Done { usage }))) => {
                             // Finish pending tool call
                             if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
                                 let args: serde_json::Value =
@@ -1513,12 +1517,12 @@ async fn run_streaming_completion(
                             // Break to handle tool calls
                             break;
                         }
-                        Some(Ok(StreamChunk::Error { message })) => {
+                        Ok(Some(Ok(StreamChunk::Error { message }))) => {
                             execution_context.reset().await;
                             let _ = tx.send(StreamEvent::Error { message }).await;
                             return;
                         }
-                        Some(Err(e)) => {
+                        Ok(Some(Err(e))) => {
                             execution_context.reset().await;
                             let _ = tx
                                 .send(StreamEvent::Error {
@@ -1527,9 +1531,22 @@ async fn run_streaming_completion(
                                 .await;
                             return;
                         }
-                        None => {
+                        Ok(None) => {
                             // Stream ended unexpectedly
                             break;
+                        }
+                        Err(_elapsed) => {
+                            // Timeout - no chunk received within STREAM_CHUNK_TIMEOUT
+                            execution_context.reset().await;
+                            let _ = tx
+                                .send(StreamEvent::Error {
+                                    message: format!(
+                                        "Stream timed out: no data received for {} seconds",
+                                        STREAM_CHUNK_TIMEOUT.as_secs()
+                                    ),
+                                })
+                                .await;
+                            return;
                         }
                     }
                 }
