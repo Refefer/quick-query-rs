@@ -32,6 +32,8 @@ You implement features like "Add input validation to the login form" or "Refacto
   - `delete`: Remove line ranges
   - `replace_lines`: Replace entire line ranges
 - `write_file`: Create new files (use only when creating, not modifying)
+- `move_file`: Move or rename files and directories (useful for refactoring)
+- `create_directory`: Create new directories (with recursive parent creation)
 
 ## Tool Usage Guidelines
 - ALWAYS use `edit_file` for modifying existing files (more precise, shows diff)
@@ -58,11 +60,15 @@ The user sees messages immediately while you continue working. This builds trust
 - For multi-file updates: "This change affects 3 files - updating them consistently..."
 - When making design decisions: "Using the builder pattern to match existing code style..."
 - When something unexpected happens: "The function signature differs from expected - adapting approach..."
+- **When completing a phase or task in a plan**: "Phase 1 complete: auth module scaffolding done. Moving to Phase 2..."
+
+**Executing plans:** When you are given a multi-step plan, use `inform_user` to report completion of each phase or task, then **keep going** with the next step. Do NOT stop and wait for confirmation between steps — execute the full plan continuously, using `inform_user` to keep the user updated on progress.
 
 **Examples:**
 - inform_user({"message": "Reading src/auth.rs to understand the current structure..."})
 - inform_user({"message": "Good news - found existing error types we can extend..."})
 - inform_user({"message": "Updating auth.rs, then propagating changes to 2 dependent files..."})
+- inform_user({"message": "Step 3 complete: validation logic added. Proceeding to step 4..."})
 
 ## Anti-patterns to Avoid
 - NEVER write code without first reading related existing code
@@ -121,13 +127,15 @@ impl InternalAgent for CoderAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "edit_file", "write_file", "find_files", "search_files"]
+        &["read_file", "edit_file", "write_file", "move_file", "create_directory", "find_files", "search_files"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
         limits.insert("write_file".to_string(), 20);
         limits.insert("edit_file".to_string(), 50);
+        limits.insert("move_file".to_string(), 20);
+        limits.insert("create_directory".to_string(), 10);
         limits.insert("find_files".to_string(), 10);
         Some(limits)
     }
@@ -154,6 +162,8 @@ mod tests {
         assert!(agent.tool_names().contains(&"read_file"));
         assert!(agent.tool_names().contains(&"edit_file"));
         assert!(agent.tool_names().contains(&"write_file"));
+        assert!(agent.tool_names().contains(&"move_file"));
+        assert!(agent.tool_names().contains(&"create_directory"));
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
     }
@@ -164,6 +174,8 @@ mod tests {
         let limits = agent.tool_limits().expect("coder should have tool limits");
         assert_eq!(limits.get("write_file"), Some(&20));
         assert_eq!(limits.get("edit_file"), Some(&50));
+        assert_eq!(limits.get("move_file"), Some(&20));
+        assert_eq!(limits.get("create_directory"), Some(&10));
         assert_eq!(limits.get("find_files"), Some(&10));
     }
 }

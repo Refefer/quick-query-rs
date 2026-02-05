@@ -312,21 +312,22 @@ impl TuiApp {
                 self.streaming_state = StreamingState::Idle;
                 self.status_message = Some(format!("Error: {}", message));
             }
-            StreamEvent::ToolExecuting { name } => {
-                // Mark tool as executing
+            StreamEvent::ToolExecuting { name, arguments } => {
+                // Mark tool as executing and set arguments preview
                 if let Some(notif) = self
                     .tool_notifications
                     .iter_mut()
                     .find(|n| n.tool_name == name)
                 {
                     notif.status = ToolNotificationStatus::Executing;
+                    notif.preview = arguments;
                 }
                 self.status_message = Some(format!("Running: {}", name));
             }
             StreamEvent::ToolComplete {
                 id: _,
                 name,
-                result_len,
+                result_len: _,
                 is_error,
             } => {
                 if let Some(notif) = self
@@ -339,7 +340,7 @@ impl TuiApp {
                     } else {
                         ToolNotificationStatus::Completed
                     };
-                    notif.preview = format!("{} bytes", result_len);
+                    // Keep the arguments preview set during ToolExecuting
                 }
             }
             StreamEvent::IterationStart { iteration } => {
@@ -378,12 +379,15 @@ impl TuiApp {
             AgentEvent::ToolStart {
                 agent_name: _,
                 tool_name,
+                arguments,
             } => {
                 self.streaming_state = StreamingState::Listening;
-                self.tool_notifications.push(ToolNotification::new(
+                let mut notif = ToolNotification::new(
                     tool_name.clone(),
                     ToolNotificationStatus::Executing,
-                ));
+                );
+                notif.preview = arguments;
+                self.tool_notifications.push(notif);
                 self.status_message = Some(format!("Agent tool: {}", tool_name));
             }
             AgentEvent::ToolComplete {
@@ -1255,6 +1259,7 @@ async fn run_streaming_completion(
                     let _ = tx
                         .send(StreamEvent::ToolExecuting {
                             name: tool_call.name.clone(),
+                            arguments: tool_call.arguments.to_string(),
                         })
                         .await;
                 }
@@ -1496,6 +1501,7 @@ async fn run_streaming_completion(
                 let _ = tx
                     .send(StreamEvent::ToolExecuting {
                         name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
                     })
                     .await;
             }

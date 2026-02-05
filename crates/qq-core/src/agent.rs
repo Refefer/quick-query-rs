@@ -352,6 +352,7 @@ pub enum AgentProgressEvent {
     ToolStart {
         agent_name: String,
         tool_name: String,
+        arguments: String,
     },
     /// A tool execution has completed.
     ToolComplete {
@@ -600,6 +601,7 @@ impl Agent {
                                 .on_progress(AgentProgressEvent::ToolStart {
                                     agent_name: agent_name.clone(),
                                     tool_name: tool_call.name.clone(),
+                                    arguments: tool_call.arguments.to_string(),
                                 })
                                 .await;
                         }
@@ -635,6 +637,7 @@ impl Agent {
                             .on_progress(AgentProgressEvent::ToolStart {
                                 agent_name: agent_name.clone(),
                                 tool_name: tool_call.name.clone(),
+                                arguments: tool_call.arguments.to_string(),
                             })
                             .await;
                     }

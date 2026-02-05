@@ -80,6 +80,39 @@ impl FileSystemConfig {
             None => Ok(self.root.clone()),
         }
     }
+
+    /// Validate and normalize a path for creation (doesn't require path to exist)
+    fn normalize_path_for_creation(&self, path: &str) -> Result<PathBuf, Error> {
+        let requested = Path::new(path);
+        let joined = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.root.join(requested)
+        };
+
+        // Normalize without requiring existence (handle .. and .)
+        let mut normalized = PathBuf::new();
+        for component in joined.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                std::path::Component::CurDir => {}
+                c => normalized.push(c),
+            }
+        }
+
+        // Security check
+        let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        if !normalized.starts_with(&canonical_root) {
+            return Err(Error::tool(
+                "filesystem",
+                format!("Path '{}' is outside allowed root", path),
+            ));
+        }
+
+        Ok(normalized)
+    }
 }
 
 // =============================================================================
@@ -1291,6 +1324,203 @@ fn generate_diff(old: &str, new: &str, path: &str) -> String {
 }
 
 // =============================================================================
+// Move File Tool
+// =============================================================================
+
+pub struct MoveFileTool {
+    config: FileSystemConfig,
+}
+
+impl MoveFileTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct MoveFileArgs {
+    source: String,
+    destination: String,
+}
+
+#[async_trait]
+impl Tool for MoveFileTool {
+    fn name(&self) -> &str {
+        "move_file"
+    }
+
+    fn description(&self) -> &str {
+        "Move or rename a file or directory"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property(
+                    "source",
+                    PropertySchema::string("Path to the file or directory to move"),
+                    true,
+                )
+                .add_property(
+                    "destination",
+                    PropertySchema::string("Target path for the file or directory"),
+                    true,
+                ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool("move_file", "Write operations are disabled"));
+        }
+
+        let args: MoveFileArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("move_file", format!("Invalid arguments: {}", e)))?;
+
+        // Resolve source path (must exist)
+        let source_path = self.config.resolve_path(&args.source)?;
+
+        // Check source exists
+        if !source_path.exists() {
+            return Err(Error::tool(
+                "move_file",
+                format!("Source '{}' does not exist", args.source),
+            ));
+        }
+
+        // Resolve destination path (may not exist yet)
+        let dest_path = self.config.normalize_path_for_creation(&args.destination)?;
+
+        // Check destination doesn't already exist
+        if dest_path.exists() {
+            return Err(Error::tool(
+                "move_file",
+                format!("Destination '{}' already exists", args.destination),
+            ));
+        }
+
+        // Check destination parent exists
+        if let Some(parent) = dest_path.parent() {
+            if !parent.exists() {
+                return Err(Error::tool(
+                    "move_file",
+                    format!(
+                        "Destination parent directory '{}' does not exist",
+                        parent.display()
+                    ),
+                ));
+            }
+        }
+
+        // Perform the move
+        fs::rename(&source_path, &dest_path)
+            .await
+            .map_err(|e| Error::tool("move_file", format!("Failed to move: {}", e)))?;
+
+        Ok(ToolOutput::success(format!(
+            "Successfully moved '{}' to '{}'",
+            args.source, args.destination
+        )))
+    }
+}
+
+// =============================================================================
+// Create Directory Tool
+// =============================================================================
+
+pub struct CreateDirectoryTool {
+    config: FileSystemConfig,
+}
+
+impl CreateDirectoryTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateDirectoryArgs {
+    path: String,
+    #[serde(default = "default_true")]
+    recursive: bool,
+}
+
+#[async_trait]
+impl Tool for CreateDirectoryTool {
+    fn name(&self) -> &str {
+        "create_directory"
+    }
+
+    fn description(&self) -> &str {
+        "Create a new directory"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property(
+                    "path",
+                    PropertySchema::string("Path for the new directory"),
+                    true,
+                )
+                .add_property(
+                    "recursive",
+                    PropertySchema::boolean("Create parent directories if needed (default: true)"),
+                    false,
+                ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool(
+                "create_directory",
+                "Write operations are disabled",
+            ));
+        }
+
+        let args: CreateDirectoryArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("create_directory", format!("Invalid arguments: {}", e)))?;
+
+        // Normalize and validate the path
+        let dir_path = self.config.normalize_path_for_creation(&args.path)?;
+
+        // Check if path already exists
+        if dir_path.exists() {
+            if dir_path.is_dir() {
+                // Idempotent: directory already exists
+                return Ok(ToolOutput::success(format!(
+                    "Directory '{}' already exists",
+                    args.path
+                )));
+            } else {
+                // Path exists but is a file
+                return Err(Error::tool(
+                    "create_directory",
+                    format!("Path '{}' exists but is not a directory", args.path),
+                ));
+            }
+        }
+
+        // Create the directory
+        if args.recursive {
+            fs::create_dir_all(&dir_path)
+                .await
+                .map_err(|e| Error::tool("create_directory", format!("Failed to create directory: {}", e)))?;
+        } else {
+            fs::create_dir(&dir_path)
+                .await
+                .map_err(|e| Error::tool("create_directory", format!("Failed to create directory: {}", e)))?;
+        }
+
+        Ok(ToolOutput::success(format!(
+            "Successfully created directory '{}'",
+            args.path
+        )))
+    }
+}
+
+// =============================================================================
 // Factory functions
 // =============================================================================
 
@@ -1307,7 +1537,9 @@ pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
 
     if config.allow_write {
         tools.push(Box::new(WriteFileTool::new(config.clone())));
-        tools.push(Box::new(EditFileTool::new(config)));
+        tools.push(Box::new(EditFileTool::new(config.clone())));
+        tools.push(Box::new(MoveFileTool::new(config.clone())));
+        tools.push(Box::new(CreateDirectoryTool::new(config)));
     }
 
     tools
@@ -1324,7 +1556,9 @@ pub fn create_filesystem_tools_arc(config: FileSystemConfig) -> Vec<Arc<dyn Tool
 
     if config.allow_write {
         tools.push(Arc::new(WriteFileTool::new(config.clone())));
-        tools.push(Arc::new(EditFileTool::new(config)));
+        tools.push(Arc::new(EditFileTool::new(config.clone())));
+        tools.push(Arc::new(MoveFileTool::new(config.clone())));
+        tools.push(Arc::new(CreateDirectoryTool::new(config)));
     }
 
     tools
@@ -2153,5 +2387,282 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    // =========================================================================
+    // Move File Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_move_file_basic() {
+        let dir = TempDir::new().unwrap();
+        let source_path = dir.path().join("source.txt");
+        std::fs::write(&source_path, "Hello World").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = MoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "source": "source.txt",
+                "destination": "dest.txt"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Successfully moved"));
+
+        // Source should no longer exist
+        assert!(!source_path.exists());
+        // Destination should exist with content
+        let dest_content = std::fs::read_to_string(dir.path().join("dest.txt")).unwrap();
+        assert_eq!(dest_content, "Hello World");
+    }
+
+    #[tokio::test]
+    async fn test_move_file_rename() {
+        let dir = TempDir::new().unwrap();
+        let source_path = dir.path().join("old_name.txt");
+        std::fs::write(&source_path, "Content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = MoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "source": "old_name.txt",
+                "destination": "new_name.txt"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(!source_path.exists());
+        assert!(dir.path().join("new_name.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_move_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("source_dir")).unwrap();
+        std::fs::write(dir.path().join("source_dir/file.txt"), "Nested file").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = MoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "source": "source_dir",
+                "destination": "dest_dir"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(!dir.path().join("source_dir").exists());
+        assert!(dir.path().join("dest_dir").exists());
+        assert!(dir.path().join("dest_dir/file.txt").exists());
+
+        let content = std::fs::read_to_string(dir.path().join("dest_dir/file.txt")).unwrap();
+        assert_eq!(content, "Nested file");
+    }
+
+    #[tokio::test]
+    async fn test_move_file_source_not_found() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = MoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "source": "nonexistent.txt",
+                "destination": "dest.txt"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("does not exist") || err.to_string().contains("Invalid path"));
+    }
+
+    #[tokio::test]
+    async fn test_move_file_destination_exists() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("source.txt"), "Source").unwrap();
+        std::fs::write(dir.path().join("dest.txt"), "Existing").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = MoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "source": "source.txt",
+                "destination": "dest.txt"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+
+        // Both files should remain unchanged
+        assert!(dir.path().join("source.txt").exists());
+        assert!(dir.path().join("dest.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_move_file_write_disabled() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("source.txt"), "Content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()); // allow_write = false
+        let tool = MoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "source": "source.txt",
+                "destination": "dest.txt"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    // =========================================================================
+    // Create Directory Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_create_directory_basic() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "new_dir"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Successfully created"));
+        assert!(dir.path().join("new_dir").is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_recursive() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "parent/child/grandchild",
+                "recursive": true
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(dir.path().join("parent/child/grandchild").is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_already_exists() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("existing_dir")).unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "existing_dir"
+            }))
+            .await
+            .unwrap();
+
+        // Should succeed (idempotent)
+        assert!(!result.is_error);
+        assert!(result.content.contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_non_recursive_missing_parent() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "parent/child",
+                "recursive": false
+            }))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_path_is_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("existing_file"), "content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "existing_file"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_write_disabled() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()); // allow_write = false
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "new_dir"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_path_traversal() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = CreateDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "../outside_root"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("outside allowed root"));
     }
 }

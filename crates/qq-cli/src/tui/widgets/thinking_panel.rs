@@ -64,6 +64,40 @@ impl ToolNotification {
     }
 }
 
+/// Format tool arguments JSON into a compact preview string.
+///
+/// Converts `{"path":"src/main.rs","line_numbers":true}` into
+/// `path: "src/main.rs", line_numbers: true`, truncating with `...` if needed.
+fn format_args_preview(json_str: &str, max_len: usize) -> String {
+    // Try to parse as JSON object and format key: value pairs
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json_str)
+    {
+        let pairs: Vec<String> = map
+            .iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    serde_json::Value::String(s) => format!("\"{}\"", s),
+                    other => other.to_string(),
+                };
+                format!("{}: {}", k, val)
+            })
+            .collect();
+        let formatted = pairs.join(", ");
+        if formatted.len() > max_len {
+            // Truncate on a char boundary
+            let truncated = &formatted[..formatted.floor_char_boundary(max_len)];
+            format!("{}...", truncated)
+        } else {
+            formatted
+        }
+    } else if json_str.len() > max_len {
+        let truncated = &json_str[..json_str.floor_char_boundary(max_len)];
+        format!("{}...", truncated)
+    } else {
+        json_str.to_string()
+    }
+}
+
 /// Thinking panel that can be expanded to fullscreen.
 /// Also displays tool notifications at the bottom.
 pub struct ThinkingPanel<'a> {
@@ -139,15 +173,10 @@ impl<'a> ThinkingPanel<'a> {
             ];
 
             if !notification.preview.is_empty() {
-                // Truncate preview to avoid overflow
-                let max_preview = 40;
-                let preview = if notification.preview.len() > max_preview {
-                    format!("{}...", &notification.preview[..max_preview])
-                } else {
-                    notification.preview.clone()
-                };
+                // Format arguments as compact preview, truncating if too wide
+                let args = format_args_preview(&notification.preview, 80);
                 spans.push(Span::styled(
-                    format!(" {}", preview),
+                    format!("({})", args),
                     Style::default().fg(Color::DarkGray),
                 ));
             }

@@ -41,6 +41,7 @@ NEVER assume a destination. If the prompt says "Write a README" without specifyi
 - `search_files`: Find relevant code, patterns, existing docs
 - `read_file`: Understand what you're documenting deeply
 - `write_file`: Create or update content files
+- `create_directory`: Create directories for organizing documentation
 
 ## Output Expectations
 Your response should:
@@ -68,11 +69,15 @@ The user sees messages immediately while you continue working. This builds trust
 - When writing sections: "Writing the installation guide..."
 - When you discover gaps: "Note: the error handling isn't documented anywhere - adding a section..."
 - When referencing code: "Including code examples from the actual test suite..."
+- **When completing a phase or task in a plan**: "Phase 1 complete: API reference written. Moving to Phase 2..."
+
+**Executing plans:** When you are given a multi-step plan, use `inform_user` to report completion of each phase or task, then **keep going** with the next step. Do NOT stop and wait for confirmation between steps — execute the full plan continuously, using `inform_user` to keep the user updated on progress.
 
 **Examples:**
 - inform_user({"message": "Analyzing the codebase to understand the public API..."})
 - inform_user({"message": "Found good examples in the tests - will incorporate these..."})
 - inform_user({"message": "Writing the Getting Started section with a practical example..."})
+- inform_user({"message": "README complete. Moving on to API reference docs..."})
 
 ## Anti-patterns to Avoid
 - NEVER write docs without reading the code/content you're documenting
@@ -134,12 +139,13 @@ impl InternalAgent for WriterAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "write_file", "find_files", "search_files"]
+        &["read_file", "write_file", "create_directory", "find_files", "search_files"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
         limits.insert("write_file".to_string(), 10);
+        limits.insert("create_directory".to_string(), 5);
         limits.insert("find_files".to_string(), 10);
         Some(limits)
     }
@@ -165,6 +171,7 @@ mod tests {
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_file"));
         assert!(agent.tool_names().contains(&"write_file"));
+        assert!(agent.tool_names().contains(&"create_directory"));
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
     }
@@ -174,6 +181,7 @@ mod tests {
         let agent = WriterAgent::new();
         let limits = agent.tool_limits().expect("writer should have tool limits");
         assert_eq!(limits.get("write_file"), Some(&10));
+        assert_eq!(limits.get("create_directory"), Some(&5));
         assert_eq!(limits.get("find_files"), Some(&10));
     }
 }

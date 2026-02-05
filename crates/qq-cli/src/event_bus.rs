@@ -28,6 +28,7 @@ pub enum AgentEvent {
     ToolStart {
         agent_name: String,
         tool_name: String,
+        arguments: String,
     },
     /// An agent has finished executing a tool.
     ToolComplete {
@@ -77,9 +78,11 @@ impl From<AgentProgressEvent> for AgentEvent {
             AgentProgressEvent::ToolStart {
                 agent_name,
                 tool_name,
+                arguments,
             } => AgentEvent::ToolStart {
                 agent_name,
                 tool_name,
+                arguments,
             },
             AgentProgressEvent::ToolComplete {
                 agent_name,
