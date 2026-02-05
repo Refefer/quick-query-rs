@@ -45,9 +45,11 @@ Your response should:
 
 ## Memory Tools (Optional)
 - `read_memory`: Check if you've already researched this topic
-- `add_memory`: Save synthesized findings for future reference
 
-Use memory to avoid re-researching the same topics. Store key findings, not raw data.
+Use memory to check for previously researched topics before searching again.
+
+## IMPORTANT: Read-Only Agent
+You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You must not write to memory. You may only read, search, and fetch web content. If the task requires saving results, return them in your response for the caller to handle.
 
 ## Keeping Users Informed
 Use `inform_user` to notify the user about your progress WITHOUT ending your turn.
@@ -124,7 +126,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["web_search", "fetch_webpage", "read_memory", "add_memory"]
+        &["web_search", "fetch_webpage", "read_memory"]
     }
 
     fn max_turns(&self) -> usize {
@@ -139,7 +141,6 @@ impl InternalAgent for ResearcherAgent {
         let mut limits = HashMap::new();
         limits.insert("web_search".to_string(), 5);
         limits.insert("fetch_webpage".to_string(), 10);
-        limits.insert("add_memory".to_string(), 5);
         Some(limits)
     }
 }
@@ -157,7 +158,9 @@ mod tests {
         assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
         assert!(agent.tool_names().contains(&"read_memory"));
-        assert!(agent.tool_names().contains(&"add_memory"));
+        // Researcher is read-only - no write tools
+        assert!(!agent.tool_names().contains(&"add_memory"));
+        assert!(!agent.tool_names().contains(&"write_file"));
     }
 
     #[test]
@@ -166,6 +169,5 @@ mod tests {
         let limits = agent.tool_limits().expect("researcher should have tool limits");
         assert_eq!(limits.get("web_search"), Some(&5));
         assert_eq!(limits.get("fetch_webpage"), Some(&10));
-        assert_eq!(limits.get("add_memory"), Some(&5));
     }
 }

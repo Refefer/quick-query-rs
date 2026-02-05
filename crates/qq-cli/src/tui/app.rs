@@ -142,6 +142,9 @@ pub enum StreamingState {
     Listening,
 }
 
+/// Maximum size for the TUI content display string (2MB)
+const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
 /// TUI Application state
 pub struct TuiApp {
     // Display state
@@ -254,6 +257,9 @@ impl TuiApp {
         // Invalidate content cache since content changed
         self.content_dirty = true;
 
+        // Truncate if content has grown too large
+        self.truncate_content_if_needed();
+
         // Clear thinking for new response
         self.thinking_content.clear();
         self.thinking_expanded = false;
@@ -283,13 +289,15 @@ impl TuiApp {
                 self.content.push_str(&delta);
                 // Invalidate content cache since content changed
                 self.content_dirty = true;
+                // Truncate if content has grown too large
+                self.truncate_content_if_needed();
                 // Auto-scroll if enabled (handled by ScrollState)
             }
-            StreamEvent::ToolCallStart { id: _, name } => {
-                self.tool_notifications.push(ToolNotification::new(
-                    name.clone(),
-                    ToolNotificationStatus::Started,
-                ));
+            StreamEvent::ToolCallStart { id, name } => {
+                self.tool_notifications.push(
+                    ToolNotification::new(name.clone(), ToolNotificationStatus::Started)
+                        .with_id(id),
+                );
                 self.status_message = Some(format!("Tool: {}", name));
             }
             StreamEvent::ToolCallDelta { arguments: _ } => {
@@ -312,12 +320,12 @@ impl TuiApp {
                 self.streaming_state = StreamingState::Idle;
                 self.status_message = Some(format!("Error: {}", message));
             }
-            StreamEvent::ToolExecuting { name, arguments } => {
-                // Mark tool as executing and set arguments preview
+            StreamEvent::ToolExecuting { id, name, arguments } => {
+                // Mark tool as executing and set arguments preview (match by id)
                 if let Some(notif) = self
                     .tool_notifications
                     .iter_mut()
-                    .find(|n| n.tool_name == name)
+                    .find(|n| n.id.as_deref() == Some(&id))
                 {
                     notif.status = ToolNotificationStatus::Executing;
                     notif.preview = arguments;
@@ -325,15 +333,15 @@ impl TuiApp {
                 self.status_message = Some(format!("Running: {}", name));
             }
             StreamEvent::ToolComplete {
-                id: _,
-                name,
+                id,
+                name: _,
                 result_len: _,
                 is_error,
             } => {
                 if let Some(notif) = self
                     .tool_notifications
                     .iter_mut()
-                    .find(|n| n.tool_name == name)
+                    .find(|n| n.id.as_deref() == Some(&id))
                 {
                     notif.status = if is_error {
                         ToolNotificationStatus::Error
@@ -657,6 +665,24 @@ impl TuiApp {
         self.content_cache.as_ref().map(|c| &c.text)
     }
 
+    /// Truncate content if it exceeds the maximum size to prevent unbounded memory growth.
+    fn truncate_content_if_needed(&mut self) {
+        if self.content.len() > MAX_CONTENT_BYTES {
+            let target = self.content.len() - (MAX_CONTENT_BYTES / 2);
+            // Find a paragraph break near the target to make a clean cut
+            let split_at = self.content[target..]
+                .find("\n\n")
+                .map(|i| target + i + 2)
+                .unwrap_or(target);
+            self.content = format!(
+                "...[earlier conversation truncated]...\n\n{}",
+                &self.content[split_at..]
+            );
+            self.content_cache = None;
+            self.content_dirty = true;
+        }
+    }
+
     /// Get current input value and clear
     pub fn take_input(&mut self) -> String {
         let value = self.input.value().to_string();
@@ -725,7 +751,8 @@ pub async fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     // Create chat session
-    let mut session = ChatSession::new(system_prompt);
+    let mut session = ChatSession::new(system_prompt)
+        .with_provider(Arc::clone(&provider));
 
     // Create TUI app
     let mut app = TuiApp::new(&profile_name, &primary_agent, execution_context.clone());
@@ -892,10 +919,41 @@ pub async fn run_tui(
                                                 );
                                                 app.content_dirty = true;
                                             }
+                                            TuiCommand::Memory => {
+                                                let mut info = format!(
+                                                    "**Memory Usage**\n\n\
+                                                    | Metric | Value |\n\
+                                                    |--------|-------|\n\
+                                                    | Messages | {} |\n\
+                                                    | Context bytes | {} |\n\
+                                                    | TUI content | {} |\n\
+                                                    | Compactions | {} |\n\
+                                                    | Session input | {} |\n\
+                                                    | Session output | {} |",
+                                                    session.message_count(),
+                                                    crate::chat::format_bytes(session.total_bytes()),
+                                                    crate::chat::format_bytes(app.content.len()),
+                                                    session.compaction_count,
+                                                    crate::chat::format_bytes(app.session_input_bytes),
+                                                    crate::chat::format_bytes(app.session_output_bytes),
+                                                );
+                                                if let Some(rss) = crate::chat::get_rss_bytes() {
+                                                    info.push_str(&format!(
+                                                        "\n| Process RSS | {} |",
+                                                        crate::chat::format_bytes(rss)
+                                                    ));
+                                                }
+                                                app.content = info;
+                                                app.content_dirty = true;
+                                            }
                                         }
                                     } else {
                                         // Regular message - start completion
                                         session.add_user_message(&input);
+
+                                        // Compact context if needed before building messages
+                                        session.compact_if_needed().await;
+
                                         app.start_response(&input);
 
                                         // Clone things for the spawned task
@@ -1061,6 +1119,7 @@ enum TuiCommand {
     Tools,
     Agents,
     History,
+    Memory,
 }
 
 /// Parse TUI commands
@@ -1074,6 +1133,7 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
         "/tools" | "/t" => Some(TuiCommand::Tools),
         "/agents" | "/a" => Some(TuiCommand::Agents),
         "/history" | "/h" => Some(TuiCommand::History),
+        "/memory" | "/mem" => Some(TuiCommand::Memory),
         _ => None,
     }
 }
@@ -1173,9 +1233,14 @@ async fn run_streaming_completion(
             .collect();
 
         // Calculate input bytes from messages
-        let input_bytes = serde_json::to_string(&request_messages)
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let input_bytes: usize = request_messages.iter().map(|m| m.byte_count()).sum();
+
+        tracing::debug!(
+            iteration = iteration,
+            message_count = request_messages.len(),
+            input_bytes = input_bytes,
+            "TUI LLM call context size"
+        );
 
         let mut request = CompletionRequest::new(request_messages);
 
@@ -1258,6 +1323,7 @@ async fn run_streaming_completion(
                     execution_context.push_tool(&tool_call.name).await;
                     let _ = tx
                         .send(StreamEvent::ToolExecuting {
+                            id: tool_call.id.clone(),
                             name: tool_call.name.clone(),
                             arguments: tool_call.arguments.to_string(),
                         })
@@ -1500,6 +1566,7 @@ async fn run_streaming_completion(
                 execution_context.push_tool(&tool_call.name).await;
                 let _ = tx
                     .send(StreamEvent::ToolExecuting {
+                        id: tool_call.id.clone(),
                         name: tool_call.name.clone(),
                         arguments: tool_call.arguments.to_string(),
                     })

@@ -14,7 +14,7 @@ use futures::StreamExt;
 
 use qq_core::{
     execute_tools_parallel_with_chunker, ChunkProcessor, ChunkerConfig, CompletionRequest,
-    Message, Provider, StreamChunk, ToolCall, ToolRegistry,
+    Message, Provider, Role, StreamChunk, ToolCall, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -28,14 +28,48 @@ use crate::Cli;
 pub struct ChatSession {
     pub messages: Vec<Message>,
     pub system_prompt: Option<String>,
+    provider: Option<Arc<dyn Provider>>,
+    /// Maximum context size in bytes before compaction triggers (default: 500KB)
+    max_context_bytes: usize,
+    /// Number of recent messages to always preserve during compaction (default: 10)
+    preserve_recent: usize,
+    /// Whether compaction has occurred during this session
+    pub compaction_count: u32,
 }
+
+/// Default max context bytes (500KB)
+const DEFAULT_MAX_CONTEXT_BYTES: usize = 500_000;
+/// Default number of recent messages to preserve
+const DEFAULT_PRESERVE_RECENT: usize = 10;
+/// Hysteresis margin: don't compact unless we're at least 10% over the limit
+const COMPACTION_HYSTERESIS: f64 = 1.1;
+
+/// Prompt for generating a conversation summary for context compaction.
+const COMPACTION_SUMMARY_PROMPT: &str = r#"The conversation history is getting long and needs to be compacted. Summarize the conversation so far in a way that preserves:
+
+1. Key decisions and conclusions reached
+2. Important facts, file paths, code snippets, or data mentioned
+3. The user's goals and preferences expressed
+4. Any pending tasks or unresolved questions
+
+Write a concise but comprehensive summary. Focus on information that would be needed to continue the conversation coherently. Do not include greetings or pleasantries."#;
 
 impl ChatSession {
     pub fn new(system_prompt: Option<String>) -> Self {
         Self {
             messages: Vec::new(),
             system_prompt,
+            provider: None,
+            max_context_bytes: DEFAULT_MAX_CONTEXT_BYTES,
+            preserve_recent: DEFAULT_PRESERVE_RECENT,
+            compaction_count: 0,
         }
+    }
+
+    /// Create a new session with a provider for LLM-powered compaction.
+    pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
+        self.provider = Some(provider);
+        self
     }
 
     pub fn add_user_message(&mut self, content: &str) {
@@ -72,6 +106,214 @@ impl ChatSession {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
+
+    /// Calculate total byte count of all messages in the session.
+    pub fn total_bytes(&self) -> usize {
+        self.messages.iter().map(|m| m.byte_count()).sum()
+    }
+
+    /// Compact the conversation history if it exceeds the context limit.
+    ///
+    /// Uses a tiered strategy:
+    /// - Tier 1: LLM summarization of older messages (preferred)
+    /// - Tier 2: Partial truncation + summarization (fallback)
+    /// - Tier 3: Simple truncation (last resort)
+    pub async fn compact_if_needed(&mut self) {
+        let total = self.total_bytes();
+        let threshold = (self.max_context_bytes as f64 * COMPACTION_HYSTERESIS) as usize;
+
+        if total <= threshold {
+            return;
+        }
+
+        // Don't compact if we have very few messages
+        if self.messages.len() <= self.preserve_recent + 2 {
+            return;
+        }
+
+        let preserve_count = self.preserve_recent.min(self.messages.len());
+        let compact_end = self.messages.len() - preserve_count;
+
+        // Ensure we don't split in the middle of a tool call sequence.
+        // Walk backwards from compact_end to find a safe split point.
+        let safe_end = find_safe_split_point(&self.messages, compact_end);
+        if safe_end <= 1 {
+            // Nothing meaningful to compact
+            return;
+        }
+
+        let old_messages = &self.messages[..safe_end];
+
+        tracing::info!(
+            total_bytes = total,
+            max_bytes = self.max_context_bytes,
+            messages_to_compact = safe_end,
+            messages_to_preserve = self.messages.len() - safe_end,
+            "Context compaction triggered"
+        );
+
+        // Tier 1: Try LLM summarization
+        if let Some(ref provider) = self.provider {
+            match self.try_llm_summary(provider.clone(), old_messages).await {
+                Ok(summary) => {
+                    self.apply_compaction(safe_end, &summary);
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Tier 1 LLM summarization failed, trying tier 2");
+                }
+            }
+
+            // Tier 2: Try summarizing just the first half of old messages
+            let half = safe_end / 2;
+            if half > 0 {
+                let first_half = &self.messages[..half];
+                match self.try_llm_summary(provider.clone(), first_half).await {
+                    Ok(summary) => {
+                        self.apply_compaction(half, &summary);
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Tier 2 partial summarization failed, falling back to truncation"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Tier 3: Simple truncation (no provider or all LLM calls failed)
+        tracing::warn!(
+            messages_dropped = safe_end,
+            "Tier 3 truncation: dropping old messages without summary"
+        );
+        let summary = format!(
+            "[Earlier conversation ({} messages, {} bytes) was truncated to save memory. \
+            Recent context is preserved below.]",
+            safe_end,
+            old_messages.iter().map(|m| m.byte_count()).sum::<usize>()
+        );
+        self.apply_compaction(safe_end, &summary);
+    }
+
+    /// Attempt LLM-powered summarization of messages.
+    async fn try_llm_summary(
+        &self,
+        provider: Arc<dyn Provider>,
+        messages_to_summarize: &[Message],
+    ) -> Result<String> {
+        let mut summary_messages: Vec<Message> = messages_to_summarize.to_vec();
+        summary_messages.push(Message::user(COMPACTION_SUMMARY_PROMPT));
+
+        let request = CompletionRequest::new(summary_messages);
+        let response = provider.complete(request).await?;
+
+        let summary = response.message.content.to_string_lossy();
+        if summary.is_empty() {
+            return Err(anyhow::anyhow!("LLM returned empty summary"));
+        }
+
+        Ok(summary)
+    }
+
+    /// Apply compaction: replace old messages with a summary, keep recent messages.
+    fn apply_compaction(&mut self, compact_up_to: usize, summary: &str) {
+        let old_count = self.messages.len();
+        let old_bytes = self.total_bytes();
+
+        // Keep recent messages
+        let recent: Vec<Message> = self.messages.drain(compact_up_to..).collect();
+
+        // Replace all old messages with a single summary message
+        self.messages.clear();
+        let summary_text = format!("## Conversation Summary\n\n{}", summary);
+        self.messages.push(Message::system(summary_text.as_str()));
+        self.messages.extend(recent);
+        self.messages.shrink_to_fit();
+
+        self.compaction_count += 1;
+
+        let new_bytes = self.total_bytes();
+        tracing::info!(
+            old_messages = old_count,
+            new_messages = self.messages.len(),
+            old_bytes = old_bytes,
+            new_bytes = new_bytes,
+            bytes_freed = old_bytes.saturating_sub(new_bytes),
+            compaction_number = self.compaction_count,
+            "Context compaction complete"
+        );
+    }
+}
+
+/// Find a safe point to split messages that doesn't break tool call sequences.
+///
+/// A tool call sequence is: assistant message with tool_calls followed by
+/// one or more tool result messages. We should never split in the middle.
+fn find_safe_split_point(messages: &[Message], desired_end: usize) -> usize {
+    let mut end = desired_end;
+
+    // Walk backwards to find a position that's not inside a tool call sequence
+    while end > 0 {
+        let msg = &messages[end - 1];
+
+        // If the message at end-1 is a tool result, we're inside a sequence.
+        // Keep walking back until we find the assistant message that started it.
+        if msg.tool_call_id.is_some() {
+            end -= 1;
+            continue;
+        }
+
+        // If the message at end-1 is an assistant with tool_calls,
+        // the results come after it, so we'd split right before the results.
+        // That's bad - include this message's results OR exclude the assistant msg.
+        if msg.role == Role::Assistant && !msg.tool_calls.is_empty() {
+            // Exclude this assistant message too, so the tool results stay with it
+            end -= 1;
+            continue;
+        }
+
+        // Safe position found
+        break;
+    }
+
+    end
+}
+
+/// Get the process RSS (Resident Set Size) in bytes.
+/// Returns None on non-Linux platforms.
+pub fn get_rss_bytes() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+            // Second field is RSS in pages
+            if let Some(rss_pages) = statm.split_whitespace().nth(1) {
+                if let Ok(pages) = rss_pages.parse::<usize>() {
+                    let page_size = 4096; // standard page size
+                    return Some(pages * page_size);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Format bytes in a human-readable way.
+pub fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 /// Chat commands
@@ -82,6 +324,7 @@ enum ChatCommand {
     Help,
     Tools,
     Agents,
+    Memory,
     Delegate { agent: String, task: String },
     AgentCall { agent: String, task: String }, // @agent syntax
     System(String),
@@ -143,6 +386,7 @@ fn parse_command(input: &str) -> ChatCommand {
                 }
             }
         }
+        "/memory" | "/mem" => ChatCommand::Memory,
         "/system" | "/sys" => ChatCommand::System(arg),
         "/debug" => ChatCommand::Debug(arg),
         _ => {
@@ -160,6 +404,7 @@ Chat Commands:
   /quit, /exit        Exit chat mode
   /clear, /c          Clear conversation history
   /history, /h        Show message count
+  /memory, /mem       Show memory usage diagnostics
   /tools, /t          List available tools
   /agents, /a         List available agents
   /delegate <a> <t>   Delegate task <t> to agent <a>
@@ -428,7 +673,8 @@ pub async fn run_chat(
         let _ = rl.load_history(path);
     }
 
-    let mut session = ChatSession::new(system_prompt);
+    let mut session = ChatSession::new(system_prompt)
+        .with_provider(Arc::clone(&provider));
 
     loop {
         // Print hint line before prompt
@@ -457,6 +703,17 @@ pub async fn run_chat(
                     }
                     ChatCommand::Help => {
                         print_help();
+                    }
+                    ChatCommand::Memory => {
+                        println!("\n=== Memory Usage ===");
+                        println!("  Messages:       {}", session.message_count());
+                        println!("  Context bytes:  {}", format_bytes(session.total_bytes()));
+                        println!("  Max context:    {}", format_bytes(DEFAULT_MAX_CONTEXT_BYTES));
+                        println!("  Compactions:    {}", session.compaction_count);
+                        if let Some(rss) = get_rss_bytes() {
+                            println!("  Process RSS:    {}", format_bytes(rss));
+                        }
+                        println!();
                     }
                     ChatCommand::Tools => {
                         println!("\nAvailable tools:");
@@ -599,12 +856,22 @@ async fn run_completion(
     let max_iterations = 100;
 
     for iteration in 0..max_iterations {
+        // Compact context if needed before building messages
+        session.compact_if_needed().await;
+
         // Log iteration start
         if let Some(logger) = debug_logger {
             logger.log_iteration(iteration, "chat_completion");
         }
 
         let messages = session.build_messages();
+
+        tracing::debug!(
+            iteration = iteration,
+            message_count = messages.len(),
+            context_bytes = session.total_bytes(),
+            "Chat LLM call context size"
+        );
 
         // Log messages being sent
         if let Some(logger) = debug_logger {

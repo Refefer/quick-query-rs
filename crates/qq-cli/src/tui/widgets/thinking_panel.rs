@@ -24,6 +24,8 @@ pub enum ToolNotificationStatus {
 /// A tool notification to display in the thinking panel.
 #[derive(Debug, Clone)]
 pub struct ToolNotification {
+    /// Tool call ID for matching (from the LLM response)
+    pub id: Option<String>,
     pub tool_name: String,
     pub status: ToolNotificationStatus,
     /// Optional preview of arguments or result
@@ -33,10 +35,16 @@ pub struct ToolNotification {
 impl ToolNotification {
     pub fn new(tool_name: String, status: ToolNotificationStatus) -> Self {
         Self {
+            id: None,
             tool_name,
             status,
             preview: String::new(),
         }
+    }
+
+    pub fn with_id(mut self, id: String) -> Self {
+        self.id = Some(id);
+        self
     }
 
     /// Get the status icon for this notification.

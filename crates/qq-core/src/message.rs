@@ -208,6 +208,21 @@ impl Message {
         self.name = Some(name.into());
         self
     }
+
+    /// Count the approximate number of bytes in this message.
+    pub fn byte_count(&self) -> usize {
+        self.content.byte_count()
+            + self
+                .tool_calls
+                .iter()
+                .map(|tc| tc.id.len() + tc.name.len() + tc.arguments.to_string().len())
+                .sum::<usize>()
+            + self
+                .tool_call_id
+                .as_ref()
+                .map(|id| id.len())
+                .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -355,6 +370,27 @@ mod tests {
         let (clean, thinking) = strip_thinking_tags(content);
         assert_eq!(clean, "Just a normal response.");
         assert_eq!(thinking, None);
+    }
+
+    #[test]
+    fn test_message_byte_count_text() {
+        let msg = Message::user("Hello, world!");
+        assert_eq!(msg.byte_count(), 13);
+    }
+
+    #[test]
+    fn test_message_byte_count_with_tool_calls() {
+        let tool_call = ToolCall::new("tc-1", "read_file", serde_json::json!({"path": "/tmp"}));
+        let msg = Message::assistant_with_tool_calls("thinking", vec![tool_call]);
+        // content: "thinking" (8) + tool_call: id "tc-1" (4) + name "read_file" (9) + args (14)
+        assert!(msg.byte_count() > 8);
+    }
+
+    #[test]
+    fn test_message_byte_count_tool_result() {
+        let msg = Message::tool_result("tc-1", "file contents here");
+        // content: "file contents here" (18) + tool_call_id: "tc-1" (4)
+        assert_eq!(msg.byte_count(), 22);
     }
 
     #[test]

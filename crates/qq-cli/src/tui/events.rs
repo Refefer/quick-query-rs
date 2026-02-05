@@ -25,7 +25,7 @@ pub enum StreamEvent {
     /// An error occurred
     Error { message: String },
     /// Tool execution started
-    ToolExecuting { name: String, arguments: String },
+    ToolExecuting { id: String, name: String, arguments: String },
     /// Tool execution completed
     ToolComplete { id: String, name: String, result_len: usize, is_error: bool },
     /// Iteration started (for multi-turn tool calls)

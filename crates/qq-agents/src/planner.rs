@@ -51,9 +51,9 @@ Use these agents when you need to understand the current state before creating a
 
 ## Memory Tools
 - `read_memory`: Check for existing plans before creating new ones
-- `add_memory`: Persist finalized plans for later reference
 
-Store plans with descriptive names like "migration-plan-postgres" or "auth-implementation-v2".
+## IMPORTANT: Read-Only Agent
+You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You must not write to memory. Your output is your plan — return it in your response for the caller to handle.
 
 ## Planning Strategies
 - **Top-down decomposition**: Break big goals into phases, phases into steps
@@ -177,14 +177,13 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // Planner uses memory tools for persisting plans; delegates to other agents for context
-        &["read_memory", "add_memory"]
+        // Planner is read-only - can check memory but not write to it
+        &["read_memory"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
         limits.insert("read_memory".to_string(), 3);
-        limits.insert("add_memory".to_string(), 3);
         Some(limits)
     }
 
@@ -208,7 +207,9 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_memory"));
-        assert!(agent.tool_names().contains(&"add_memory"));
+        // Planner is read-only - no write tools
+        assert!(!agent.tool_names().contains(&"add_memory"));
+        assert!(!agent.tool_names().contains(&"write_file"));
     }
 
     #[test]
@@ -216,6 +217,5 @@ mod tests {
         let agent = PlannerAgent::new();
         let limits = agent.tool_limits().expect("planner should have tool limits");
         assert_eq!(limits.get("read_memory"), Some(&3));
-        assert_eq!(limits.get("add_memory"), Some(&3));
     }
 }
