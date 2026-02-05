@@ -24,9 +24,14 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
     // Render Content area (at top now)
     if let Some(&content_rect) = layout.get(&PaneId::Content) {
         if content_rect.height > 0 {
-            let content = ContentArea::new(&app.content)
+            let mut content = ContentArea::new(&app.content)
                 .scroll(app.scroll.effective_offset())
                 .streaming(app.is_streaming);
+
+            // Use cached rendered text if available (avoids re-parsing markdown every frame)
+            if let Some(cached_text) = app.get_cached_content() {
+                content = content.with_cached_text(cached_text);
+            }
 
             frame.render_widget(content, content_rect);
         }

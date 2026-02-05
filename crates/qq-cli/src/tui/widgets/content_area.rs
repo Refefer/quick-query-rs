@@ -4,15 +4,19 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
 use crate::tui::markdown::markdown_to_text;
 
-/// Main content display area with scrolling support
+/// Main content display area with scrolling support.
+/// Can accept either raw content (which will be parsed) or pre-rendered text (cached).
 pub struct ContentArea<'a> {
+    /// Raw content string (used if pre_rendered is None)
     content: &'a str,
+    /// Pre-rendered text from cache (avoids re-parsing markdown)
+    pre_rendered: Option<&'a Text<'static>>,
     scroll_offset: u16,
     is_streaming: bool,
 }
@@ -21,9 +25,17 @@ impl<'a> ContentArea<'a> {
     pub fn new(content: &'a str) -> Self {
         Self {
             content,
+            pre_rendered: None,
             scroll_offset: 0,
             is_streaming: false,
         }
+    }
+
+    /// Use pre-rendered text from cache instead of parsing markdown.
+    /// This significantly improves performance for large content.
+    pub fn with_cached_text(mut self, text: &'a Text<'static>) -> Self {
+        self.pre_rendered = Some(text);
+        self
     }
 
     pub fn scroll(mut self, offset: u16) -> Self {
@@ -70,8 +82,13 @@ impl Widget for ContentArea<'_> {
             return;
         }
 
-        let inner_width = inner.width.max(1) as usize;
-        let text = markdown_to_text(self.content, Some(inner_width));
+        // Use pre-rendered text if available, otherwise parse markdown
+        let text: Text<'_> = if let Some(cached) = self.pre_rendered {
+            cached.clone()
+        } else {
+            let inner_width = inner.width.max(1) as usize;
+            markdown_to_text(self.content, Some(inner_width))
+        };
 
         // Calculate total lines for scroll calculations
         let total_lines = text.lines.len() as u16;

@@ -5,7 +5,7 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 use qq_core::{
     CompletionRequest, CompletionResponse, Content, Error, FinishReason, Message, Provider, Role,
@@ -234,7 +234,14 @@ impl Provider for OpenAIProvider {
         req.stream = false;
 
         let api_request = self.build_request(&req);
-        debug!("OpenAI request: {:?}", api_request);
+
+        debug!(
+            model = ?api_request.model,
+            message_count = api_request.messages.len(),
+            has_tools = api_request.tools.is_some(),
+            "LLM request"
+        );
+        trace!(request = %serde_json::to_string(&api_request).unwrap_or_default(), "LLM request payload");
 
         let response = self
             .client
@@ -249,15 +256,33 @@ impl Provider for OpenAIProvider {
         let status = response.status();
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            error!(status = status.as_u16(), body = %error_text, "LLM request failed");
             return Err(self.parse_error(status.as_u16(), &error_text));
         }
 
-        let api_response: OpenAIChatResponse = response
-            .json()
+        let response_text = response
+            .text()
             .await
             .map_err(|e| Error::serialization(e.to_string()))?;
 
-        self.parse_response(api_response)
+        trace!(response = %response_text, "LLM response payload");
+
+        let api_response: OpenAIChatResponse = serde_json::from_str(&response_text)
+            .map_err(|e| Error::serialization(e.to_string()))?;
+
+        let parsed = self.parse_response(api_response)?;
+
+        debug!(
+            model = %parsed.model,
+            finish_reason = ?parsed.finish_reason,
+            content_len = parsed.message.content.to_string_lossy().len(),
+            tool_calls = parsed.message.tool_calls.len(),
+            prompt_tokens = parsed.usage.prompt_tokens,
+            completion_tokens = parsed.usage.completion_tokens,
+            "LLM response"
+        );
+
+        Ok(parsed)
     }
 
     async fn stream(&self, request: CompletionRequest) -> Result<StreamResult, Error> {
@@ -265,7 +290,14 @@ impl Provider for OpenAIProvider {
         req.stream = true;
 
         let api_request = self.build_request(&req);
-        debug!("OpenAI stream request: {:?}", api_request);
+
+        debug!(
+            model = ?api_request.model,
+            message_count = api_request.messages.len(),
+            has_tools = api_request.tools.is_some(),
+            "LLM stream request"
+        );
+        trace!(request = %serde_json::to_string(&api_request).unwrap_or_default(), "LLM stream request payload");
 
         let request_builder = self
             .client
@@ -288,9 +320,12 @@ impl Provider for OpenAIProvider {
                     }
                     Ok(Event::Message(msg)) => {
                         if msg.data == "[DONE]" {
+                            debug!("SSE stream complete");
                             let _ = tx.send(Ok(StreamChunk::Done { usage: None })).await;
                             break;
                         }
+
+                        trace!(chunk = %msg.data, "SSE chunk received");
 
                         match serde_json::from_str::<OpenAIStreamResponse>(&msg.data) {
                             Ok(response) => {
@@ -298,17 +333,27 @@ impl Provider for OpenAIProvider {
                                     // Handle reasoning/thinking content (o1 models)
                                     if let Some(reasoning) = choice.delta.reasoning_content {
                                         if !reasoning.is_empty() {
-                                            let _ = tx
+                                            if tx
                                                 .send(Ok(StreamChunk::ThinkingDelta { content: reasoning }))
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                debug!("Stream receiver dropped, exiting");
+                                                return;
+                                            }
                                         }
                                     }
 
                                     if let Some(content) = choice.delta.content {
                                         if !content.is_empty() {
-                                            let _ = tx
+                                            if tx
                                                 .send(Ok(StreamChunk::Delta { content }))
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                debug!("Stream receiver dropped, exiting");
+                                                return;
+                                            }
                                         }
                                     }
 
@@ -317,40 +362,58 @@ impl Provider for OpenAIProvider {
                                             if let Some(id) = tc.id {
                                                 let name =
                                                     tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
-                                                let _ = tx
+                                                debug!(tool_id = %id, tool_name = %name, "Tool call started");
+                                                if tx
                                                     .send(Ok(StreamChunk::ToolCallStart {
                                                         id,
                                                         name,
                                                     }))
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    debug!("Stream receiver dropped, exiting");
+                                                    return;
+                                                }
                                             }
                                             if let Some(args) = tc.function.and_then(|f| f.arguments) {
                                                 if !args.is_empty() {
-                                                    let _ = tx
+                                                    if tx
                                                         .send(Ok(StreamChunk::ToolCallDelta {
                                                             arguments: args,
                                                         }))
-                                                        .await;
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        debug!("Stream receiver dropped, exiting");
+                                                        return;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
 
-                                    if choice.finish_reason.is_some() {
+                                    if let Some(ref reason) = choice.finish_reason {
                                         let usage = response.usage.as_ref().map(|u| {
                                             Usage::new(u.prompt_tokens, u.completion_tokens)
                                         });
+                                        debug!(
+                                            finish_reason = %reason,
+                                            prompt_tokens = ?usage.as_ref().map(|u| u.prompt_tokens),
+                                            completion_tokens = ?usage.as_ref().map(|u| u.completion_tokens),
+                                            "LLM stream response complete"
+                                        );
+                                        // Final send - don't need to check error since we're done anyway
                                         let _ = tx.send(Ok(StreamChunk::Done { usage })).await;
                                     }
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to parse SSE message: {} - data: {}", e, msg.data);
+                                error!(error = %e, data = %msg.data, "Failed to parse SSE message");
                             }
                         }
                     }
                     Err(e) => {
-                        error!("SSE error: {:?}", e);
+                        error!(error = ?e, "SSE error");
                         let _ = tx
                             .send(Err(Error::stream(format!("SSE error: {:?}", e))))
                             .await;

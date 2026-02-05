@@ -40,6 +40,17 @@ use super::scroll::ScrollState;
 use super::ui;
 use super::widgets::{InputHistory, ToolNotification, ToolNotificationStatus};
 
+/// Cached rendered content to avoid re-parsing markdown every frame
+#[derive(Debug)]
+struct ContentCache {
+    /// Width the content was rendered at
+    width: u16,
+    /// Pre-rendered text
+    text: ratatui::text::Text<'static>,
+    /// Number of lines in the rendered content
+    line_count: u16,
+}
+
 /// State of the LLM request/response cycle
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamingState {
@@ -106,6 +117,10 @@ pub struct TuiApp {
 
     // Current streaming state
     pub streaming_state: StreamingState,
+
+    // Markdown rendering cache (avoids re-parsing every frame)
+    content_cache: Option<ContentCache>,
+    content_dirty: bool,
 }
 
 impl Default for TuiApp {
@@ -141,6 +156,8 @@ impl TuiApp {
             session_input_bytes: 0,
             session_output_bytes: 0,
             streaming_state: StreamingState::Idle,
+            content_cache: None,
+            content_dirty: true,
         }
     }
 
@@ -156,6 +173,9 @@ impl TuiApp {
         self.content.push_str(user_input);
         self.content.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
         self.content.push_str("**Assistant:** ");
+
+        // Invalidate content cache since content changed
+        self.content_dirty = true;
 
         // Clear thinking for new response
         self.thinking_content.clear();
@@ -184,6 +204,8 @@ impl TuiApp {
             StreamEvent::ContentDelta(delta) => {
                 self.streaming_state = StreamingState::Listening;
                 self.content.push_str(&delta);
+                // Invalidate content cache since content changed
+                self.content_dirty = true;
                 // Auto-scroll if enabled (handled by ScrollState)
             }
             StreamEvent::ToolCallStart { id: _, name } => {
@@ -493,15 +515,44 @@ impl TuiApp {
 
     /// Update scroll state with current content and viewport dimensions.
     /// Call this BEFORE rendering to ensure scroll state is accurate.
+    /// Returns a reference to the cached rendered text for use in rendering.
     pub fn update_scroll_dimensions(&mut self, viewport_height: u16, content_width: u16) {
         // Update viewport height first (this clamps offset if needed)
         self.scroll.set_viewport_height(viewport_height);
 
-        // Calculate content height using markdown processing
-        let text = markdown_to_text(&self.content, Some(content_width as usize));
-        let content_height = text.lines.len() as u16;
+        // Re-render only if content changed or width changed
+        let needs_rerender = self.content_dirty
+            || self
+                .content_cache
+                .as_ref()
+                .map(|c| c.width != content_width)
+                .unwrap_or(true);
+
+        if needs_rerender {
+            let text = markdown_to_text(&self.content, Some(content_width as usize));
+            let line_count = text.lines.len() as u16;
+            self.content_cache = Some(ContentCache {
+                width: content_width,
+                text,
+                line_count,
+            });
+            self.content_dirty = false;
+        }
+
+        // Use cached line count
+        let content_height = self
+            .content_cache
+            .as_ref()
+            .map(|c| c.line_count)
+            .unwrap_or(0);
 
         self.scroll.set_content_height(content_height);
+    }
+
+    /// Get the cached rendered content text.
+    /// Returns None if not yet rendered.
+    pub fn get_cached_content(&self) -> Option<&ratatui::text::Text<'static>> {
+        self.content_cache.as_ref().map(|c| &c.text)
     }
 
     /// Get current input value and clear
@@ -583,8 +634,8 @@ pub async fn run_tui(
     // Subscribe to agent event bus if available
     let mut agent_event_rx = event_bus.as_ref().map(|bus| bus.subscribe());
 
-    // Cancellation token for stopping streams
-    let cancel_token = CancellationToken::new();
+    // Cancellation token for stopping streams (recreated after each cancel)
+    let mut cancel_token = CancellationToken::new();
 
     // Main event loop
     let tick_rate = Duration::from_millis(33); // ~30fps
@@ -679,7 +730,10 @@ pub async fn run_tui(
                         Some(InputAction::Cancel) => {
                             if app.is_streaming {
                                 cancel_token.cancel();
+                                // Create a fresh token for future requests
+                                cancel_token = CancellationToken::new();
                                 app.is_streaming = false;
+                                app.streaming_state = StreamingState::Idle;
                                 app.status_message = Some("Cancelled".to_string());
                             }
                         }
@@ -698,6 +752,8 @@ pub async fn run_tui(
                                                 app.content.clear();
                                                 app.thinking_content.clear();
                                                 app.tool_notifications.clear();
+                                                app.content_dirty = true;
+                                                app.content_cache = None;
                                                 app.status_message = Some("Cleared".to_string());
                                             }
                                             TuiCommand::Reset => {
@@ -705,6 +761,8 @@ pub async fn run_tui(
                                                 app.content.clear();
                                                 app.thinking_content.clear();
                                                 app.tool_notifications.clear();
+                                                app.content_dirty = true;
+                                                app.content_cache = None;
                                                 app.prompt_tokens = 0;
                                                 app.completion_tokens = 0;
                                                 app.status_message = Some("Session reset".to_string());
@@ -714,6 +772,7 @@ pub async fn run_tui(
                                             }
                                             TuiCommand::Tools => {
                                                 app.content = format_tools_list(&tools_registry);
+                                                app.content_dirty = true;
                                             }
                                             TuiCommand::Agents => {
                                                 if let Some(ref exec) = agent_executor {
@@ -722,12 +781,14 @@ pub async fn run_tui(
                                                 } else {
                                                     app.content = "Agents not configured.".to_string();
                                                 }
+                                                app.content_dirty = true;
                                             }
                                             TuiCommand::History => {
                                                 app.content = format!(
                                                     "Messages in conversation: {}",
                                                     session.message_count()
                                                 );
+                                                app.content_dirty = true;
                                             }
                                         }
                                     } else {
@@ -750,6 +811,9 @@ pub async fn run_tui(
                                         let original_query = input.clone();
                                         let no_stream = cli.no_stream;
 
+                                        // Clone cancel token for the spawned task
+                                        let cancel = cancel_token.clone();
+
                                         // Spawn streaming task
                                         tokio::spawn(async move {
                                             run_streaming_completion(
@@ -766,6 +830,7 @@ pub async fn run_tui(
                                                 chunker_cfg,
                                                 original_query,
                                                 no_stream,
+                                                cancel,
                                             )
                                             .await;
                                         });
@@ -953,7 +1018,7 @@ async fn run_streaming_completion(
     tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     model: Option<String>,
-    mut messages: Vec<Message>,
+    base_messages: Vec<Message>,
     tx: mpsc::Sender<StreamEvent>,
     debug_logger: Option<Arc<DebugLogger>>,
     temperature: Option<f32>,
@@ -962,12 +1027,27 @@ async fn run_streaming_completion(
     chunker_config: ChunkerConfig,
     original_query: String,
     no_stream: bool,
+    cancel_token: CancellationToken,
 ) {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
     let max_turns = 100u32;
 
+    // Keep iteration messages separate to avoid cloning all messages each iteration
+    // On each iteration, we build request from base_messages + iteration_messages
+    let mut iteration_messages: Vec<Message> = Vec::new();
+
     for iteration in 0..max_turns {
+        // Check for cancellation at the start of each iteration
+        if cancel_token.is_cancelled() {
+            let _ = tx
+                .send(StreamEvent::Error {
+                    message: "Cancelled".to_string(),
+                })
+                .await;
+            return;
+        }
+
         let _ = tx
             .send(StreamEvent::IterationStart {
                 iteration: iteration + 1,
@@ -978,12 +1058,19 @@ async fn run_streaming_completion(
             logger.log_iteration(iteration as usize, "tui_completion");
         }
 
+        // Build request messages: base + iteration (avoids full clone each iteration)
+        let request_messages: Vec<Message> = base_messages
+            .iter()
+            .chain(iteration_messages.iter())
+            .cloned()
+            .collect();
+
         // Calculate input bytes from messages
-        let input_bytes = serde_json::to_string(&messages)
+        let input_bytes = serde_json::to_string(&request_messages)
             .map(|s| s.len())
             .unwrap_or(0);
 
-        let mut request = CompletionRequest::new(messages.clone());
+        let mut request = CompletionRequest::new(request_messages);
 
         if let Some(ref m) = model {
             request = request.with_model(m);
@@ -1050,7 +1137,7 @@ async fn run_streaming_completion(
                 // Add assistant message with tool calls
                 let assistant_msg =
                     Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
-                messages.push(assistant_msg.clone());
+                iteration_messages.push(assistant_msg.clone());
 
                 // Send session update for the assistant message with tool calls
                 let _ = tx
@@ -1135,7 +1222,7 @@ async fn run_streaming_completion(
                         .await;
 
                     let tool_msg = Message::tool_result(&result.tool_call_id, &result.content);
-                    messages.push(tool_msg.clone());
+                    iteration_messages.push(tool_msg.clone());
                     tool_result_messages.push(tool_msg);
                 }
 
@@ -1179,81 +1266,111 @@ async fn run_streaming_completion(
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None;
         let mut output_bytes: usize = 0;
+        let mut cancelled = false;
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(StreamChunk::Start { model }) => {
-                    let _ = tx.send(StreamEvent::Start { model }).await;
-                }
-                Ok(StreamChunk::ThinkingDelta { content: delta }) => {
-                    output_bytes += delta.len();
-                    let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
-                }
-                Ok(StreamChunk::Delta { content: delta }) => {
-                    output_bytes += delta.len();
-                    content.push_str(&delta);
-                    let _ = tx.send(StreamEvent::ContentDelta(delta)).await;
-                }
-                Ok(StreamChunk::ToolCallStart { id, name }) => {
-                    // Finish pending tool call
-                    if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
-                        tool_calls.push(ToolCall::new(tc_id, tc_name, args));
-                    }
-                    current_tool_call = Some((id.clone(), name.clone(), String::new()));
-                    let _ = tx.send(StreamEvent::ToolCallStart { id, name }).await;
-                }
-                Ok(StreamChunk::ToolCallDelta { arguments }) => {
-                    output_bytes += arguments.len();
-                    if let Some((_, _, ref mut args)) = current_tool_call {
-                        args.push_str(&arguments);
-                    }
-                    let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
-                }
-                Ok(StreamChunk::Done { usage }) => {
-                    // Finish pending tool call
-                    if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
-                        tool_calls.push(ToolCall::new(tc_id, tc_name, args));
-                    }
+        loop {
+            tokio::select! {
+                biased;
 
-                    // Send byte counts for this iteration
-                    let _ = tx
-                        .send(StreamEvent::ByteCount {
-                            input_bytes,
-                            output_bytes,
-                        })
-                        .await;
+                _ = cancel_token.cancelled() => {
+                    // Cancellation requested - exit the streaming loop
+                    cancelled = true;
+                    break;
+                }
 
-                    if tool_calls.is_empty() {
-                        // No tool calls - we're done, send final content for session
-                        execution_context.reset().await;
-                        let _ = tx
-                            .send(StreamEvent::Done {
-                                usage,
-                                content: content.clone(),
-                            })
-                            .await;
-                        return;
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(StreamChunk::Start { model })) => {
+                            let _ = tx.send(StreamEvent::Start { model }).await;
+                        }
+                        Some(Ok(StreamChunk::ThinkingDelta { content: delta })) => {
+                            output_bytes += delta.len();
+                            let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
+                        }
+                        Some(Ok(StreamChunk::Delta { content: delta })) => {
+                            output_bytes += delta.len();
+                            content.push_str(&delta);
+                            let _ = tx.send(StreamEvent::ContentDelta(delta)).await;
+                        }
+                        Some(Ok(StreamChunk::ToolCallStart { id, name })) => {
+                            // Finish pending tool call
+                            if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                                tool_calls.push(ToolCall::new(tc_id, tc_name, args));
+                            }
+                            current_tool_call = Some((id.clone(), name.clone(), String::new()));
+                            let _ = tx.send(StreamEvent::ToolCallStart { id, name }).await;
+                        }
+                        Some(Ok(StreamChunk::ToolCallDelta { arguments })) => {
+                            output_bytes += arguments.len();
+                            if let Some((_, _, ref mut args)) = current_tool_call {
+                                args.push_str(&arguments);
+                            }
+                            let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
+                        }
+                        Some(Ok(StreamChunk::Done { usage })) => {
+                            // Finish pending tool call
+                            if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                                tool_calls.push(ToolCall::new(tc_id, tc_name, args));
+                            }
+
+                            // Send byte counts for this iteration
+                            let _ = tx
+                                .send(StreamEvent::ByteCount {
+                                    input_bytes,
+                                    output_bytes,
+                                })
+                                .await;
+
+                            if tool_calls.is_empty() {
+                                // No tool calls - we're done, send final content for session
+                                execution_context.reset().await;
+                                let _ = tx
+                                    .send(StreamEvent::Done {
+                                        usage,
+                                        content: content.clone(),
+                                    })
+                                    .await;
+                                return;
+                            }
+                            // Break to handle tool calls
+                            break;
+                        }
+                        Some(Ok(StreamChunk::Error { message })) => {
+                            execution_context.reset().await;
+                            let _ = tx.send(StreamEvent::Error { message }).await;
+                            return;
+                        }
+                        Some(Err(e)) => {
+                            execution_context.reset().await;
+                            let _ = tx
+                                .send(StreamEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                        None => {
+                            // Stream ended unexpectedly
+                            break;
+                        }
                     }
-                }
-                Ok(StreamChunk::Error { message }) => {
-                    execution_context.reset().await;
-                    let _ = tx.send(StreamEvent::Error { message }).await;
-                    return;
-                }
-                Err(e) => {
-                    execution_context.reset().await;
-                    let _ = tx
-                        .send(StreamEvent::Error {
-                            message: e.to_string(),
-                        })
-                        .await;
-                    return;
                 }
             }
+        }
+
+        // If cancelled, send error and exit
+        if cancelled {
+            execution_context.reset().await;
+            let _ = tx
+                .send(StreamEvent::Error {
+                    message: "Cancelled".to_string(),
+                })
+                .await;
+            return;
         }
 
         // Handle tool calls
@@ -1261,7 +1378,7 @@ async fn run_streaming_completion(
             // Add assistant message with tool calls
             let assistant_msg =
                 Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
-            messages.push(assistant_msg.clone());
+            iteration_messages.push(assistant_msg.clone());
 
             // Send session update for the assistant message with tool calls
             let _ = tx
@@ -1346,7 +1463,7 @@ async fn run_streaming_completion(
                     .await;
 
                 let tool_msg = Message::tool_result(&result.tool_call_id, &result.content);
-                messages.push(tool_msg.clone());
+                iteration_messages.push(tool_msg.clone());
                 tool_result_messages.push(tool_msg);
             }
 
