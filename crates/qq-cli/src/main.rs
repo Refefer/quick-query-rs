@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use qq_agents::{ChatAgent, InternalAgent};
 use qq_core::{
@@ -25,6 +25,33 @@ pub use execution_context::ExecutionContext;
 
 use agents::{create_agent_tools, AgentExecutor, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
+
+/// Log level for tracing output
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogLevel {
+    /// Most verbose: all tracing including LLM streaming chunks
+    Trace,
+    /// Verbose: LLM requests/responses, tool execution details
+    Debug,
+    /// Standard: high-level flow, iteration starts
+    Info,
+    /// Quiet: only warnings and errors
+    Warn,
+    /// Minimal: only errors
+    Error,
+}
+
+impl LogLevel {
+    fn as_filter(&self) -> &'static str {
+        match self {
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "qq")]
@@ -66,12 +93,20 @@ pub struct Cli {
     #[arg(long)]
     pub no_stream: bool,
 
-    /// Enable debug output
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, value_enum, default_value = "warn")]
+    pub log_level: LogLevel,
+
+    /// Enable debug logging (shorthand for --log-level debug)
     #[arg(short, long)]
     pub debug: bool,
 
-    /// Write debug log to file (JSON lines format)
+    /// Write logs to file (JSON format)
     #[arg(long)]
+    pub log_file: Option<std::path::PathBuf>,
+
+    /// DEPRECATED: Use --log-file instead
+    #[arg(long, hide = true)]
     pub debug_file: Option<std::path::PathBuf>,
 
     /// Disable all tools (for testing)
@@ -125,31 +160,39 @@ async fn main() -> Result<()> {
     let will_use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout)
         && cli.prompt.is_none(); // TUI only for chat mode, not completion mode
 
-    // Set up logging - suppress stderr in TUI mode to avoid corrupting display
-    let filter = if cli.debug {
-        EnvFilter::new("debug")
+    // Resolve log level: --debug overrides --log-level
+    let log_level = if cli.debug {
+        LogLevel::Debug
     } else {
-        EnvFilter::new("warn")
+        cli.log_level
     };
 
-    if will_use_tui && cli.debug_file.is_none() {
-        // TUI mode without debug file: suppress all tracing output
-        // Use a sink that discards everything
+    // Resolve log file: --log-file takes precedence over deprecated --debug-file
+    let log_file = cli.log_file.as_ref().or(cli.debug_file.as_ref());
+
+    // Set up logging
+    let filter = EnvFilter::new(log_level.as_filter());
+
+    if will_use_tui && log_file.is_none() {
+        // TUI mode without log file: suppress all tracing output
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::sink)
             .init();
-    } else if let Some(ref debug_file) = cli.debug_file {
-        // Debug file specified: write to file
-        let file = std::fs::File::create(debug_file)
-            .with_context(|| format!("Failed to create debug file: {:?}", debug_file))?;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::sync::Mutex::new(file))
-            .with_ansi(false)
+    } else if let Some(log_path) = log_file {
+        // Log file specified: write JSON to file
+        let file = std::fs::File::create(log_path)
+            .with_context(|| format!("Failed to create log file: {:?}", log_path))?;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                fmt::layer()
+                    .json()
+                    .with_writer(std::sync::Mutex::new(file))
+            )
             .init();
     } else {
-        // Non-TUI mode: write to stderr as normal
+        // Non-TUI mode: write to stderr
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .init();
@@ -300,10 +343,12 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
             // Execute tools in parallel with chunking support
             let tool_calls = response.message.tool_calls.clone();
 
-            if cli.debug {
-                for tool_call in &tool_calls {
-                    eprintln!("[tool] {}({})", tool_call.name, tool_call.arguments);
-                }
+            for tool_call in &tool_calls {
+                tracing::debug!(
+                    tool = %tool_call.name,
+                    arguments = %tool_call.arguments,
+                    "Executing tool"
+                );
             }
 
             let results = execute_tools_parallel_with_chunker(
@@ -315,14 +360,17 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
             .await;
 
             for result in results {
-                if cli.debug {
-                    let preview = if result.content.len() > 200 {
-                        format!("{}...", &result.content[..200])
-                    } else {
-                        result.content.clone()
-                    };
-                    eprintln!("[tool result] {}", preview);
-                }
+                tracing::debug!(
+                    tool_call_id = %result.tool_call_id,
+                    result_len = result.content.len(),
+                    is_error = result.is_error,
+                    "Tool result"
+                );
+                tracing::trace!(
+                    tool_call_id = %result.tool_call_id,
+                    content = %result.content,
+                    "Tool result content"
+                );
 
                 // Add tool result to messages
                 messages.push(Message::tool_result(&result.tool_call_id, result.content));
@@ -335,15 +383,13 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
         // No tool calls - print final response and exit
         println!("{}", response.message.content.to_string_lossy());
 
-        if cli.debug {
-            eprintln!(
-                "[tokens: {} prompt, {} completion, {} total | iterations: {}]",
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
-                response.usage.total_tokens,
-                iteration + 1
-            );
-        }
+        tracing::info!(
+            prompt_tokens = response.usage.prompt_tokens,
+            completion_tokens = response.usage.completion_tokens,
+            total_tokens = response.usage.total_tokens,
+            iterations = iteration + 1,
+            "Completion finished"
+        );
 
         return Ok(());
     }
@@ -385,9 +431,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
 
     // Set up base tools (conditionally)
     let base_tools = if disable_tools {
-        if cli.debug {
-            eprintln!("[debug] Tools disabled (--no-tools or --minimal)");
-        }
+        tracing::debug!("Tools disabled (--no-tools or --minimal)");
         ToolRegistry::new()
     } else {
         build_tools_registry(config)?
@@ -411,8 +455,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
 
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
-        if cli.debug && disable_agents {
-            eprintln!("[debug] Agents disabled (--no-agents or --minimal)");
+        if disable_agents {
+            tracing::debug!("Agents disabled (--no-agents or --minimal)");
         }
         vec![]
     } else {

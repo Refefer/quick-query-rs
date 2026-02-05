@@ -383,15 +383,16 @@ pub async fn run_chat(
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
-    // Set up debug logger if requested
-    let debug_logger: Option<Arc<DebugLogger>> = if let Some(ref path) = cli.debug_file {
+    // Set up debug logger if requested (log_file takes precedence over deprecated debug_file)
+    let log_path = cli.log_file.as_ref().or(cli.debug_file.as_ref());
+    let debug_logger: Option<Arc<DebugLogger>> = if let Some(path) = log_path {
         match DebugLogger::new(path) {
             Ok(logger) => {
-                eprintln!("[debug] Writing debug log to: {}", path.display());
+                tracing::info!(path = %path.display(), "Writing structured debug log");
                 Some(Arc::new(logger))
             }
             Err(e) => {
-                eprintln!("[warning] Failed to create debug log: {}", e);
+                tracing::warn!(error = %e, "Failed to create debug log");
                 None
             }
         }
@@ -612,7 +613,103 @@ async fn run_completion(
 
         request = request.with_tools(tools_registry.definitions());
 
-        // Stream the response
+        // Non-streaming mode: use complete() instead of stream()
+        if cli.no_stream {
+            let response = provider.complete(request).await?;
+
+            tracing::debug!(
+                content_len = response.message.content.to_string_lossy().len(),
+                tool_calls = response.message.tool_calls.len(),
+                "Non-streaming response received"
+            );
+
+            let content = response.message.content.to_string_lossy();
+            let tool_calls = response.message.tool_calls.clone();
+
+            // Log response received
+            if let Some(logger) = debug_logger {
+                logger.log_response_received(
+                    content.len(),
+                    None,
+                    tool_calls.len(),
+                    if tool_calls.is_empty() { "stop" } else { "tool_calls" },
+                );
+            }
+
+            // Handle tool calls if any
+            if !tool_calls.is_empty() {
+                // Print any content before tool calls
+                if !content.is_empty() {
+                    print_section_header("Response")?;
+                    let mut renderer = MarkdownRenderer::new();
+                    renderer.push(&content)?;
+                    renderer.finish()?;
+                    println!();
+                }
+
+                // Add assistant message with tool calls
+                let assistant_msg =
+                    Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+                session.add_assistant_with_tools(assistant_msg);
+
+                // Log message stored
+                if let Some(logger) = debug_logger {
+                    logger.log_message_stored("assistant", content.len(), true);
+                }
+
+                // Show tool calls to user and log them
+                for tool_call in &tool_calls {
+                    print_tool_call(&tool_call.name, &tool_call.arguments)?;
+                    if let Some(logger) = debug_logger {
+                        let args_preview = format_tool_args(&tool_call.arguments);
+                        logger.log_tool_call(&tool_call.name, &args_preview);
+                    }
+                }
+
+                let results = execute_tools_parallel_with_chunker(
+                    tools_registry,
+                    tool_calls,
+                    Some(chunk_processor),
+                    Some(original_query),
+                )
+                .await;
+
+                for result in results {
+                    tracing::debug!(
+                        tool_call_id = %result.tool_call_id,
+                        result_len = result.content.len(),
+                        is_error = result.is_error,
+                        "Tool result received"
+                    );
+
+                    // Log tool result
+                    if let Some(logger) = debug_logger {
+                        logger.log_tool_result(&result.tool_call_id, result.content.len(), result.is_error);
+                    }
+
+                    session.add_tool_result(&result.tool_call_id, &result.content);
+                }
+
+                // Continue to get next response
+                continue;
+            }
+
+            // No tool calls - print final response
+            print_section_header("Response")?;
+            let mut renderer = MarkdownRenderer::new();
+            renderer.push(&content)?;
+            renderer.finish()?;
+            session.add_assistant_message(&content);
+
+            // Log final message stored
+            if let Some(logger) = debug_logger {
+                logger.log_message_stored("assistant", content.len(), false);
+            }
+
+            return Ok(());
+        }
+
+        // Streaming mode: use stream()
         let mut stream = provider.stream(request).await?;
 
         // Set up markdown renderers for thinking and content
@@ -668,15 +765,13 @@ async fn run_completion(
                         tool_calls.push(ToolCall::new(tc_id, tc_name, args));
                     }
 
-                    if cli.debug {
-                        if let Some(u) = usage {
-                            eprintln!(
-                                "\n[tokens: {} prompt, {} completion | iterations: {}]",
-                                u.prompt_tokens,
-                                u.completion_tokens,
-                                iteration + 1
-                            );
-                        }
+                    if let Some(u) = usage {
+                        tracing::debug!(
+                            prompt_tokens = u.prompt_tokens,
+                            completion_tokens = u.completion_tokens,
+                            iteration = iteration + 1,
+                            "Stream iteration complete"
+                        );
                     }
                 }
                 StreamChunk::Error { message } => {
@@ -739,14 +834,17 @@ async fn run_completion(
             .await;
 
             for result in results {
-                if cli.debug {
-                    let preview = if result.content.len() > 100 {
-                        format!("{}...", &result.content[..100])
-                    } else {
-                        result.content.clone()
-                    };
-                    eprintln!("[debug] result: {}", preview);
-                }
+                tracing::debug!(
+                    tool_call_id = %result.tool_call_id,
+                    result_len = result.content.len(),
+                    is_error = result.is_error,
+                    "Tool result received"
+                );
+                tracing::trace!(
+                    tool_call_id = %result.tool_call_id,
+                    content = %result.content,
+                    "Tool result content"
+                );
 
                 // Log tool result
                 if let Some(logger) = debug_logger {
