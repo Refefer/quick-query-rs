@@ -18,6 +18,19 @@ use crate::message::{Message, StreamChunk, Usage};
 use crate::provider::{CompletionRequest, Provider};
 use crate::tool::ToolRegistry;
 
+/// Result of a single agent execution.
+///
+/// Distinguishes between successful completion and hitting the max iterations limit.
+/// `MaxIterationsExceeded` carries the full conversation history so callers (e.g.
+/// continuation logic) can generate meaningful summaries.
+#[derive(Debug)]
+pub enum AgentRunResult {
+    /// Agent completed successfully with a final response.
+    Success(String),
+    /// Agent hit the max iterations limit. Contains the full message history.
+    MaxIterationsExceeded { messages: Vec<Message> },
+}
+
 /// Unique identifier for an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentId(pub String);
@@ -445,26 +458,37 @@ impl Agent {
     ///
     /// This is the preferred method for stateless agent execution.
     /// The agent runs until it produces a final response (no tool calls).
+    /// Returns an error if max iterations is exceeded (use `run_once_with_progress`
+    /// directly if you need the conversation history on max iterations).
     pub async fn run_once(
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
         config: AgentConfig,
         context: Vec<Message>,
     ) -> Result<String, Error> {
-        Self::run_once_with_progress(provider, tools, config, context, None).await
+        match Self::run_once_with_progress(provider, tools, config, context, None).await? {
+            AgentRunResult::Success(s) => Ok(s),
+            AgentRunResult::MaxIterationsExceeded { .. } => {
+                Err(Error::Unknown("Agent exceeded max iterations".into()))
+            }
+        }
     }
 
     /// Run a one-shot task with progress reporting.
     ///
     /// When a progress handler is provided, this uses streaming for LLM calls
     /// and emits progress events for thinking content, tool execution, and usage.
+    ///
+    /// Returns `AgentRunResult::Success` on completion or
+    /// `AgentRunResult::MaxIterationsExceeded` with the full conversation history
+    /// when the iteration limit is reached.
     pub async fn run_once_with_progress(
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
         config: AgentConfig,
         context: Vec<Message>,
         progress: Option<Arc<dyn AgentProgressHandler>>,
-    ) -> Result<String, Error> {
+    ) -> Result<AgentRunResult, Error> {
         use tracing::debug;
 
         let agent_name = config.id.0.clone();
@@ -484,15 +508,20 @@ impl Agent {
             context.len()
         );
 
-        let mut messages = Vec::new();
+        // Split into base (system prompt + initial context) and loop-accumulated messages.
+        // This avoids cloning the growing loop_messages into base on every iteration.
+        let mut base_messages = Vec::new();
 
         // Add system prompt if configured
         if let Some(system) = &config.system_prompt {
-            messages.push(Message::system(system.as_str()));
+            base_messages.push(Message::system(system.as_str()));
         }
 
         // Add provided context
-        messages.extend(context);
+        base_messages.extend(context);
+
+        // Messages accumulated during the agentic loop (assistant + tool_result)
+        let mut loop_messages: Vec<Message> = Vec::new();
 
         let max_turns = config.max_turns as u32;
 
@@ -515,14 +544,20 @@ impl Agent {
             debug!(
                 agent = %config.id,
                 iteration = iteration,
-                message_count = messages.len(),
+                message_count = base_messages.len() + loop_messages.len(),
                 "Agent iteration starting"
             );
 
-            // Count input bytes (messages being sent)
-            let input_bytes: usize = messages.iter().map(|m| m.content.byte_count()).sum();
+            // Build request messages by chaining base + loop
+            let request_messages: Vec<Message> = base_messages.iter()
+                .chain(loop_messages.iter())
+                .cloned()
+                .collect();
 
-            let request = CompletionRequest::new(messages.clone())
+            // Count input bytes (messages being sent)
+            let input_bytes: usize = request_messages.iter().map(|m| m.byte_count()).sum();
+
+            let request = CompletionRequest::new(request_messages)
                 .with_tools(tools.definitions());
 
             // Use streaming if we have a progress handler, otherwise use complete()
@@ -566,7 +601,7 @@ impl Agent {
 
                 // Store message with tool calls but NO content (don't store thinking)
                 let msg = Message::assistant_with_tool_calls("", tool_calls.clone());
-                messages.push(msg);
+                loop_messages.push(msg);
 
                 // Execute tools
                 for tool_call in &tool_calls {
@@ -612,6 +647,7 @@ impl Agent {
                             Please complete your task with the information you have gathered.",
                             tool_call.name, limit
                         );
+                        let result = truncate_tool_result(result, MAX_AGENT_TOOL_RESULT_BYTES);
 
                         // Emit tool complete event (as error)
                         if let Some(ref handler) = progress {
@@ -624,7 +660,7 @@ impl Agent {
                                 .await;
                         }
 
-                        messages.push(Message::tool_result(&tool_call.id, result));
+                        loop_messages.push(Message::tool_result(&tool_call.id, result));
                         continue;
                     }
 
@@ -661,7 +697,7 @@ impl Agent {
                             .await;
                     }
 
-                    messages.push(Message::tool_result(&tool_call.id, result));
+                    loop_messages.push(Message::tool_result(&tool_call.id, result));
                 }
 
                 continue;
@@ -674,13 +710,12 @@ impl Agent {
                 response_len = content.len(),
                 "Agent completed successfully"
             );
-            return Ok(content);
+            return Ok(AgentRunResult::Success(content));
         }
 
-        Err(Error::Unknown(format!(
-            "Agent {} exceeded max iterations ({})",
-            config.id, config.max_turns
-        )))
+        // Combine base + loop messages for the full conversation history
+        base_messages.extend(loop_messages);
+        Ok(AgentRunResult::MaxIterationsExceeded { messages: base_messages })
     }
 
     /// Process an input message (stateful mode).
@@ -696,16 +731,16 @@ impl Agent {
         // Add user input
         self.messages.push(Message::user(input));
 
-        // Build messages with system prompt
-        let mut messages = Vec::new();
-        if let Some(system) = &self.config.system_prompt {
-            messages.push(Message::system(system.as_str()));
-        }
-        messages.extend(self.messages.clone());
-
         // Run agentic loop
+        // Build request messages from self.messages each iteration to avoid double-cloning.
         for _iteration in 0..self.config.max_turns {
-            let mut request = CompletionRequest::new(messages.clone())
+            let mut request_messages = Vec::with_capacity(self.messages.len() + 1);
+            if let Some(system) = &self.config.system_prompt {
+                request_messages.push(Message::system(system.as_str()));
+            }
+            request_messages.extend(self.messages.iter().cloned());
+
+            let mut request = CompletionRequest::new(request_messages)
                 .with_tools(self.tools.definitions());
 
             request.stream = false;
@@ -715,17 +750,13 @@ impl Agent {
             // Check for tool calls
             if !response.message.tool_calls.is_empty() {
                 // Add assistant message with tool calls but NO content (don't store thinking)
-                // Note: response.message.content might contain thinking from some providers
                 let msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
-                messages.push(msg.clone());
                 self.messages.push(msg);
 
                 // Execute tools
                 for tool_call in &response.message.tool_calls {
                     let result = execute_tool(&self.tools, tool_call).await;
-                    let tool_msg = Message::tool_result(&tool_call.id, &result);
-                    messages.push(tool_msg.clone());
-                    self.messages.push(tool_msg);
+                    self.messages.push(Message::tool_result(&tool_call.id, result));
                 }
 
                 continue;
@@ -906,6 +937,46 @@ async fn run_complete_iteration(
     Ok((content, tool_calls, usage))
 }
 
+/// Maximum bytes for a tool result in agent context.
+/// Matches `ChunkerConfig::default_threshold_bytes` (50KB).
+const MAX_AGENT_TOOL_RESULT_BYTES: usize = 50_000;
+
+/// Truncate a tool result to fit within a byte budget.
+///
+/// If the content exceeds `max_bytes`, truncates at the last newline before
+/// the limit (respecting UTF-8 char boundaries) and appends a note.
+fn truncate_tool_result(content: String, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content;
+    }
+
+    // Find a valid UTF-8 char boundary at or before max_bytes
+    let mut boundary = max_bytes;
+    while boundary > 0 && !content.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+
+    // Try to find the last newline before the boundary for a clean cut
+    if let Some(newline_pos) = content[..boundary].rfind('\n') {
+        let truncated = &content[..newline_pos];
+        format!(
+            "{}\n\n[Output truncated: showing {}/{} bytes. Request specific sections if needed.]",
+            truncated,
+            newline_pos,
+            content.len()
+        )
+    } else {
+        // No newline found - truncate at char boundary
+        let truncated = &content[..boundary];
+        format!(
+            "{}\n\n[Output truncated: showing {}/{} bytes. Request specific sections if needed.]",
+            truncated,
+            boundary,
+            content.len()
+        )
+    }
+}
+
 /// Execute a single tool call.
 async fn execute_tool(
     registry: &ToolRegistry,
@@ -917,11 +988,12 @@ async fn execute_tool(
 
     match tool.execute(tool_call.arguments.clone()).await {
         Ok(output) => {
-            if output.is_error {
+            let content = if output.is_error {
                 format!("Error: {}", output.content)
             } else {
                 output.content
-            }
+            };
+            truncate_tool_result(content, MAX_AGENT_TOOL_RESULT_BYTES)
         }
         Err(e) => format!("Error executing tool: {}", e),
     }
@@ -1012,5 +1084,55 @@ mod tests {
             }
             _ => panic!("Expected Request"),
         }
+    }
+
+    #[test]
+    fn test_truncate_tool_result_under_limit() {
+        let content = "Hello, world!".to_string();
+        let result = truncate_tool_result(content.clone(), 100);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_truncate_tool_result_over_limit_at_newline() {
+        let content = "line1\nline2\nline3\nline4\nline5".to_string();
+        // Limit to 15 bytes - should cut at newline before byte 15
+        let result = truncate_tool_result(content.clone(), 15);
+        assert!(result.starts_with("line1\nline2"));
+        assert!(result.contains("[Output truncated:"));
+        assert!(result.contains(&format!("{} bytes", content.len())));
+    }
+
+    #[test]
+    fn test_truncate_tool_result_over_limit_no_newline() {
+        let content = "a".repeat(100);
+        let result = truncate_tool_result(content.clone(), 50);
+        assert!(result.contains("[Output truncated:"));
+        // Should have 50 'a's before the truncation note
+        assert!(result.starts_with(&"a".repeat(50)));
+    }
+
+    #[test]
+    fn test_truncate_tool_result_empty() {
+        let result = truncate_tool_result(String::new(), 100);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_tool_result_utf8_safety() {
+        // Multi-byte UTF-8: each emoji is 4 bytes
+        let content = "🎉🎊🎃🎄🎅".to_string(); // 20 bytes
+        // Try to cut at 6 bytes (middle of second emoji)
+        let result = truncate_tool_result(content.clone(), 6);
+        // Should back up to a char boundary (byte 4, end of first emoji)
+        assert!(result.starts_with("🎉"));
+        assert!(result.contains("[Output truncated:"));
+    }
+
+    #[test]
+    fn test_truncate_tool_result_exact_limit() {
+        let content = "exact".to_string();
+        let result = truncate_tool_result(content.clone(), 5);
+        assert_eq!(result, "exact");
     }
 }

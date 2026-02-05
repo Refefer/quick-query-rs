@@ -14,7 +14,7 @@ pub mod tool;
 
 pub use agent::{
     Agent, AgentChannel, AgentConfig, AgentId, AgentMessage, AgentProgressEvent,
-    AgentProgressHandler, AgentRegistry, AgentSender,
+    AgentProgressHandler, AgentRegistry, AgentRunResult, AgentSender,
 };
 pub use error::Error;
 pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags};

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use qq_core::{Agent, AgentConfig, AgentProgressHandler, CompletionRequest, Message, Provider, ToolRegistry};
+use qq_core::{Agent, AgentConfig, AgentProgressHandler, AgentRunResult, CompletionRequest, Message, Provider, ToolRegistry};
 
 use crate::event_bus::{AgentEvent, AgentEventBus};
 
@@ -143,6 +143,48 @@ Continue from where you left off. Do NOT repeat work already done. Focus on comp
     )
 }
 
+/// Apply a byte budget to messages for summary generation.
+///
+/// If total message bytes exceed `max_bytes`, keeps the system prompt (if any),
+/// the first user message, and as many trailing messages as fit within the budget.
+/// This prevents the summary LLM call from exceeding context limits on very long runs.
+fn budget_messages_for_summary(messages: &[Message], max_bytes: usize) -> Vec<Message> {
+    let total_bytes: usize = messages.iter().map(|m| m.byte_count()).sum();
+    if total_bytes <= max_bytes {
+        return messages.to_vec();
+    }
+
+    // Keep the first two messages (system prompt + user task) as the prefix
+    let prefix_count = messages.len().min(2);
+    let prefix = &messages[..prefix_count];
+    let prefix_bytes: usize = prefix.iter().map(|m| m.byte_count()).sum();
+
+    let remaining_budget = max_bytes.saturating_sub(prefix_bytes);
+    let tail = &messages[prefix_count..];
+
+    // Walk backwards through tail, accumulating messages that fit
+    let mut suffix_bytes = 0usize;
+    let mut suffix_start = tail.len();
+    for (i, msg) in tail.iter().enumerate().rev() {
+        let msg_bytes = msg.byte_count();
+        if suffix_bytes + msg_bytes > remaining_budget {
+            break;
+        }
+        suffix_bytes += msg_bytes;
+        suffix_start = i;
+    }
+
+    let mut result = prefix.to_vec();
+    if suffix_start > 0 {
+        // Insert a marker that messages were omitted
+        result.push(Message::user(
+            "[... earlier conversation omitted for brevity ...]",
+        ));
+    }
+    result.extend_from_slice(&tail[suffix_start..]);
+    result
+}
+
 /// Result of an agent execution with potential continuation.
 pub enum AgentExecutionResult {
     /// Task completed successfully
@@ -180,7 +222,12 @@ pub async fn execute_with_continuation(
         )
         .await
         {
-            Ok(result) => AgentExecutionResult::Success(result),
+            Ok(AgentRunResult::Success(result)) => AgentExecutionResult::Success(result),
+            Ok(AgentRunResult::MaxIterationsExceeded { .. }) => {
+                AgentExecutionResult::Error(qq_core::Error::Unknown(
+                    "Agent exceeded max iterations".into(),
+                ))
+            }
             Err(e) => AgentExecutionResult::Error(e),
         };
     }
@@ -200,16 +247,10 @@ pub async fn execute_with_continuation(
         .await;
 
         match result {
-            Ok(final_result) => {
+            Ok(AgentRunResult::Success(final_result)) => {
                 return AgentExecutionResult::Success(final_result);
             }
-            Err(e) => {
-                // Check if this is a max_turns exceeded error
-                let error_msg = e.to_string();
-                if !error_msg.contains("exceeded max iterations") {
-                    return AgentExecutionResult::Error(e);
-                }
-
+            Ok(AgentRunResult::MaxIterationsExceeded { messages: agent_messages }) => {
                 // Max turns exceeded - check if we can continue
                 continuation_count += 1;
                 if continuation_count > continuation_config.max_continuations {
@@ -228,10 +269,11 @@ pub async fn execute_with_continuation(
                     });
                 }
 
-                // Generate summary from current context
-                // Note: The current context may be limited, but the LLM can recall
-                // what it did from its conversation history in the context
-                let summary = match generate_summary(Arc::clone(&provider), &current_context).await
+                // Generate summary from the actual agent conversation history.
+                // Apply a byte budget: if total messages exceed 200KB, keep only
+                // system prompt + first user message + last N messages that fit.
+                let summary_messages = budget_messages_for_summary(&agent_messages, 200_000);
+                let summary = match generate_summary(Arc::clone(&provider), &summary_messages).await
                 {
                     Ok(s) => s,
                     Err(e) => {
@@ -248,6 +290,9 @@ pub async fn execute_with_continuation(
                 // Build new context with summary
                 let continuation_prompt = format_summary_context(&summary, &original_task);
                 current_context = vec![Message::user(continuation_prompt.as_str())];
+            }
+            Err(e) => {
+                return AgentExecutionResult::Error(e);
             }
         }
     }
