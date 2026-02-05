@@ -177,14 +177,14 @@ impl Widget for ThinkingPanel<'_> {
         // Show expansion state and streaming status in title
         let title = if self.is_streaming {
             if self.is_expanded {
-                " Thinking... [Ctrl+T to shrink] "
+                " Thinking... [Ctrl+T shrink | Ctrl+H hide] "
             } else {
-                " Thinking... [Ctrl+T to expand] "
+                " Thinking... [Ctrl+T expand | Ctrl+H hide] "
             }
         } else if self.is_expanded {
-            " Thinking [Ctrl+T to shrink] "
+            " Thinking [Ctrl+T shrink | Ctrl+H hide] "
         } else {
-            " Thinking [Ctrl+T to expand] "
+            " Thinking [Ctrl+T expand | Ctrl+H hide] "
         };
 
         let block = Block::default()

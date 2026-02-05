@@ -424,7 +424,8 @@ impl TuiApp {
                 message,
             } => {
                 // Append notification to content area with visual distinction
-                self.content.push_str(&format!("\n**{}**: {}\n", agent_name, message));
+                // Use blockquote style to differentiate from main response
+                self.content.push_str(&format!("\n> **[{}]** {}\n", agent_name, message));
                 self.content_dirty = true;
             }
             AgentEvent::ContinuationStarted {
@@ -767,7 +768,7 @@ pub async fn run_tui(
 
         // Handle events with timeout for render ticks
         let timeout = if app.is_streaming {
-            Duration::from_millis(16) // Faster updates during streaming
+            Duration::from_millis(8) // Faster updates during streaming
         } else {
             tick_rate
         };
@@ -1076,8 +1077,13 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
 /// Format tools list for display
 fn format_tools_list(registry: &ToolRegistry) -> String {
     let mut output = String::from("Available tools:\n\n");
-    for def in registry.definitions() {
-        output.push_str(&format!("  {} - {}\n", def.name, def.description));
+    let mut names: Vec<_> = registry.names().into_iter().collect();
+    names.sort();
+    for name in names {
+        if let Some(tool) = registry.get(name) {
+            // Use Tool::description() which is the short human-friendly version
+            output.push_str(&format!("  {} - {}\n", name, tool.description()));
+        }
     }
     output
 }

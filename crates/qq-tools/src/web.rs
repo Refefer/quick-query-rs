@@ -415,11 +415,11 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        WEB_SEARCH_DESCRIPTION
+        "Search the web using natural language queries"
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), WEB_SEARCH_DESCRIPTION).with_parameters(
             ToolParameters::new()
                 .add_property("query", PropertySchema::string("The search query string (can be natural language)"), true),
         )

@@ -392,7 +392,7 @@ pub async fn run_chat(
         while let Ok(event) = event_rx.recv().await {
             if let AgentEvent::UserNotification { agent_name, message } = event {
                 // Print notification to stdout with visual distinction
-                println!("\n[{}]: {}", agent_name, message);
+                println!("\n> [{}] {}", agent_name, message);
             }
         }
     });
@@ -460,8 +460,12 @@ pub async fn run_chat(
                     }
                     ChatCommand::Tools => {
                         println!("\nAvailable tools:");
-                        for def in tools_registry.definitions() {
-                            println!("  {} - {}", def.name, def.description);
+                        let mut names: Vec<_> = tools_registry.names().into_iter().collect();
+                        names.sort();
+                        for name in names {
+                            if let Some(tool) = tools_registry.get(name) {
+                                println!("  {} - {}", name, tool.description());
+                            }
                         }
                         println!();
                     }
