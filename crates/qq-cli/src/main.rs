@@ -23,7 +23,7 @@ mod tui;
 pub use event_bus::AgentEventBus;
 pub use execution_context::ExecutionContext;
 
-use agents::{create_agent_tools, AgentExecutor, DEFAULT_MAX_AGENT_DEPTH};
+use agents::{create_agent_tools, AgentExecutor, InformUserTool, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
 
 /// Log level for tracing output
@@ -446,12 +446,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Determine whether to use TUI mode (needed early for event bus decision)
     let use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout);
 
-    // Create event bus for TUI mode (for agent progress reporting)
-    let event_bus = if use_tui {
-        Some(AgentEventBus::new(256))
-    } else {
-        None
-    };
+    // Create event bus for agent progress reporting (used in both TUI and readline modes)
+    let event_bus = AgentEventBus::new(256);
 
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
@@ -468,7 +464,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             0, // Start at depth 0
             DEFAULT_MAX_AGENT_DEPTH,
             Some(execution_context.clone()),
-            event_bus.clone(),
+            Some(event_bus.clone()),
         )
     };
 
@@ -477,6 +473,12 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     for tool in agent_tools {
         tools_registry.register(tool);
     }
+
+    // Add inform_user tool for the main chat (allows primary agent to notify user)
+    tools_registry.register(Arc::new(InformUserTool::new(
+        event_bus.clone(),
+        "assistant", // Primary agent name for main chat
+    )));
 
     // Set up chunker config
     let chunker_config = config.tools.chunker.to_chunker_config();
@@ -517,7 +519,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             agent_executor,
             execution_context,
             chunker_config,
-            event_bus,
+            Some(event_bus),
         )
         .await
     } else {
@@ -531,6 +533,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             settings.model,
             agent_executor,
             chunker_config,
+            event_bus,
         )
         .await
     }

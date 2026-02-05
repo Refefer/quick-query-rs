@@ -51,6 +51,12 @@ pub enum AgentEvent {
         agent_name: String,
         message: String,
     },
+    /// Agent is continuing after hitting turn limit.
+    ContinuationStarted {
+        agent_name: String,
+        continuation_number: u32,
+        max_continuations: u32,
+    },
 }
 
 impl From<AgentProgressEvent> for AgentEvent {

@@ -20,6 +20,7 @@ use qq_core::{
 use crate::agents::AgentExecutor;
 use crate::config::Config as AppConfig;
 use crate::debug_log::DebugLogger;
+use crate::event_bus::{AgentEvent, AgentEventBus};
 use crate::markdown::MarkdownRenderer;
 use crate::Cli;
 
@@ -380,9 +381,22 @@ pub async fn run_chat(
     model: Option<String>,
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
     chunker_config: ChunkerConfig,
+    event_bus: AgentEventBus,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
+
+    // Subscribe to event bus for agent notifications
+    let mut event_rx = event_bus.subscribe();
+    tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv().await {
+            if let AgentEvent::UserNotification { agent_name, message } = event {
+                // Print notification to stdout with visual distinction
+                println!("\n[{}]: {}", agent_name, message);
+            }
+        }
+    });
+
     // Set up debug logger if requested (log_file takes precedence over deprecated debug_file)
     let log_path = cli.log_file.as_ref().or(cli.debug_file.as_ref());
     let debug_logger: Option<Arc<DebugLogger>> = if let Some(path) = log_path {

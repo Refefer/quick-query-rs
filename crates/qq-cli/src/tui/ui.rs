@@ -41,7 +41,8 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
     if let Some(&thinking_rect) = layout.get(&PaneId::Thinking) {
         if thinking_rect.height > 0 && has_thinking {
             let is_thinking_streaming = app.is_streaming && app.content.is_empty();
-            let thinking = ThinkingPanel::new(&app.thinking_content)
+            let thinking_str = app.thinking_content.as_str();
+            let thinking = ThinkingPanel::new(&thinking_str)
                 .tool_notifications(&app.tool_notifications)
                 .expanded(app.thinking_expanded)
                 .streaming(is_thinking_streaming)

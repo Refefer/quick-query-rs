@@ -1,5 +1,6 @@
 //! TUI Application state and main event loop.
 
+use std::collections::VecDeque;
 use std::io;
 use std::panic;
 use std::sync::Arc;
@@ -51,6 +52,82 @@ struct ContentCache {
     line_count: u16,
 }
 
+/// Ring buffer for thinking content to prevent unbounded memory growth.
+///
+/// Stores lines in a fixed-capacity deque, discarding oldest lines when full.
+#[derive(Debug, Default)]
+pub struct ThinkingBuffer {
+    lines: VecDeque<String>,
+    /// Partial line being accumulated (content after last newline)
+    partial: String,
+}
+
+impl ThinkingBuffer {
+    /// Maximum number of lines to retain
+    const MAX_LINES: usize = 100;
+
+    /// Create a new empty buffer.
+    pub fn new() -> Self {
+        Self {
+            lines: VecDeque::with_capacity(Self::MAX_LINES),
+            partial: String::new(),
+        }
+    }
+
+    /// Append content to the buffer.
+    pub fn push_str(&mut self, s: &str) {
+        // Split input by newlines
+        let mut parts = s.split('\n');
+
+        // First part appends to partial line
+        if let Some(first) = parts.next() {
+            self.partial.push_str(first);
+        }
+
+        // Each subsequent part means we hit a newline
+        for part in parts {
+            // Complete the partial line and push it
+            let complete_line = std::mem::take(&mut self.partial);
+            self.lines.push_back(complete_line);
+
+            // Evict oldest if over capacity
+            if self.lines.len() > Self::MAX_LINES {
+                self.lines.pop_front();
+            }
+
+            // Start new partial line
+            self.partial.push_str(part);
+        }
+    }
+
+    /// Clear the buffer.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.partial.clear();
+    }
+
+    /// Check if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.partial.is_empty()
+    }
+
+    /// Count the number of lines (including partial).
+    pub fn line_count(&self) -> usize {
+        self.lines.len() + if self.partial.is_empty() { 0 } else { 1 }
+    }
+
+    /// Get the content as a string (for rendering).
+    pub fn as_str(&self) -> String {
+        let mut result = String::new();
+        for line in &self.lines {
+            result.push_str(line);
+            result.push('\n');
+        }
+        result.push_str(&self.partial);
+        result
+    }
+}
+
 /// State of the LLM request/response cycle
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamingState {
@@ -72,7 +149,7 @@ pub struct TuiApp {
     /// Primary agent name for this session (e.g., "chat", "explore")
     pub primary_agent: String,
     pub content: String,
-    pub thinking_content: String,
+    pub thinking_content: ThinkingBuffer,
     pub show_thinking: bool,
     pub thinking_expanded: bool,
 
@@ -135,7 +212,7 @@ impl TuiApp {
             profile: profile.to_string(),
             primary_agent: primary_agent.to_string(),
             content: String::new(),
-            thinking_content: String::new(),
+            thinking_content: ThinkingBuffer::new(),
             show_thinking: true,
             thinking_expanded: false,
             prompt_tokens: 0,
@@ -348,6 +425,18 @@ impl TuiApp {
             } => {
                 // Append notification to content area with visual distinction
                 self.content.push_str(&format!("\n**{}**: {}\n", agent_name, message));
+                self.content_dirty = true;
+            }
+            AgentEvent::ContinuationStarted {
+                agent_name,
+                continuation_number,
+                max_continuations,
+            } => {
+                // Append continuation notice to content area
+                self.content.push_str(&format!(
+                    "\n**{}**: Continuing execution ({}/{})\n",
+                    agent_name, continuation_number, max_continuations
+                ));
                 self.content_dirty = true;
             }
         }
@@ -656,7 +745,7 @@ pub async fn run_tui(
             // Build layout config - must be identical to what ui::render expects
             let mut layout_config = LayoutConfig::new();
             let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
-            let thinking_lines = app.thinking_content.lines().count() as u16;
+            let thinking_lines = app.thinking_content.line_count() as u16;
             layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
 
             // Configure input pane based on text wrapping
@@ -1510,4 +1599,69 @@ async fn run_streaming_completion(
             message: format!("Max iterations ({}) reached", max_turns),
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_thinking_buffer_empty() {
+        let buf = ThinkingBuffer::new();
+        assert!(buf.is_empty());
+        assert_eq!(buf.line_count(), 0);
+        assert_eq!(buf.as_str(), "");
+    }
+
+    #[test]
+    fn test_thinking_buffer_single_line() {
+        let mut buf = ThinkingBuffer::new();
+        buf.push_str("hello world");
+        assert!(!buf.is_empty());
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.as_str(), "hello world");
+    }
+
+    #[test]
+    fn test_thinking_buffer_multiple_lines() {
+        let mut buf = ThinkingBuffer::new();
+        buf.push_str("line1\nline2\nline3");
+        assert_eq!(buf.line_count(), 3);
+        assert_eq!(buf.as_str(), "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_thinking_buffer_incremental_append() {
+        let mut buf = ThinkingBuffer::new();
+        buf.push_str("hel");
+        buf.push_str("lo\nwor");
+        buf.push_str("ld");
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.as_str(), "hello\nworld");
+    }
+
+    #[test]
+    fn test_thinking_buffer_eviction() {
+        let mut buf = ThinkingBuffer::new();
+        // Push more than MAX_LINES lines
+        for i in 0..150 {
+            buf.push_str(&format!("line{}\n", i));
+        }
+        // Should only have MAX_LINES lines (100)
+        assert_eq!(buf.line_count(), ThinkingBuffer::MAX_LINES);
+        // First line should be line 50 (0-49 evicted)
+        let content = buf.as_str();
+        assert!(content.starts_with("line50\n"));
+        assert!(content.contains("line149\n"));
+    }
+
+    #[test]
+    fn test_thinking_buffer_clear() {
+        let mut buf = ThinkingBuffer::new();
+        buf.push_str("some content\nmore content");
+        buf.clear();
+        assert!(buf.is_empty());
+        assert_eq!(buf.line_count(), 0);
+        assert_eq!(buf.as_str(), "");
+    }
 }

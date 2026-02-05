@@ -9,9 +9,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use qq_core::{Agent, AgentConfig, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
+use qq_core::{AgentConfig, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
 use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType};
+use crate::agents::continuation::{execute_with_continuation, AgentExecutionResult, ContinuationConfig};
 use crate::agents::InformUserTool;
 use crate::event_bus::AgentEventBus;
 use crate::ExecutionContext;
@@ -168,21 +169,33 @@ impl Tool for InternalAgentTool {
             config = config.with_tool_limits(limits);
         }
 
-        // Context is ONLY the task - no chat history, no chat system prompt
-        let context = vec![qq_core::Message::user(args.task.as_str())];
-
         // Create progress handler if event bus is available
         let progress = self.event_bus.as_ref().map(|bus| bus.create_handler());
 
-        let result = match Agent::run_once_with_progress(
+        // Use continuation wrapper for execution
+        let continuation_config = ContinuationConfig::default();
+        let result = match execute_with_continuation(
             Arc::clone(&self.provider),
             agent_tools,
             config,
-            context,
+            args.task.clone(),
             progress,
-        ).await {
-            Ok(result) => Ok(ToolOutput::success(result)),
-            Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
+            continuation_config,
+            self.event_bus.as_ref(),
+        )
+        .await
+        {
+            AgentExecutionResult::Success(result) => Ok(ToolOutput::success(result)),
+            AgentExecutionResult::MaxContinuationsReached {
+                partial_result,
+                continuations,
+            } => Ok(ToolOutput::success(format!(
+                "Task partially completed after {} continuations.\n\n{}",
+                continuations, partial_result
+            ))),
+            AgentExecutionResult::Error(e) => {
+                Ok(ToolOutput::error(format!("Agent error: {}", e)))
+            }
         };
 
         // Pop agent context
@@ -322,21 +335,33 @@ impl Tool for ExternalAgentTool {
             config = config.with_tool_limits(self.definition.tool_limits.clone());
         }
 
-        // Context is ONLY the task - no chat history, no chat system prompt
-        let context = vec![qq_core::Message::user(args.task.as_str())];
-
         // Create progress handler if event bus is available
         let progress = self.event_bus.as_ref().map(|bus| bus.create_handler());
 
-        let result = match Agent::run_once_with_progress(
+        // Use continuation wrapper for execution
+        let continuation_config = ContinuationConfig::default();
+        let result = match execute_with_continuation(
             Arc::clone(&self.provider),
             agent_tools,
             config,
-            context,
+            args.task.clone(),
             progress,
-        ).await {
-            Ok(result) => Ok(ToolOutput::success(result)),
-            Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
+            continuation_config,
+            self.event_bus.as_ref(),
+        )
+        .await
+        {
+            AgentExecutionResult::Success(result) => Ok(ToolOutput::success(result)),
+            AgentExecutionResult::MaxContinuationsReached {
+                partial_result,
+                continuations,
+            } => Ok(ToolOutput::success(format!(
+                "Task partially completed after {} continuations.\n\n{}",
+                continuations, partial_result
+            ))),
+            AgentExecutionResult::Error(e) => {
+                Ok(ToolOutput::error(format!("Agent error: {}", e)))
+            }
         };
 
         // Pop agent context
