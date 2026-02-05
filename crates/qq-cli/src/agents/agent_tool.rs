@@ -12,6 +12,7 @@ use serde::Deserialize;
 use qq_core::{Agent, AgentConfig, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
 use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType};
+use crate::agents::InformUserTool;
 use crate::event_bus::AgentEventBus;
 use crate::ExecutionContext;
 
@@ -136,6 +137,14 @@ impl Tool for InternalAgentTool {
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
             }
+        }
+
+        // Add inform_user tool if event bus is available
+        if let Some(ref event_bus) = self.event_bus {
+            agent_tools.register(Arc::new(InformUserTool::new(
+                event_bus.clone(),
+                self.agent.name(),
+            )));
         }
 
         let agent_tools = Arc::new(agent_tools);
@@ -292,6 +301,14 @@ impl Tool for ExternalAgentTool {
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
             }
+        }
+
+        // Add inform_user tool if event bus is available
+        if let Some(ref event_bus) = self.event_bus {
+            agent_tools.register(Arc::new(InformUserTool::new(
+                event_bus.clone(),
+                &self.agent_name,
+            )));
         }
 
         let agent_tools = Arc::new(agent_tools);

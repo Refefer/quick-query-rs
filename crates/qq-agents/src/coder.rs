@@ -46,6 +46,24 @@ Your response should:
 - List files created or modified
 - Highlight anything the caller should verify or test
 
+## Keeping Users Informed
+Use `inform_user` to notify the user about your progress WITHOUT ending your turn.
+The user sees messages immediately while you continue working. This builds trust and transparency.
+
+**When to use inform_user:**
+- When gathering context: "Reading existing auth module to understand patterns..."
+- When you discover relevant code: "Found existing validation helpers we can reuse..."
+- When you find issues: "Note: the current implementation has a potential race condition..."
+- Before major changes: "Implementing the new validation logic in auth.rs..."
+- For multi-file updates: "This change affects 3 files - updating them consistently..."
+- When making design decisions: "Using the builder pattern to match existing code style..."
+- When something unexpected happens: "The function signature differs from expected - adapting approach..."
+
+**Examples:**
+- inform_user({"message": "Reading src/auth.rs to understand the current structure..."})
+- inform_user({"message": "Good news - found existing error types we can extend..."})
+- inform_user({"message": "Updating auth.rs, then propagating changes to 2 dependent files..."})
+
 ## Anti-patterns to Avoid
 - NEVER write code without first reading related existing code
 - Don't invent new patterns when the codebase has established ones

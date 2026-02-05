@@ -6,6 +6,9 @@
 //! - AgentExecutor for manual agent invocation via chat commands
 
 pub mod agent_tool;
+pub mod inform_user;
+
+pub use inform_user::InformUserTool;
 
 pub use agent_tool::{create_agent_tools, DEFAULT_MAX_AGENT_DEPTH};
 

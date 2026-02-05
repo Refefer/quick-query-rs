@@ -8,6 +8,11 @@
 #   tool_limits    - Per-tool call limits (tool_name -> max_calls)
 #
 # When a limit is reached, the agent receives an error prompting it to complete.
+#
+# NOTE: All agents automatically have access to `inform_user` - a tool that sends
+# status messages to the user without ending the agent's turn. Use it to keep
+# users informed during long-running tasks (e.g., "Searching codebase...",
+# "Delegating to researcher..."). No configuration needed.
 
 # ============================================================================
 # BUILT-IN AGENT OVERRIDES
@@ -16,41 +21,40 @@
 # These take precedence over the hardcoded defaults.
 
 [builtin.researcher]
-# Default tools: web_search, fetch_webpage
+# Default tools: web_search, fetch_webpage, read_memory, add_memory + inform_user
 max_turns = 10
 tool_limits = { web_search = 2, fetch_webpage = 5 }
 
 [builtin.coder]
-# Default tools: read_file, write_file, list_files, search_files
+# Default tools: read_file, edit_file, write_file, find_files, search_files + inform_user
 max_turns = 100
-tool_limits = { write_file = 20, read_file = 50, list_files = 20, search_files = 20 }
+tool_limits = { write_file = 20, read_file = 50, find_files = 20, search_files = 20 }
 
 [builtin.explore]
-# Default tools: read_file, list_files, search_files
+# Default tools: read_file, find_files, search_files + inform_user
 max_turns = 50
-tool_limits = { read_file = 50, list_files = 30, search_files = 30 }
+tool_limits = { read_file = 50, find_files = 30, search_files = 30 }
 
 [builtin.reviewer]
-# Default tools: read_file, list_files, search_files
+# Default tools: read_file, find_files, search_files + inform_user
 max_turns = 20
-tool_limits = { read_file = 30, list_files = 15, search_files = 15 }
+tool_limits = { read_file = 30, find_files = 15, search_files = 15 }
 
 [builtin.writer]
-# Default tools: read_file, write_file, list_files, search_files
+# Default tools: read_file, write_file, find_files, search_files + inform_user
 max_turns = 20
-tool_limits = { write_file = 10, read_file = 20, list_files = 10, search_files = 10 }
+tool_limits = { write_file = 10, read_file = 20, find_files = 10, search_files = 10 }
 
 [builtin.chat]
-# Default tools: read_file, write_file, list_files, search_files
+# Default tools: Agent tools only + inform_user (delegates all work to other agents)
 max_turns = 20
-tool_limits = { write_file = 20, read_file = 50, list_files = 20, search_files = 20 }
 
 [builtin.planner]
-# No tools (delegates to other agents)
+# Default tools: read_memory, add_memory + inform_user (delegates exploration to other agents)
 max_turns = 30
 
 [builtin.summarizer]
-# No tools (pure LLM)
+# Default tools: inform_user only (pure LLM otherwise)
 max_turns = 20
 
 # ============================================================================
@@ -58,6 +62,7 @@ max_turns = 20
 # ============================================================================
 
 # Custom research agent focused on technical documentation
+# Note: inform_user is automatically available to all agents
 [agents.doc-researcher]
 description = "Research technical documentation and APIs"
 system_prompt = """
@@ -65,6 +70,7 @@ You are a technical documentation researcher. Your task is to find and
 analyze technical documentation, API references, and developer guides.
 
 Guidelines:
+- Use inform_user to keep the user updated on your progress
 - Focus on official documentation sources
 - Extract code examples when relevant
 - Summarize key concepts and patterns
@@ -76,6 +82,7 @@ tools = ["fetch_webpage", "web_search"]
 tool_limits = { web_search = 3, fetch_webpage = 5 }
 
 # Code explanation agent
+# Note: inform_user is automatically available even to pure LLM agents
 [agents.explainer]
 description = "Explain code in detail"
 system_prompt = """
@@ -90,11 +97,13 @@ For each piece of code:
 5. Explain any complex logic step by step
 
 Use simple language and analogies when helpful.
+Use inform_user for progress updates on long explanations.
 """
 max_turns = 1
-tools = []  # Pure LLM agent - no tool limits needed
+tools = []  # Pure LLM agent - inform_user is still available
 
 # Git helper agent
+# Note: inform_user is automatically available to all agents
 [agents.git-helper]
 description = "Help with git operations and history"
 system_prompt = """
@@ -107,18 +116,23 @@ You can:
 - Help plan branch strategies
 - Create or update .gitignore files
 
+Use inform_user to keep the user updated on your progress.
 Be concise and practical in your advice.
 """
 max_turns = 10
-tools = ["read_file", "write_file", "list_files", "search_files"]
-tool_limits = { read_file = 15, write_file = 5, list_files = 10, search_files = 10 }
+tools = ["read_file", "write_file", "find_files", "search_files"]
+tool_limits = { read_file = 15, write_file = 5, find_files = 10, search_files = 10 }
 
 # Security reviewer agent
+# Note: inform_user is automatically available to all agents
 [agents.security-reviewer]
 description = "Review code for security issues"
 system_prompt = """
 You are a security-focused code reviewer. Analyze code for potential
 security vulnerabilities and provide actionable recommendations.
+
+Use inform_user to keep the user updated on your progress (e.g., "Analyzing
+authentication module...", "Checking for injection vulnerabilities...").
 
 Focus areas:
 - Input validation and sanitization
@@ -135,5 +149,5 @@ For each issue found:
 4. Rate severity (Critical/High/Medium/Low)
 """
 max_turns = 15
-tools = ["read_file", "list_files", "search_files"]
-tool_limits = { read_file = 20, list_files = 10, search_files = 10 }
+tools = ["read_file", "find_files", "search_files"]
+tool_limits = { read_file = 20, find_files = 10, search_files = 10 }

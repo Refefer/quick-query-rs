@@ -342,6 +342,14 @@ impl TuiApp {
                 self.session_input_bytes += input_bytes;
                 self.session_output_bytes += output_bytes;
             }
+            AgentEvent::UserNotification {
+                agent_name,
+                message,
+            } => {
+                // Append notification to content area with visual distinction
+                self.content.push_str(&format!("\n**{}**: {}\n", agent_name, message));
+                self.content_dirty = true;
+            }
         }
     }
 

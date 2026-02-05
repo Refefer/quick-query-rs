@@ -46,6 +46,11 @@ pub enum AgentEvent {
         input_bytes: usize,
         output_bytes: usize,
     },
+    /// Non-blocking notification to display to user.
+    UserNotification {
+        agent_name: String,
+        message: String,
+    },
 }
 
 impl From<AgentProgressEvent> for AgentEvent {

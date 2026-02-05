@@ -67,6 +67,24 @@ Store plans with descriptive names like "migration-plan-postgres" or "auth-imple
 - **Ordered**: Respect dependencies
 - **Appropriately detailed**: Not so high-level it's useless, not so detailed it's overwhelming
 
+## Keeping Users Informed
+Use `inform_user` to notify the user about your progress WITHOUT ending your turn.
+The user sees messages immediately while you continue working. This builds trust and transparency.
+
+**When to use inform_user:**
+- When gathering context: "Exploring the codebase to understand current architecture..."
+- When delegating for info: "Asking explore agent to map out the module structure..."
+- When you discover constraints: "Found that the app uses SQLite - this affects migration options..."
+- When identifying risks: "Note: this will require database downtime - factoring into plan..."
+- When structuring phases: "Breaking this into 4 phases to minimize risk..."
+- When you find dependencies: "The auth system depends on 3 other modules - planning order carefully..."
+- When the scope changes: "This is larger than expected - recommending a phased approach..."
+
+**Examples:**
+- inform_user({"message": "Analyzing the current authentication implementation..."})
+- inform_user({"message": "Good news - existing tests cover 80% of affected code..."})
+- inform_user({"message": "Identified a critical dependency - this must be updated first..."})
+
 ## Anti-patterns to Avoid
 - Don't list vague steps like "implement the feature"
 - Don't ignore dependencies and prerequisites
