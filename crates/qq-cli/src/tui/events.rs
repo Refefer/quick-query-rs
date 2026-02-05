@@ -84,4 +84,10 @@ pub enum InputAction {
     End,
     /// Delete word before cursor
     DeleteWord,
+    /// Hide/show thinking panel entirely
+    HideThinking,
+    /// Move cursor forward one word
+    WordForward,
+    /// Move cursor backward one word
+    WordBackward,
 }

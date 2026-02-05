@@ -386,6 +386,43 @@ impl TuiApp {
                 let len = value.chars().count();
                 self.input = Input::new(value).with_cursor(len);
             }
+            InputAction::WordForward => {
+                let value = self.input.value().to_string();
+                let cursor = self.input.visual_cursor();
+                let chars: Vec<char> = value.chars().collect();
+                let len = chars.len();
+
+                if cursor < len {
+                    let mut new_cursor = cursor;
+                    // Skip whitespace
+                    while new_cursor < len && chars[new_cursor].is_whitespace() {
+                        new_cursor += 1;
+                    }
+                    // Skip word
+                    while new_cursor < len && !chars[new_cursor].is_whitespace() {
+                        new_cursor += 1;
+                    }
+                    self.input = Input::new(value).with_cursor(new_cursor);
+                }
+            }
+            InputAction::WordBackward => {
+                let value = self.input.value().to_string();
+                let cursor = self.input.visual_cursor();
+                let chars: Vec<char> = value.chars().collect();
+
+                if cursor > 0 {
+                    let mut new_cursor = cursor;
+                    // Skip whitespace going backward
+                    while new_cursor > 0 && chars[new_cursor - 1].is_whitespace() {
+                        new_cursor -= 1;
+                    }
+                    // Skip word going backward
+                    while new_cursor > 0 && !chars[new_cursor - 1].is_whitespace() {
+                        new_cursor -= 1;
+                    }
+                    self.input = Input::new(value).with_cursor(new_cursor);
+                }
+            }
             InputAction::HistoryUp => {
                 if let Some(entry) = self.input_history.navigate_up(self.input.value()) {
                     self.input = Input::new(entry.to_string());
@@ -418,6 +455,9 @@ impl TuiApp {
                 if self.show_thinking && !self.thinking_content.is_empty() {
                     self.thinking_expanded = !self.thinking_expanded;
                 }
+            }
+            InputAction::HideThinking => {
+                self.show_thinking = !self.show_thinking;
             }
             InputAction::Help => {
                 self.show_help = !self.show_help;
@@ -508,8 +548,9 @@ pub async fn run_tui(
     // Set up panic hook
     setup_panic_hook();
 
-    // Set up debug logger if requested
-    let debug_logger: Option<Arc<DebugLogger>> = if let Some(ref path) = cli.debug_file {
+    // Set up debug logger if requested (log_file takes precedence over deprecated debug_file)
+    let log_path = cli.log_file.as_ref().or(cli.debug_file.as_ref());
+    let debug_logger: Option<Arc<DebugLogger>> = if let Some(path) = log_path {
         match DebugLogger::new(path) {
             Ok(logger) => Some(Arc::new(logger)),
             Err(_) => None,
@@ -707,6 +748,7 @@ pub async fn run_tui(
                                         let exec_ctx = execution_context.clone();
                                         let chunker_cfg = chunker_config.clone();
                                         let original_query = input.clone();
+                                        let no_stream = cli.no_stream;
 
                                         // Spawn streaming task
                                         tokio::spawn(async move {
@@ -723,6 +765,7 @@ pub async fn run_tui(
                                                 exec_ctx,
                                                 chunker_cfg,
                                                 original_query,
+                                                no_stream,
                                             )
                                             .await;
                                         });
@@ -805,6 +848,16 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
         (KeyCode::Home, KeyModifiers::NONE) => Some(InputAction::Home),
         (KeyCode::End, KeyModifiers::NONE) => Some(InputAction::End),
 
+        // Emacs-style navigation
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => Some(InputAction::Home),
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => Some(InputAction::End),
+
+        // Word navigation
+        (KeyCode::Char('f'), KeyModifiers::ALT) => Some(InputAction::WordForward),
+        (KeyCode::Char('b'), KeyModifiers::ALT) => Some(InputAction::WordBackward),
+        (KeyCode::Left, KeyModifiers::CONTROL) => Some(InputAction::WordBackward),
+        (KeyCode::Right, KeyModifiers::CONTROL) => Some(InputAction::WordForward),
+
         // Scrolling
         (KeyCode::PageUp, _) => Some(InputAction::PageUp),
         (KeyCode::PageDown, _) => Some(InputAction::PageDown),
@@ -820,6 +873,9 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
 
         // Toggle thinking (Ctrl+T)
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(InputAction::ToggleThinking),
+
+        // Hide/show thinking panel (Ctrl+H)
+        (KeyCode::Char('h'), KeyModifiers::CONTROL) => Some(InputAction::HideThinking),
 
         // Characters (only when not streaming)
         (KeyCode::Char(c), KeyModifiers::NONE) if !is_streaming => Some(InputAction::Char(c)),
@@ -905,6 +961,7 @@ async fn run_streaming_completion(
     execution_context: ExecutionContext,
     chunker_config: ChunkerConfig,
     original_query: String,
+    no_stream: bool,
 ) {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -946,7 +1003,165 @@ async fn run_streaming_completion(
 
         request = request.with_tools(tools_registry.definitions());
 
-        // Stream the response
+        // Non-streaming mode: use complete() instead of stream()
+        if no_stream {
+            let response = match provider.complete(request).await {
+                Ok(r) => r,
+                Err(e) => {
+                    execution_context.reset().await;
+                    let _ = tx
+                        .send(StreamEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            };
+
+            let content = response.message.content.to_string_lossy();
+            let tool_calls = response.message.tool_calls.clone();
+            let output_bytes = content.len();
+
+            // Send byte counts for this iteration
+            let _ = tx
+                .send(StreamEvent::ByteCount {
+                    input_bytes,
+                    output_bytes,
+                })
+                .await;
+
+            // Send content as a single delta (for TUI display)
+            if !content.is_empty() {
+                let _ = tx.send(StreamEvent::ContentDelta(content.clone())).await;
+            }
+
+            // Handle tool calls if any
+            if !tool_calls.is_empty() {
+                // Send tool call events
+                for tool_call in &tool_calls {
+                    let _ = tx
+                        .send(StreamEvent::ToolCallStart {
+                            id: tool_call.id.clone(),
+                            name: tool_call.name.clone(),
+                        })
+                        .await;
+                }
+
+                // Add assistant message with tool calls
+                let assistant_msg =
+                    Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+                messages.push(assistant_msg.clone());
+
+                // Send session update for the assistant message with tool calls
+                let _ = tx
+                    .send(StreamEvent::SessionUpdate {
+                        messages: vec![assistant_msg],
+                    })
+                    .await;
+
+                // Execute tools
+                for tool_call in &tool_calls {
+                    execution_context.push_tool(&tool_call.name).await;
+                    let _ = tx
+                        .send(StreamEvent::ToolExecuting {
+                            name: tool_call.name.clone(),
+                        })
+                        .await;
+                }
+
+                // Create futures for each tool execution
+                let mut futures: FuturesUnordered<_> = tool_calls
+                    .iter()
+                    .map(|tool_call| {
+                        let registry = tools_registry.clone();
+                        let tool_call_id = tool_call.id.clone();
+                        let tool_name = tool_call.name.clone();
+                        let arguments = tool_call.arguments.clone();
+
+                        async move {
+                            let result = if let Some(tool) = registry.get(&tool_name) {
+                                match tool.execute(arguments).await {
+                                    Ok(output) => ToolExecutionResult {
+                                        tool_call_id: tool_call_id.clone(),
+                                        content: if output.is_error {
+                                            format!("Error: {}", output.content)
+                                        } else {
+                                            output.content
+                                        },
+                                        is_error: output.is_error,
+                                    },
+                                    Err(e) => ToolExecutionResult {
+                                        tool_call_id: tool_call_id.clone(),
+                                        content: format!("Error executing tool: {}", e),
+                                        is_error: true,
+                                    },
+                                }
+                            } else {
+                                ToolExecutionResult {
+                                    tool_call_id: tool_call_id.clone(),
+                                    content: format!("Error: Unknown tool '{}'", tool_name),
+                                    is_error: true,
+                                }
+                            };
+                            (tool_name, result)
+                        }
+                    })
+                    .collect();
+
+                // Stream results as they complete
+                let mut tool_result_messages = Vec::new();
+                while let Some((tool_name, mut result)) = futures.next().await {
+                    // Apply chunking if needed
+                    if !result.is_error && chunk_processor.should_chunk(&result.content) {
+                        if let Ok(processed) = chunk_processor
+                            .process_large_content(&result.content, Some(&original_query))
+                            .await
+                        {
+                            result.content = processed;
+                        }
+                    }
+
+                    // Pop the tool context
+                    execution_context.pop().await;
+
+                    // Send completion event immediately
+                    let _ = tx
+                        .send(StreamEvent::ToolComplete {
+                            id: result.tool_call_id.clone(),
+                            name: tool_name,
+                            result_len: result.content.len(),
+                            is_error: result.is_error,
+                        })
+                        .await;
+
+                    let tool_msg = Message::tool_result(&result.tool_call_id, &result.content);
+                    messages.push(tool_msg.clone());
+                    tool_result_messages.push(tool_msg);
+                }
+
+                // Send session update for tool results
+                let _ = tx
+                    .send(StreamEvent::SessionUpdate {
+                        messages: tool_result_messages,
+                    })
+                    .await;
+
+                // Continue to next iteration
+                continue;
+            }
+
+            // No tool calls, we're done
+            execution_context.reset().await;
+            let _ = tx
+                .send(StreamEvent::Done {
+                    usage: Some(response.usage),
+                    content: content.clone(),
+                })
+                .await;
+            return;
+        }
+
+        // Streaming mode: use stream()
         let mut stream = match provider.stream(request).await {
             Ok(s) => s,
             Err(e) => {

@@ -157,7 +157,13 @@ impl Widget for StatusBar<'_> {
 
         // Streaming state indicator
         match self.streaming_state {
-            StreamingState::Idle => {}
+            StreamingState::Idle => {
+                spans.push(Span::styled(" ", style_dim));
+                spans.push(Span::styled(
+                    "Waiting for input...",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                ));
+            }
             StreamingState::Asking => {
                 spans.push(Span::styled(" ", style_dim));
                 spans.push(Span::styled("Asking...", style_waiting));
