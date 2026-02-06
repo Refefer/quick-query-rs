@@ -1521,6 +1521,185 @@ impl Tool for CreateDirectoryTool {
 }
 
 // =============================================================================
+// Remove File Tool
+// =============================================================================
+
+pub struct RemoveFileTool {
+    config: FileSystemConfig,
+}
+
+impl RemoveFileTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoveFileArgs {
+    path: String,
+}
+
+#[async_trait]
+impl Tool for RemoveFileTool {
+    fn name(&self) -> &str {
+        "rm_file"
+    }
+
+    fn description(&self) -> &str {
+        "Remove a file"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new().add_property(
+                "path",
+                PropertySchema::string("Path to the file to remove"),
+                true,
+            ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool("rm_file", "Write operations are disabled"));
+        }
+
+        let args: RemoveFileArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("rm_file", format!("Invalid arguments: {}", e)))?;
+
+        let path = self.config.resolve_path(&args.path)?;
+
+        if !path.exists() {
+            return Err(Error::tool(
+                "rm_file",
+                format!("Path '{}' does not exist", args.path),
+            ));
+        }
+
+        if !path.is_file() {
+            return Err(Error::tool(
+                "rm_file",
+                format!(
+                    "Path '{}' is not a file (use rm_directory for directories)",
+                    args.path
+                ),
+            ));
+        }
+
+        fs::remove_file(&path)
+            .await
+            .map_err(|e| Error::tool("rm_file", format!("Failed to remove file: {}", e)))?;
+
+        Ok(ToolOutput::success(format!(
+            "Successfully removed file '{}'",
+            args.path
+        )))
+    }
+}
+
+// =============================================================================
+// Remove Directory Tool
+// =============================================================================
+
+pub struct RemoveDirectoryTool {
+    config: FileSystemConfig,
+}
+
+impl RemoveDirectoryTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoveDirectoryArgs {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+#[async_trait]
+impl Tool for RemoveDirectoryTool {
+    fn name(&self) -> &str {
+        "rm_directory"
+    }
+
+    fn description(&self) -> &str {
+        "Remove a directory"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property(
+                    "path",
+                    PropertySchema::string("Path to the directory to remove"),
+                    true,
+                )
+                .add_property(
+                    "recursive",
+                    PropertySchema::boolean(
+                        "Remove directory contents recursively (default: false)",
+                    ),
+                    false,
+                ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool(
+                "rm_directory",
+                "Write operations are disabled",
+            ));
+        }
+
+        let args: RemoveDirectoryArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("rm_directory", format!("Invalid arguments: {}", e)))?;
+
+        let path = self.config.resolve_path(&args.path)?;
+
+        if !path.exists() {
+            return Err(Error::tool(
+                "rm_directory",
+                format!("Path '{}' does not exist", args.path),
+            ));
+        }
+
+        if !path.is_dir() {
+            return Err(Error::tool(
+                "rm_directory",
+                format!(
+                    "Path '{}' is not a directory (use rm_file for files)",
+                    args.path
+                ),
+            ));
+        }
+
+        if args.recursive {
+            fs::remove_dir_all(&path).await.map_err(|e| {
+                Error::tool(
+                    "rm_directory",
+                    format!("Failed to remove directory: {}", e),
+                )
+            })?;
+        } else {
+            fs::remove_dir(&path).await.map_err(|e| {
+                Error::tool(
+                    "rm_directory",
+                    format!("Failed to remove directory: {}", e),
+                )
+            })?;
+        }
+
+        Ok(ToolOutput::success(format!(
+            "Successfully removed directory '{}'",
+            args.path
+        )))
+    }
+}
+
+// =============================================================================
 // Factory functions
 // =============================================================================
 
@@ -1539,7 +1718,9 @@ pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
         tools.push(Box::new(WriteFileTool::new(config.clone())));
         tools.push(Box::new(EditFileTool::new(config.clone())));
         tools.push(Box::new(MoveFileTool::new(config.clone())));
-        tools.push(Box::new(CreateDirectoryTool::new(config)));
+        tools.push(Box::new(CreateDirectoryTool::new(config.clone())));
+        tools.push(Box::new(RemoveFileTool::new(config.clone())));
+        tools.push(Box::new(RemoveDirectoryTool::new(config)));
     }
 
     tools
@@ -1558,7 +1739,9 @@ pub fn create_filesystem_tools_arc(config: FileSystemConfig) -> Vec<Arc<dyn Tool
         tools.push(Arc::new(WriteFileTool::new(config.clone())));
         tools.push(Arc::new(EditFileTool::new(config.clone())));
         tools.push(Arc::new(MoveFileTool::new(config.clone())));
-        tools.push(Arc::new(CreateDirectoryTool::new(config)));
+        tools.push(Arc::new(CreateDirectoryTool::new(config.clone())));
+        tools.push(Arc::new(RemoveFileTool::new(config.clone())));
+        tools.push(Arc::new(RemoveDirectoryTool::new(config)));
     }
 
     tools
@@ -2664,5 +2847,221 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("outside allowed root"));
+    }
+
+    // =========================================================================
+    // Remove File Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_rm_file_basic() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("to_remove.txt");
+        std::fs::write(&file_path, "delete me").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "to_remove.txt"}))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Successfully removed file"));
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_rm_file_not_found() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "nonexistent.txt"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist")
+                || err.to_string().contains("Invalid path")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rm_file_is_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("a_dir")).unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "a_dir"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("is not a file"));
+    }
+
+    #[tokio::test]
+    async fn test_rm_file_write_disabled() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path());
+        let tool = RemoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "file.txt"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_rm_file_path_traversal() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "../outside_root"}))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Remove Directory Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_rm_directory_basic() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("empty_dir")).unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "empty_dir"}))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Successfully removed directory"));
+        assert!(!dir.path().join("empty_dir").exists());
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory_recursive() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("parent/child")).unwrap();
+        std::fs::write(dir.path().join("parent/child/file.txt"), "nested").unwrap();
+        std::fs::write(dir.path().join("parent/top.txt"), "top level").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "parent", "recursive": true}))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(!dir.path().join("parent").exists());
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory_non_empty_not_recursive() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("non_empty")).unwrap();
+        std::fs::write(dir.path().join("non_empty/file.txt"), "content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "non_empty"}))
+            .await;
+
+        assert!(result.is_err());
+        // Directory should still exist
+        assert!(dir.path().join("non_empty").exists());
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory_not_found() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "nonexistent_dir"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist")
+                || err.to_string().contains("Invalid path")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory_is_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a_file.txt"), "content").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "a_file.txt"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("is not a directory"));
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory_write_disabled() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("some_dir")).unwrap();
+
+        let config = FileSystemConfig::new(dir.path());
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "some_dir"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory_path_traversal() {
+        let dir = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = RemoveDirectoryTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "../outside_root"}))
+            .await;
+
+        assert!(result.is_err());
     }
 }

@@ -68,6 +68,15 @@ The user sees messages immediately while you continue working. This builds trust
 - inform_user({"message": "Found 3 highly-rated options - investigating each..."})
 - inform_user({"message": "Note: most sources recommend against the approach you mentioned..."})
 
+## Avoiding Redundant Tool Calls
+NEVER call the same tool multiple times when a single call would suffice.
+
+**web_search:** Never search for the same or very similar query twice - rephrase and combine.
+  BAD:  web_search("rust error handling") + web_search("rust error handling best practices")
+  GOOD: web_search("rust error handling best practices")
+
+**fetch_webpage:** Never fetch the same URL twice - use the results you already have.
+
 ## Anti-patterns to Avoid
 - Don't over-research simple questions - one good search is often enough
 - Don't copy-paste content - synthesize and explain

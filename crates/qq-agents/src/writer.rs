@@ -79,6 +79,13 @@ The user sees messages immediately while you continue working. This builds trust
 - inform_user({"message": "Writing the Getting Started section with a practical example..."})
 - inform_user({"message": "README complete. Moving on to API reference docs..."})
 
+## Avoiding Redundant Tool Calls
+NEVER call the same tool multiple times when a single call would suffice. Before making a tool call, check if you already have the information from a previous call.
+
+**find_files:** Use extensions=["md", "txt", "rst"] instead of separate calls per extension.
+**search_files:** Use regex alternation: search_files(pattern="(README|CHANGELOG|LICENSE)")
+**read_file:** Never re-read a file you already read in this session.
+
 ## Anti-patterns to Avoid
 - NEVER write docs without reading the code/content you're documenting
 - Don't use jargon without explaining it (unless audience is experts)

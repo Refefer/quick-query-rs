@@ -34,6 +34,8 @@ You implement features like "Add input validation to the login form" or "Refacto
 - `write_file`: Create new files (use only when creating, not modifying)
 - `move_file`: Move or rename files and directories (useful for refactoring)
 - `create_directory`: Create new directories (with recursive parent creation)
+- `rm_file`: Remove a file
+- `rm_directory`: Remove a directory (supports recursive deletion)
 
 ## Tool Usage Guidelines
 - ALWAYS use `edit_file` for modifying existing files (more precise, shows diff)
@@ -70,12 +72,31 @@ The user sees messages immediately while you continue working. This builds trust
 - inform_user({"message": "Updating auth.rs, then propagating changes to 2 dependent files..."})
 - inform_user({"message": "Step 3 complete: validation logic added. Proceeding to step 4..."})
 
+## Avoiding Redundant Tool Calls
+NEVER call the same tool multiple times when a single call would suffice. Before making a tool call, check if you already have the information from a previous call.
+
+**find_files consolidation:**
+- Use `extensions` array instead of multiple calls:
+  BAD:  find_files(extensions=["rs"]) + find_files(extensions=["toml"])
+  GOOD: find_files(extensions=["rs", "toml"])
+- Search broadly then filter mentally, rather than making many narrow searches
+
+**search_files consolidation:**
+- Use regex alternation instead of multiple searches:
+  BAD:  search_files(pattern="struct Config") + search_files(pattern="impl Config")
+  GOOD: search_files(pattern="(struct|impl) Config")
+
+**read_file efficiency:**
+- Never re-read a file you already read in this session
+- Use `grep` to extract specific information: read_file(path="lib.rs", grep="pub fn")
+
 ## Anti-patterns to Avoid
 - NEVER write code without first reading related existing code
 - Don't invent new patterns when the codebase has established ones
 - Don't over-engineer - implement what was asked
 - Don't leave placeholder code or TODOs
-- Don't make unrelated "improvements" while you're there"#;
+- Don't make unrelated "improvements" while you're there
+- Don't call the same tool with the same arguments twice - use results you already have"#;
 
 pub struct CoderAgent;
 
@@ -97,7 +118,7 @@ const TOOL_DESCRIPTION: &str = concat!(
     "  - New features implemented\n",
     "  - Bugs fixed\n",
     "  - Code refactored\n",
-    "  - Files created or modified\n\n",
+    "  - Files created, modified, or deleted\n\n",
     "IMPORTANT: Give it a GOAL describing what you want built or changed, not step-by-step instructions.\n\n",
     "Examples:\n",
     "  - 'Add input validation to src/components/LoginForm.tsx - email must be valid format, password min 8 chars'\n",
@@ -127,7 +148,7 @@ impl InternalAgent for CoderAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "edit_file", "write_file", "move_file", "create_directory", "find_files", "search_files"]
+        &["read_file", "edit_file", "write_file", "move_file", "create_directory", "rm_file", "rm_directory", "find_files", "search_files"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -136,6 +157,8 @@ impl InternalAgent for CoderAgent {
         limits.insert("edit_file".to_string(), 50);
         limits.insert("move_file".to_string(), 20);
         limits.insert("create_directory".to_string(), 10);
+        limits.insert("rm_file".to_string(), 20);
+        limits.insert("rm_directory".to_string(), 10);
         limits.insert("find_files".to_string(), 10);
         Some(limits)
     }
@@ -164,6 +187,8 @@ mod tests {
         assert!(agent.tool_names().contains(&"write_file"));
         assert!(agent.tool_names().contains(&"move_file"));
         assert!(agent.tool_names().contains(&"create_directory"));
+        assert!(agent.tool_names().contains(&"rm_file"));
+        assert!(agent.tool_names().contains(&"rm_directory"));
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
     }
@@ -176,6 +201,8 @@ mod tests {
         assert_eq!(limits.get("edit_file"), Some(&50));
         assert_eq!(limits.get("move_file"), Some(&20));
         assert_eq!(limits.get("create_directory"), Some(&10));
+        assert_eq!(limits.get("rm_file"), Some(&20));
+        assert_eq!(limits.get("rm_directory"), Some(&10));
         assert_eq!(limits.get("find_files"), Some(&10));
     }
 }
