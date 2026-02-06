@@ -723,20 +723,10 @@ pub async fn run_tui(
     execution_context: ExecutionContext,
     chunker_config: ChunkerConfig,
     event_bus: Option<AgentEventBus>,
+    debug_logger: Option<Arc<DebugLogger>>,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
-
-    // Set up debug logger if requested (log_file takes precedence over deprecated debug_file)
-    let log_path = cli.log_file.as_ref().or(cli.debug_file.as_ref());
-    let debug_logger: Option<Arc<DebugLogger>> = if let Some(path) = log_path {
-        match DebugLogger::new(path) {
-            Ok(logger) => Some(Arc::new(logger)),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
 
     // Initialize terminal with mouse capture enabled
     enable_raw_mode()?;
@@ -753,6 +743,14 @@ pub async fn run_tui(
     // Create chat session
     let mut session = ChatSession::new(system_prompt)
         .with_provider(Arc::clone(&provider));
+
+    // Log conversation start
+    if let Some(ref logger) = debug_logger {
+        logger.log_conversation_start(
+            session.system_prompt.as_deref(),
+            provider.default_model(),
+        );
+    }
 
     // Create TUI app
     let mut app = TuiApp::new(&profile_name, &primary_agent, execution_context.clone());
@@ -950,6 +948,11 @@ pub async fn run_tui(
                                     } else {
                                         // Regular message - start completion
                                         session.add_user_message(&input);
+
+                                        // Log user message
+                                        if let Some(ref logger) = debug_logger {
+                                            logger.log_user_message(&input);
+                                        }
 
                                         // Compact context if needed before building messages
                                         session.compact_if_needed().await;
@@ -1285,6 +1288,11 @@ async fn run_streaming_completion(
             let tool_calls = response.message.tool_calls.clone();
             let output_bytes = content.len();
 
+            // Log assistant response
+            if let Some(ref logger) = debug_logger {
+                logger.log_assistant_response(&content, None, tool_calls.len());
+            }
+
             // Send byte counts for this iteration
             let _ = tx
                 .send(StreamEvent::ByteCount {
@@ -1300,7 +1308,7 @@ async fn run_streaming_completion(
 
             // Handle tool calls if any
             if !tool_calls.is_empty() {
-                // Send tool call events
+                // Send tool call events and log full tool calls
                 for tool_call in &tool_calls {
                     let _ = tx
                         .send(StreamEvent::ToolCallStart {
@@ -1308,7 +1316,15 @@ async fn run_streaming_completion(
                             name: tool_call.name.clone(),
                         })
                         .await;
+                    if let Some(ref logger) = debug_logger {
+                        logger.log_tool_call_full(&tool_call.id, &tool_call.name, &tool_call.arguments);
+                    }
                 }
+
+                // Build tool_call_id → tool_name map for result logging
+                let id_to_name: std::collections::HashMap<String, String> = tool_calls.iter()
+                    .map(|tc| (tc.id.clone(), tc.name.clone()))
+                    .collect();
 
                 // Add assistant message with tool calls
                 let assistant_msg =
@@ -1388,6 +1404,12 @@ async fn run_streaming_completion(
 
                     // Pop the tool context
                     execution_context.pop().await;
+
+                    // Log full tool result
+                    if let Some(ref logger) = debug_logger {
+                        let name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
+                        logger.log_tool_result_full(&result.tool_call_id, name, &result.content, result.is_error);
+                    }
 
                     // Send completion event immediately
                     let _ = tx
@@ -1503,6 +1525,11 @@ async fn run_streaming_completion(
                                 })
                                 .await;
 
+                            // Log assistant response
+                            if let Some(ref logger) = debug_logger {
+                                logger.log_assistant_response(&content, None, tool_calls.len());
+                            }
+
                             if tool_calls.is_empty() {
                                 // No tool calls - we're done, send final content for session
                                 execution_context.reset().await;
@@ -1566,6 +1593,18 @@ async fn run_streaming_completion(
 
         // Handle tool calls
         if !tool_calls.is_empty() {
+            // Log full tool calls
+            if let Some(ref logger) = debug_logger {
+                for tool_call in &tool_calls {
+                    logger.log_tool_call_full(&tool_call.id, &tool_call.name, &tool_call.arguments);
+                }
+            }
+
+            // Build tool_call_id → tool_name map for result logging
+            let id_to_name: std::collections::HashMap<String, String> = tool_calls.iter()
+                .map(|tc| (tc.id.clone(), tc.name.clone()))
+                .collect();
+
             // Add assistant message with tool calls
             let assistant_msg =
                 Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
@@ -1644,6 +1683,12 @@ async fn run_streaming_completion(
 
                 // Pop the tool context
                 execution_context.pop().await;
+
+                // Log full tool result
+                if let Some(ref logger) = debug_logger {
+                    let name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
+                    logger.log_tool_result_full(&result.tool_call_id, name, &result.content, result.is_error);
+                }
 
                 // Send completion event immediately
                 let _ = tx

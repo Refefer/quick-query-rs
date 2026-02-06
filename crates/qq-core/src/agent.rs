@@ -371,7 +371,15 @@ pub enum AgentProgressEvent {
     ToolComplete {
         agent_name: String,
         tool_name: String,
+        tool_call_id: String,
+        result: String,
         is_error: bool,
+    },
+    /// Assistant response received from LLM.
+    AssistantResponse {
+        agent_name: String,
+        content: String,
+        tool_call_count: usize,
     },
     /// Usage statistics update after an LLM call.
     UsageUpdate {
@@ -570,6 +578,17 @@ impl Agent {
             // Count output bytes (response received)
             let output_bytes = content.len();
 
+            // Emit assistant response event
+            if let Some(ref handler) = progress {
+                handler
+                    .on_progress(AgentProgressEvent::AssistantResponse {
+                        agent_name: agent_name.clone(),
+                        content: content.clone(),
+                        tool_call_count: tool_calls.len(),
+                    })
+                    .await;
+            }
+
             // Emit byte count update
             if let Some(ref handler) = progress {
                 handler
@@ -655,6 +674,8 @@ impl Agent {
                                 .on_progress(AgentProgressEvent::ToolComplete {
                                     agent_name: agent_name.clone(),
                                     tool_name: tool_call.name.clone(),
+                                    tool_call_id: tool_call.id.clone(),
+                                    result: result.clone(),
                                     is_error: true,
                                 })
                                 .await;
@@ -708,6 +729,8 @@ impl Agent {
                             .on_progress(AgentProgressEvent::ToolComplete {
                                 agent_name: agent_name.clone(),
                                 tool_name: tool_call.name.clone(),
+                                tool_call_id: tool_call.id.clone(),
+                                result: result.clone(),
                                 is_error,
                             })
                             .await;

@@ -627,6 +627,7 @@ pub async fn run_chat(
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
     chunker_config: ChunkerConfig,
     event_bus: AgentEventBus,
+    debug_logger: Option<Arc<DebugLogger>>,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -641,23 +642,6 @@ pub async fn run_chat(
             }
         }
     });
-
-    // Set up debug logger if requested (log_file takes precedence over deprecated debug_file)
-    let log_path = cli.log_file.as_ref().or(cli.debug_file.as_ref());
-    let debug_logger: Option<Arc<DebugLogger>> = if let Some(path) = log_path {
-        match DebugLogger::new(path) {
-            Ok(logger) => {
-                tracing::info!(path = %path.display(), "Writing structured debug log");
-                Some(Arc::new(logger))
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create debug log");
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     // Set up readline with history
     let config = Config::builder()
@@ -675,6 +659,14 @@ pub async fn run_chat(
 
     let mut session = ChatSession::new(system_prompt)
         .with_provider(Arc::clone(&provider));
+
+    // Log conversation start
+    if let Some(ref logger) = debug_logger {
+        logger.log_conversation_start(
+            session.system_prompt.as_deref(),
+            model.as_deref(),
+        );
+    }
 
     loop {
         // Print hint line before prompt
@@ -794,6 +786,11 @@ pub async fn run_chat(
                         }
 
                         session.add_user_message(&text);
+
+                        // Log user message
+                        if let Some(ref logger) = debug_logger {
+                            logger.log_user_message(&text);
+                        }
 
                         // Run completion loop
                         match run_completion(
@@ -919,6 +916,7 @@ async fn run_completion(
                     tool_calls.len(),
                     if tool_calls.is_empty() { "stop" } else { "tool_calls" },
                 );
+                logger.log_assistant_response(&content, None, tool_calls.len());
             }
 
             // Handle tool calls if any
@@ -948,8 +946,14 @@ async fn run_completion(
                     if let Some(logger) = debug_logger {
                         let args_preview = format_tool_args(&tool_call.arguments);
                         logger.log_tool_call(&tool_call.name, &args_preview);
+                        logger.log_tool_call_full(&tool_call.id, &tool_call.name, &tool_call.arguments);
                     }
                 }
+
+                // Build tool_call_id → tool_name map for result logging
+                let id_to_name: std::collections::HashMap<String, String> = tool_calls.iter()
+                    .map(|tc| (tc.id.clone(), tc.name.clone()))
+                    .collect();
 
                 let results = execute_tools_parallel_with_chunker(
                     tools_registry,
@@ -970,6 +974,8 @@ async fn run_completion(
                     // Log tool result
                     if let Some(logger) = debug_logger {
                         logger.log_tool_result(&result.tool_call_id, result.content.len(), result.is_error);
+                        let tool_name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
+                        logger.log_tool_result_full(&result.tool_call_id, tool_name, &result.content, result.is_error);
                     }
 
                     session.add_tool_result(&result.tool_call_id, &result.content);
@@ -1081,6 +1087,8 @@ async fn run_completion(
                 tool_calls.len(),
                 if tool_calls.is_empty() { "stop" } else { "tool_calls" },
             );
+            let thinking = if in_thinking { Some(thinking_renderer.content()) } else { None };
+            logger.log_assistant_response(&content, thinking, tool_calls.len());
         }
 
         // Note: thinking_renderer content is displayed but NEVER stored in messages
@@ -1107,8 +1115,14 @@ async fn run_completion(
                 if let Some(logger) = debug_logger {
                     let args_preview = format_tool_args(&tool_call.arguments);
                     logger.log_tool_call(&tool_call.name, &args_preview);
+                    logger.log_tool_call_full(&tool_call.id, &tool_call.name, &tool_call.arguments);
                 }
             }
+
+            // Build tool_call_id → tool_name map for result logging
+            let id_to_name: std::collections::HashMap<String, String> = tool_calls.iter()
+                .map(|tc| (tc.id.clone(), tc.name.clone()))
+                .collect();
 
             let results = execute_tools_parallel_with_chunker(
                 tools_registry,
@@ -1134,6 +1148,8 @@ async fn run_completion(
                 // Log tool result
                 if let Some(logger) = debug_logger {
                     logger.log_tool_result(&result.tool_call_id, result.content.len(), result.is_error);
+                    let tool_name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
+                    logger.log_tool_result_full(&result.tool_call_id, tool_name, &result.content, result.is_error);
                 }
 
                 session.add_tool_result(&result.tool_call_id, &result.content);

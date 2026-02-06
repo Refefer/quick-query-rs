@@ -10,6 +10,8 @@ use tokio::sync::broadcast;
 
 use qq_core::{AgentProgressEvent, AgentProgressHandler, Usage};
 
+use crate::debug_log::DebugLogger;
+
 /// Events emitted by agents for TUI consumption.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -88,6 +90,7 @@ impl From<AgentProgressEvent> for AgentEvent {
                 agent_name,
                 tool_name,
                 is_error,
+                ..
             } => AgentEvent::ToolComplete {
                 agent_name,
                 tool_name,
@@ -105,6 +108,10 @@ impl From<AgentProgressEvent> for AgentEvent {
                 input_bytes,
                 output_bytes,
             },
+            // AssistantResponse is only used for debug logging; never broadcast
+            AgentProgressEvent::AssistantResponse { .. } => {
+                unreachable!("AssistantResponse is filtered before broadcast")
+            }
         }
     }
 }
@@ -116,13 +123,20 @@ impl From<AgentProgressEvent> for AgentEvent {
 #[derive(Clone)]
 pub struct AgentEventBus {
     tx: broadcast::Sender<AgentEvent>,
+    debug_logger: Option<Arc<DebugLogger>>,
 }
 
 impl AgentEventBus {
     /// Create a new event bus with the specified channel capacity.
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
+        Self { tx, debug_logger: None }
+    }
+
+    /// Attach a debug logger for trace logging of agent tool calls and responses.
+    pub fn with_debug_logger(mut self, logger: Arc<DebugLogger>) -> Self {
+        self.debug_logger = Some(logger);
+        self
     }
 
     /// Subscribe to events from this bus.
@@ -144,7 +158,7 @@ impl AgentEventBus {
     }
 }
 
-/// Progress handler that publishes events to an event bus.
+/// Progress handler that publishes events to an event bus and optionally logs to DebugLogger.
 struct EventBusProgressHandler {
     bus: AgentEventBus,
 }
@@ -152,6 +166,42 @@ struct EventBusProgressHandler {
 #[async_trait]
 impl AgentProgressHandler for EventBusProgressHandler {
     async fn on_progress(&self, event: AgentProgressEvent) {
-        self.bus.publish(event.into());
+        // Log to DebugLogger before broadcasting (captures full content)
+        if let Some(ref logger) = self.bus.debug_logger {
+            match &event {
+                AgentProgressEvent::ToolStart {
+                    tool_name,
+                    arguments,
+                    ..
+                } => {
+                    // Parse arguments string back to JSON for structured logging
+                    let args_value = serde_json::from_str(arguments)
+                        .unwrap_or(serde_json::Value::String(arguments.clone()));
+                    logger.log_tool_call_full("", tool_name, &args_value);
+                }
+                AgentProgressEvent::ToolComplete {
+                    tool_name,
+                    tool_call_id,
+                    result,
+                    is_error,
+                    ..
+                } => {
+                    logger.log_tool_result_full(tool_call_id, tool_name, result, *is_error);
+                }
+                AgentProgressEvent::AssistantResponse {
+                    content,
+                    tool_call_count,
+                    ..
+                } => {
+                    logger.log_assistant_response(content, None, *tool_call_count);
+                }
+                _ => {}
+            }
+        }
+
+        // Broadcast to TUI/subscribers (skipping events that are only for logging)
+        if !matches!(event, AgentProgressEvent::AssistantResponse { .. }) {
+            self.bus.publish(event.into());
+        }
     }
 }

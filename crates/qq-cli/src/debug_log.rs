@@ -114,6 +114,53 @@ impl DebugLogger {
             context: context.to_string(),
         });
     }
+
+    /// Log a user message with full content.
+    pub fn log_user_message(&self, content: &str) {
+        self.log("user_message", UserMessageEvent {
+            content: content.to_string(),
+            content_length: content.len(),
+        });
+    }
+
+    /// Log an assistant response with full content and optional thinking trace.
+    pub fn log_assistant_response(&self, content: &str, thinking: Option<&str>, tool_call_count: usize) {
+        self.log("assistant_response", AssistantResponseEvent {
+            content: content.to_string(),
+            content_length: content.len(),
+            thinking: thinking.map(|s| s.to_string()),
+            thinking_length: thinking.map(|s| s.len()),
+            tool_call_count,
+        });
+    }
+
+    /// Log a tool call with full un-truncated arguments.
+    pub fn log_tool_call_full(&self, id: &str, name: &str, arguments: &serde_json::Value) {
+        self.log("tool_call_full", ToolCallFullEvent {
+            tool_call_id: id.to_string(),
+            tool_name: name.to_string(),
+            arguments: arguments.clone(),
+        });
+    }
+
+    /// Log a tool result with full content.
+    pub fn log_tool_result_full(&self, tool_call_id: &str, tool_name: &str, content: &str, is_error: bool) {
+        self.log("tool_result_full", ToolResultFullEvent {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: content.to_string(),
+            content_length: content.len(),
+            is_error,
+        });
+    }
+
+    /// Log the start of a conversation session.
+    pub fn log_conversation_start(&self, system_prompt: Option<&str>, model: Option<&str>) {
+        self.log("conversation_start", ConversationStartEvent {
+            system_prompt: system_prompt.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+        });
+    }
 }
 
 #[derive(Serialize)]
@@ -197,6 +244,43 @@ struct IterationEvent {
     context: String,
 }
 
+#[derive(Serialize)]
+struct UserMessageEvent {
+    content: String,
+    content_length: usize,
+}
+
+#[derive(Serialize)]
+struct AssistantResponseEvent {
+    content: String,
+    content_length: usize,
+    thinking: Option<String>,
+    thinking_length: Option<usize>,
+    tool_call_count: usize,
+}
+
+#[derive(Serialize)]
+struct ToolCallFullEvent {
+    tool_call_id: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct ToolResultFullEvent {
+    tool_call_id: String,
+    tool_name: String,
+    content: String,
+    content_length: usize,
+    is_error: bool,
+}
+
+#[derive(Serialize)]
+struct ConversationStartEvent {
+    system_prompt: Option<String>,
+    model: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +314,103 @@ mod tests {
         assert_eq!(summary.content_length, 13);
         assert_eq!(summary.content_preview, "Hello, world!");
         assert!(!summary.has_tool_calls);
+    }
+
+    #[test]
+    fn test_log_user_message() {
+        let temp = NamedTempFile::new().unwrap();
+        let logger = DebugLogger::new(temp.path()).unwrap();
+        logger.log_user_message("What files are in /tmp?");
+        drop(logger);
+
+        let mut content = String::new();
+        File::open(temp.path()).unwrap().read_to_string(&mut content).unwrap();
+
+        assert!(content.contains("\"event_type\":\"user_message\""));
+        assert!(content.contains("What files are in /tmp?"));
+        assert!(content.contains("\"content_length\":23"));
+    }
+
+    #[test]
+    fn test_log_assistant_response_with_thinking() {
+        let temp = NamedTempFile::new().unwrap();
+        let logger = DebugLogger::new(temp.path()).unwrap();
+        logger.log_assistant_response("I'll check that.", Some("The user wants a listing"), 1);
+        drop(logger);
+
+        let mut content = String::new();
+        File::open(temp.path()).unwrap().read_to_string(&mut content).unwrap();
+
+        assert!(content.contains("\"event_type\":\"assistant_response\""));
+        assert!(content.contains("I'll check that."));
+        assert!(content.contains("The user wants a listing"));
+        assert!(content.contains("\"tool_call_count\":1"));
+        assert!(content.contains("\"thinking_length\":24"));
+    }
+
+    #[test]
+    fn test_log_assistant_response_no_thinking() {
+        let temp = NamedTempFile::new().unwrap();
+        let logger = DebugLogger::new(temp.path()).unwrap();
+        logger.log_assistant_response("Here are the files.", None, 0);
+        drop(logger);
+
+        let mut content = String::new();
+        File::open(temp.path()).unwrap().read_to_string(&mut content).unwrap();
+
+        assert!(content.contains("\"event_type\":\"assistant_response\""));
+        assert!(content.contains("\"thinking\":null"));
+        assert!(content.contains("\"thinking_length\":null"));
+    }
+
+    #[test]
+    fn test_log_tool_call_full() {
+        let temp = NamedTempFile::new().unwrap();
+        let logger = DebugLogger::new(temp.path()).unwrap();
+        let args = serde_json::json!({"path": "/tmp", "recursive": true});
+        logger.log_tool_call_full("tc-1", "list_directory", &args);
+        drop(logger);
+
+        let mut content = String::new();
+        File::open(temp.path()).unwrap().read_to_string(&mut content).unwrap();
+
+        assert!(content.contains("\"event_type\":\"tool_call_full\""));
+        assert!(content.contains("\"tool_call_id\":\"tc-1\""));
+        assert!(content.contains("\"tool_name\":\"list_directory\""));
+        assert!(content.contains("\"/tmp\""));
+        assert!(content.contains("\"recursive\":true"));
+    }
+
+    #[test]
+    fn test_log_tool_result_full() {
+        let temp = NamedTempFile::new().unwrap();
+        let logger = DebugLogger::new(temp.path()).unwrap();
+        logger.log_tool_result_full("tc-1", "list_directory", "file1.txt\nfile2.txt", false);
+        drop(logger);
+
+        let mut content = String::new();
+        File::open(temp.path()).unwrap().read_to_string(&mut content).unwrap();
+
+        assert!(content.contains("\"event_type\":\"tool_result_full\""));
+        assert!(content.contains("\"tool_call_id\":\"tc-1\""));
+        assert!(content.contains("\"tool_name\":\"list_directory\""));
+        assert!(content.contains("file1.txt"));
+        assert!(content.contains("\"content_length\":19"));
+        assert!(content.contains("\"is_error\":false"));
+    }
+
+    #[test]
+    fn test_log_conversation_start() {
+        let temp = NamedTempFile::new().unwrap();
+        let logger = DebugLogger::new(temp.path()).unwrap();
+        logger.log_conversation_start(Some("You are helpful"), Some("gpt-4o"));
+        drop(logger);
+
+        let mut content = String::new();
+        File::open(temp.path()).unwrap().read_to_string(&mut content).unwrap();
+
+        assert!(content.contains("\"event_type\":\"conversation_start\""));
+        assert!(content.contains("You are helpful"));
+        assert!(content.contains("gpt-4o"));
     }
 }

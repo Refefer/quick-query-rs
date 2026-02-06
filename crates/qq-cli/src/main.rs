@@ -101,7 +101,7 @@ pub struct Cli {
     #[arg(short, long)]
     pub debug: bool,
 
-    /// Write logs to file (JSON format)
+    /// Write conversation trace and debug logs to file (JSON-lines format)
     #[arg(long)]
     pub log_file: Option<std::path::PathBuf>,
 
@@ -446,8 +446,28 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Determine whether to use TUI mode (needed early for event bus decision)
     let use_tui = cli.tui && !cli.no_tui && atty::is(atty::Stream::Stdout);
 
+    // Set up debug logger if requested (log_file takes precedence over deprecated debug_file)
+    let log_path = cli.log_file.as_ref().or(cli.debug_file.as_ref());
+    let debug_logger: Option<Arc<debug_log::DebugLogger>> = if let Some(path) = log_path {
+        match debug_log::DebugLogger::new(path) {
+            Ok(logger) => {
+                tracing::info!(path = %path.display(), "Writing structured debug log");
+                Some(Arc::new(logger))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create debug log");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create event bus for agent progress reporting (used in both TUI and readline modes)
-    let event_bus = AgentEventBus::new(256);
+    let mut event_bus = AgentEventBus::new(256);
+    if let Some(ref logger) = debug_logger {
+        event_bus = event_bus.with_debug_logger(Arc::clone(logger));
+    }
 
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
@@ -520,6 +540,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             execution_context,
             chunker_config,
             Some(event_bus),
+            debug_logger,
         )
         .await
     } else {
@@ -534,6 +555,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             agent_executor,
             chunker_config,
             event_bus,
+            debug_logger,
         )
         .await
     }
