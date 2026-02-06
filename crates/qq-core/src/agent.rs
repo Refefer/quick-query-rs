@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::error::Error;
-use crate::message::{Message, StreamChunk, Usage};
+use crate::message::{Message, Role, StreamChunk, Usage};
 use crate::provider::{CompletionRequest, Provider};
 use crate::tool::ToolRegistry;
 
@@ -25,10 +25,176 @@ use crate::tool::ToolRegistry;
 /// continuation logic) can generate meaningful summaries.
 #[derive(Debug)]
 pub enum AgentRunResult {
-    /// Agent completed successfully with a final response.
-    Success(String),
+    /// Agent completed successfully with a final response and conversation messages.
+    Success {
+        content: String,
+        messages: Vec<Message>,
+    },
     /// Agent hit the max iterations limit. Contains the full message history.
     MaxIterationsExceeded { messages: Vec<Message> },
+}
+
+/// Metadata about an agent instance's execution history.
+#[derive(Debug, Clone, Default)]
+pub struct AgentInstanceMetadata {
+    pub call_count: u32,
+    pub total_tool_calls: u32,
+}
+
+/// Stored state for a single agent instance (keyed by scope path).
+#[derive(Debug, Clone)]
+pub struct AgentInstanceState {
+    pub messages: Vec<Message>,
+    pub metadata: AgentInstanceMetadata,
+}
+
+impl AgentInstanceState {
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            metadata: AgentInstanceMetadata::default(),
+        }
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.messages.iter().map(|m| m.byte_count()).sum()
+    }
+
+    /// Trim oldest messages to fit within byte budget.
+    /// Uses find_safe_trim_point to avoid orphaning tool results.
+    pub fn trim_to_budget(&mut self, max_bytes: usize) {
+        while self.total_bytes() > max_bytes && !self.messages.is_empty() {
+            let remove_count = find_safe_trim_point(&self.messages);
+            if remove_count == 0 {
+                break;
+            }
+            self.messages.drain(..remove_count);
+        }
+    }
+}
+
+impl Default for AgentInstanceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Default byte budget per agent instance (200KB).
+pub const DEFAULT_MAX_INSTANCE_BYTES: usize = 200_000;
+
+/// Central memory store for all scoped agent instances.
+/// Keyed by scope path strings like "chat/explore", "chat/coder/explore".
+#[derive(Debug, Clone)]
+pub struct AgentMemory {
+    instances: Arc<RwLock<HashMap<String, AgentInstanceState>>>,
+    max_instance_bytes: usize,
+}
+
+impl AgentMemory {
+    pub fn new() -> Self {
+        Self {
+            instances: Arc::new(RwLock::new(HashMap::new())),
+            max_instance_bytes: DEFAULT_MAX_INSTANCE_BYTES,
+        }
+    }
+
+    pub fn with_max_instance_bytes(max_bytes: usize) -> Self {
+        Self {
+            instances: Arc::new(RwLock::new(HashMap::new())),
+            max_instance_bytes: max_bytes,
+        }
+    }
+
+    /// Clone stored messages for a scope (or empty if none).
+    pub async fn get_messages(&self, scope: &str) -> Vec<Message> {
+        let instances = self.instances.read().await;
+        instances
+            .get(scope)
+            .map(|s| s.messages.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get metadata for a scope.
+    pub async fn get_metadata(&self, scope: &str) -> AgentInstanceMetadata {
+        let instances = self.instances.read().await;
+        instances
+            .get(scope)
+            .map(|s| s.metadata.clone())
+            .unwrap_or_default()
+    }
+
+    /// Store messages for a scope, incrementing metadata and trimming to budget.
+    pub async fn store_messages(&self, scope: &str, messages: Vec<Message>, tool_calls: u32) {
+        let mut instances = self.instances.write().await;
+        let state = instances
+            .entry(scope.to_string())
+            .or_insert_with(AgentInstanceState::new);
+        state.messages = messages;
+        state.metadata.call_count += 1;
+        state.metadata.total_tool_calls += tool_calls;
+        state.trim_to_budget(self.max_instance_bytes);
+    }
+
+    /// Remove a single scope's instance.
+    pub async fn clear_scope(&self, scope: &str) {
+        let mut instances = self.instances.write().await;
+        instances.remove(scope);
+    }
+
+    /// Remove all instances (for /reset).
+    pub async fn clear_all(&self) {
+        let mut instances = self.instances.write().await;
+        instances.clear();
+    }
+
+    /// Get diagnostics: (scope, bytes, call_count) for each instance.
+    pub async fn diagnostics(&self) -> Vec<(String, usize, u32)> {
+        let instances = self.instances.read().await;
+        let mut result: Vec<_> = instances
+            .iter()
+            .map(|(scope, state)| {
+                (scope.clone(), state.total_bytes(), state.metadata.call_count)
+            })
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+}
+
+impl Default for AgentMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Find the number of leading messages that can be safely removed
+/// without breaking an assistant-with-tool-calls / tool-result sequence.
+fn find_safe_trim_point(messages: &[Message]) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    // Start at index 1 and walk forward to find the first safe boundary
+    for i in 1..messages.len() {
+        let msg = &messages[i];
+
+        // If this message is a tool result, we're inside a sequence — keep scanning
+        if msg.tool_call_id.is_some() {
+            continue;
+        }
+
+        // If this message is an assistant with tool_calls, the results follow it.
+        // This is the start of a new sequence — safe to trim before it.
+        if msg.role == Role::Assistant && !msg.tool_calls.is_empty() {
+            return i;
+        }
+
+        // Any other message type (user, plain assistant) is a safe boundary.
+        return i;
+    }
+
+    // Couldn't find a safe point (entire history is one tool sequence)
+    0
 }
 
 /// Unique identifier for an agent.
@@ -475,7 +641,7 @@ impl Agent {
         context: Vec<Message>,
     ) -> Result<String, Error> {
         match Self::run_once_with_progress(provider, tools, config, context, None).await? {
-            AgentRunResult::Success(s) => Ok(s),
+            AgentRunResult::Success { content, .. } => Ok(content),
             AgentRunResult::MaxIterationsExceeded { .. } => {
                 Err(Error::Unknown("Agent exceeded max iterations".into()))
             }
@@ -509,12 +675,7 @@ impl Agent {
             "Agent run_once starting"
         );
 
-        // Assertion: agent context should be minimal (typically just the task)
-        debug_assert!(
-            context.len() <= 2,
-            "Agent context should be minimal (task only), got {} messages",
-            context.len()
-        );
+        tracing::trace!(agent = %config.id, context_messages = context.len(), "Agent context");
 
         // Split into base (system prompt + initial context) and loop-accumulated messages.
         // This avoids cloning the growing loop_messages into base on every iteration.
@@ -749,7 +910,10 @@ impl Agent {
                 response_len = content.len(),
                 "Agent completed successfully"
             );
-            return Ok(AgentRunResult::Success(content));
+            return Ok(AgentRunResult::Success {
+                content,
+                messages: loop_messages,
+            });
         }
 
         // Combine base + loop messages for the full conversation history

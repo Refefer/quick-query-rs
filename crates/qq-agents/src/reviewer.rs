@@ -75,7 +75,12 @@ NEVER call the same tool multiple times when a single call would suffice. Before
 - Don't just say "this is bad" - explain why and how to fix
 - Don't review without understanding context
 - Don't miss the forest for the trees - consider overall design
-- Don't be harsh - be constructive and educational"#;
+- Don't be harsh - be constructive and educational
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct ReviewerAgent;
 

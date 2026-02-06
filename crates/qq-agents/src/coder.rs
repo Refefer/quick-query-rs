@@ -96,7 +96,12 @@ NEVER call the same tool multiple times when a single call would suffice. Before
 - Don't over-engineer - implement what was asked
 - Don't leave placeholder code or TODOs
 - Don't make unrelated "improvements" while you're there
-- Don't call the same tool with the same arguments twice - use results you already have"#;
+- Don't call the same tool with the same arguments twice - use results you already have
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct CoderAgent;
 

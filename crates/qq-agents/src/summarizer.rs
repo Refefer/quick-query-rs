@@ -53,7 +53,12 @@ The user sees messages immediately while you continue working. This builds trust
 - Don't lose important caveats or conditions
 - Don't be so brief you lose meaning
 - Don't be so verbose you defeat the purpose
-- Don't editorialize or add interpretation"#;
+- Don't editorialize or add interpretation
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct SummarizerAgent;
 

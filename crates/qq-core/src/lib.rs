@@ -13,8 +13,9 @@ pub mod task;
 pub mod tool;
 
 pub use agent::{
-    Agent, AgentChannel, AgentConfig, AgentId, AgentMessage, AgentProgressEvent,
-    AgentProgressHandler, AgentRegistry, AgentRunResult, AgentSender,
+    Agent, AgentChannel, AgentConfig, AgentId, AgentInstanceMetadata, AgentInstanceState,
+    AgentMemory, AgentMessage, AgentProgressEvent, AgentProgressHandler, AgentRegistry,
+    AgentRunResult, AgentSender, DEFAULT_MAX_INSTANCE_BYTES,
 };
 pub use error::Error;
 pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags};

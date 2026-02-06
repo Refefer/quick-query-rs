@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use qq_core::{AgentConfig, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
+use qq_core::{AgentConfig, AgentMemory, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
 use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType};
 use crate::agents::continuation::{execute_with_continuation, AgentExecutionResult, ContinuationConfig};
@@ -43,6 +43,10 @@ pub struct InternalAgentTool {
     execution_context: Option<ExecutionContext>,
     /// Event bus for progress reporting
     event_bus: Option<AgentEventBus>,
+    /// Scoped agent memory for persistent instance state
+    agent_memory: Option<AgentMemory>,
+    /// Scope path for this tool (e.g., "chat" at depth 0)
+    scope: String,
 }
 
 impl InternalAgentTool {
@@ -56,6 +60,8 @@ impl InternalAgentTool {
         max_depth: u32,
         execution_context: Option<ExecutionContext>,
         event_bus: Option<AgentEventBus>,
+        agent_memory: Option<AgentMemory>,
+        scope: String,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -70,6 +76,8 @@ impl InternalAgentTool {
             max_depth,
             execution_context,
             event_bus,
+            agent_memory,
+            scope,
         }
     }
 
@@ -78,6 +86,8 @@ impl InternalAgentTool {
 #[derive(Deserialize)]
 struct AgentArgs {
     task: String,
+    #[serde(default)]
+    new_instance: bool,
 }
 
 #[async_trait]
@@ -106,6 +116,13 @@ impl Tool for InternalAgentTool {
                     "task",
                     PropertySchema::string(task_description),
                     true,
+                )
+                .add_property(
+                    "new_instance",
+                    PropertySchema::boolean(
+                        "Start with a fresh context, discarding previous conversation history. Default: false (reuses history from prior calls)."
+                    ).with_default(serde_json::Value::Bool(false)),
+                    false,
                 ),
         )
     }
@@ -118,6 +135,22 @@ impl Tool for InternalAgentTool {
         if let Some(ref ctx) = self.execution_context {
             ctx.push_agent(self.agent.name()).await;
         }
+
+        let child_scope = format!("{}/{}", self.scope, self.agent.name());
+
+        // Clear scope if fresh instance requested
+        if args.new_instance {
+            if let Some(ref memory) = self.agent_memory {
+                memory.clear_scope(&child_scope).await;
+            }
+        }
+
+        // Load prior conversation history
+        let prior_history = if let Some(ref memory) = self.agent_memory {
+            memory.get_messages(&child_scope).await
+        } else {
+            Vec::new()
+        };
 
         // Build tools for this agent: start with base tools it needs
         let mut agent_tools = self.base_tools.subset_from_strs(self.agent.tool_names());
@@ -134,6 +167,8 @@ impl Tool for InternalAgentTool {
                 self.max_depth,
                 self.execution_context.clone(),
                 self.event_bus.clone(),
+                self.agent_memory.clone(),
+                child_scope.clone(),
             );
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
@@ -174,7 +209,7 @@ impl Tool for InternalAgentTool {
 
         // Use continuation wrapper for execution
         let continuation_config = ContinuationConfig::default();
-        let result = match execute_with_continuation(
+        let result = execute_with_continuation(
             Arc::clone(&self.provider),
             agent_tools,
             config,
@@ -182,13 +217,33 @@ impl Tool for InternalAgentTool {
             progress,
             continuation_config,
             self.event_bus.as_ref(),
+            prior_history,
         )
-        .await
-        {
-            AgentExecutionResult::Success(result) => Ok(ToolOutput::success(result)),
+        .await;
+
+        // Store results back to memory
+        match &result {
+            AgentExecutionResult::Success { messages, .. }
+            | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
+                if let Some(ref memory) = self.agent_memory {
+                    let tool_calls: u32 = messages
+                        .iter()
+                        .map(|m| m.tool_calls.len() as u32)
+                        .sum();
+                    memory
+                        .store_messages(&child_scope, messages.clone(), tool_calls)
+                        .await;
+                }
+            }
+            AgentExecutionResult::Error(_) => {} // don't store on error
+        }
+
+        let output = match result {
+            AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
             AgentExecutionResult::MaxContinuationsReached {
                 partial_result,
                 continuations,
+                ..
             } => Ok(ToolOutput::success(format!(
                 "Task partially completed after {} continuations.\n\n{}",
                 continuations, partial_result
@@ -203,7 +258,7 @@ impl Tool for InternalAgentTool {
             ctx.pop().await;
         }
 
-        result
+        output
     }
 }
 
@@ -231,6 +286,10 @@ pub struct ExternalAgentTool {
     execution_context: Option<ExecutionContext>,
     /// Event bus for progress reporting
     event_bus: Option<AgentEventBus>,
+    /// Scoped agent memory for persistent instance state
+    agent_memory: Option<AgentMemory>,
+    /// Scope path for this tool
+    scope: String,
 }
 
 impl ExternalAgentTool {
@@ -245,6 +304,8 @@ impl ExternalAgentTool {
         max_depth: u32,
         execution_context: Option<ExecutionContext>,
         event_bus: Option<AgentEventBus>,
+        agent_memory: Option<AgentMemory>,
+        scope: String,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -260,6 +321,8 @@ impl ExternalAgentTool {
             max_depth,
             execution_context,
             event_bus,
+            agent_memory,
+            scope,
         }
     }
 
@@ -282,6 +345,13 @@ impl Tool for ExternalAgentTool {
                     "task",
                     PropertySchema::string("The task or question. Be specific about what you want to know or accomplish."),
                     true,
+                )
+                .add_property(
+                    "new_instance",
+                    PropertySchema::boolean(
+                        "Start with a fresh context, discarding previous conversation history. Default: false (reuses history from prior calls)."
+                    ).with_default(serde_json::Value::Bool(false)),
+                    false,
                 ),
         )
     }
@@ -294,6 +364,22 @@ impl Tool for ExternalAgentTool {
         if let Some(ref ctx) = self.execution_context {
             ctx.push_agent(&self.agent_name).await;
         }
+
+        let child_scope = format!("{}/{}", self.scope, self.agent_name);
+
+        // Clear scope if fresh instance requested
+        if args.new_instance {
+            if let Some(ref memory) = self.agent_memory {
+                memory.clear_scope(&child_scope).await;
+            }
+        }
+
+        // Load prior conversation history
+        let prior_history = if let Some(ref memory) = self.agent_memory {
+            memory.get_messages(&child_scope).await
+        } else {
+            Vec::new()
+        };
 
         // Build tools for this agent: start with base tools it needs
         let mut agent_tools = self.base_tools.subset(&self.definition.tools);
@@ -310,6 +396,8 @@ impl Tool for ExternalAgentTool {
                 self.max_depth,
                 self.execution_context.clone(),
                 self.event_bus.clone(),
+                self.agent_memory.clone(),
+                child_scope.clone(),
             );
             for tool in nested_agent_tools {
                 agent_tools.register(tool);
@@ -340,7 +428,7 @@ impl Tool for ExternalAgentTool {
 
         // Use continuation wrapper for execution
         let continuation_config = ContinuationConfig::default();
-        let result = match execute_with_continuation(
+        let result = execute_with_continuation(
             Arc::clone(&self.provider),
             agent_tools,
             config,
@@ -348,13 +436,33 @@ impl Tool for ExternalAgentTool {
             progress,
             continuation_config,
             self.event_bus.as_ref(),
+            prior_history,
         )
-        .await
-        {
-            AgentExecutionResult::Success(result) => Ok(ToolOutput::success(result)),
+        .await;
+
+        // Store results back to memory
+        match &result {
+            AgentExecutionResult::Success { messages, .. }
+            | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
+                if let Some(ref memory) = self.agent_memory {
+                    let tool_calls: u32 = messages
+                        .iter()
+                        .map(|m| m.tool_calls.len() as u32)
+                        .sum();
+                    memory
+                        .store_messages(&child_scope, messages.clone(), tool_calls)
+                        .await;
+                }
+            }
+            AgentExecutionResult::Error(_) => {}
+        }
+
+        let output = match result {
+            AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
             AgentExecutionResult::MaxContinuationsReached {
                 partial_result,
                 continuations,
+                ..
             } => Ok(ToolOutput::success(format!(
                 "Task partially completed after {} continuations.\n\n{}",
                 continuations, partial_result
@@ -369,7 +477,7 @@ impl Tool for ExternalAgentTool {
             ctx.pop().await;
         }
 
-        result
+        output
     }
 }
 
@@ -386,6 +494,8 @@ impl Tool for ExternalAgentTool {
 /// * `max_depth` - Maximum allowed nesting depth
 /// * `execution_context` - Optional context for tracking execution stack
 /// * `event_bus` - Optional event bus for progress reporting
+/// * `agent_memory` - Optional scoped agent memory for persistent instance state
+/// * `scope` - Current scope path (e.g., "chat", "chat/coder")
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
     provider: Arc<dyn Provider>,
@@ -395,6 +505,8 @@ pub fn create_agent_tools(
     max_depth: u32,
     execution_context: Option<ExecutionContext>,
     event_bus: Option<AgentEventBus>,
+    agent_memory: Option<AgentMemory>,
+    scope: String,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -421,6 +533,8 @@ pub fn create_agent_tools(
                 max_depth,
                 execution_context.clone(),
                 event_bus.clone(),
+                agent_memory.clone(),
+                scope.clone(),
             )));
         }
     }
@@ -439,6 +553,8 @@ pub fn create_agent_tools(
                 max_depth,
                 execution_context.clone(),
                 event_bus.clone(),
+                agent_memory.clone(),
+                scope.clone(),
             )));
         }
     }

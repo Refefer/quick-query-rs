@@ -126,7 +126,12 @@ The user sees messages immediately while you continue working. This builds trust
 - Don't create plans that require re-planning every step
 - Don't assume context the executor won't have
 - **NEVER plan steps that require bash/shell commands** - quick-query cannot execute them
-- Don't assume agents can run `npm`, `cargo`, `pip`, `git`, or any CLI tools"#;
+- Don't assume agents can run `npm`, `cargo`, `pip`, `git`, or any CLI tools
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct PlannerAgent;
 

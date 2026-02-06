@@ -188,11 +188,15 @@ fn budget_messages_for_summary(messages: &[Message], max_bytes: usize) -> Vec<Me
 /// Result of an agent execution with potential continuation.
 pub enum AgentExecutionResult {
     /// Task completed successfully
-    Success(String),
+    Success {
+        content: String,
+        messages: Vec<Message>,
+    },
     /// Max continuations reached, partial result
     MaxContinuationsReached {
         partial_result: String,
         continuations: u32,
+        messages: Vec<Message>,
     },
     /// Error during execution
     Error(qq_core::Error),
@@ -210,19 +214,24 @@ pub async fn execute_with_continuation(
     progress: Option<Arc<dyn AgentProgressHandler>>,
     continuation_config: ContinuationConfig,
     event_bus: Option<&AgentEventBus>,
+    prior_history: Vec<Message>,
 ) -> AgentExecutionResult {
     if !continuation_config.enabled {
         // No continuation - just run once
+        let mut context = prior_history;
+        context.push(Message::user(original_task.as_str()));
         return match Agent::run_once_with_progress(
             provider,
             tools,
             config,
-            vec![Message::user(original_task.as_str())],
+            context,
             progress,
         )
         .await
         {
-            Ok(AgentRunResult::Success(result)) => AgentExecutionResult::Success(result),
+            Ok(AgentRunResult::Success { content, messages }) => {
+                AgentExecutionResult::Success { content, messages }
+            }
             Ok(AgentRunResult::MaxIterationsExceeded { .. }) => {
                 AgentExecutionResult::Error(qq_core::Error::Unknown(
                     "Agent exceeded max iterations".into(),
@@ -233,7 +242,8 @@ pub async fn execute_with_continuation(
     }
 
     let mut continuation_count = 0u32;
-    let mut current_context = vec![Message::user(original_task.as_str())];
+    let mut current_context = prior_history;
+    current_context.push(Message::user(original_task.as_str()));
     let mut last_partial_result = String::new();
 
     loop {
@@ -247,16 +257,18 @@ pub async fn execute_with_continuation(
         .await;
 
         match result {
-            Ok(AgentRunResult::Success(final_result)) => {
-                return AgentExecutionResult::Success(final_result);
+            Ok(AgentRunResult::Success { content, messages }) => {
+                return AgentExecutionResult::Success { content, messages };
             }
             Ok(AgentRunResult::MaxIterationsExceeded { messages: agent_messages }) => {
+
                 // Max turns exceeded - check if we can continue
                 continuation_count += 1;
                 if continuation_count > continuation_config.max_continuations {
                     return AgentExecutionResult::MaxContinuationsReached {
                         partial_result: last_partial_result,
                         continuations: continuation_count - 1,
+                        messages: agent_messages,
                     };
                 }
 

@@ -13,8 +13,8 @@ use tokio::sync::RwLock;
 use futures::StreamExt;
 
 use qq_core::{
-    execute_tools_parallel_with_chunker, ChunkProcessor, ChunkerConfig, CompletionRequest,
-    Message, Provider, Role, StreamChunk, ToolCall, ToolRegistry,
+    execute_tools_parallel_with_chunker, AgentMemory, ChunkProcessor, ChunkerConfig,
+    CompletionRequest, Message, Provider, Role, StreamChunk, ToolCall, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -320,6 +320,7 @@ pub fn format_bytes(bytes: usize) -> String {
 enum ChatCommand {
     Quit,
     Clear,
+    Reset,
     History,
     Help,
     Tools,
@@ -364,6 +365,7 @@ fn parse_command(input: &str) -> ChatCommand {
     match cmd.as_str() {
         "/quit" | "/exit" | "/q" => ChatCommand::Quit,
         "/clear" | "/c" => ChatCommand::Clear,
+        "/reset" => ChatCommand::Reset,
         "/history" | "/h" => ChatCommand::History,
         "/help" | "/?" => ChatCommand::Help,
         "/tools" | "/t" => ChatCommand::Tools,
@@ -403,6 +405,7 @@ Chat Commands:
   /help, /?           Show this help message
   /quit, /exit        Exit chat mode
   /clear, /c          Clear conversation history
+  /reset              Clear conversation + all agent memory
   /history, /h        Show message count
   /memory, /mem       Show memory usage diagnostics
   /tools, /t          List available tools
@@ -628,6 +631,7 @@ pub async fn run_chat(
     chunker_config: ChunkerConfig,
     event_bus: AgentEventBus,
     debug_logger: Option<Arc<DebugLogger>>,
+    agent_memory: AgentMemory,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -686,6 +690,11 @@ pub async fn run_chat(
                         session.clear();
                         println!("Conversation cleared.\n");
                     }
+                    ChatCommand::Reset => {
+                        session.clear();
+                        agent_memory.clear_all().await;
+                        println!("Session reset (conversation + agent memory cleared).\n");
+                    }
                     ChatCommand::History => {
                         println!(
                             "Messages in conversation: {} ({} user + assistant turns)\n",
@@ -704,6 +713,19 @@ pub async fn run_chat(
                         println!("  Compactions:    {}", session.compaction_count);
                         if let Some(rss) = get_rss_bytes() {
                             println!("  Process RSS:    {}", format_bytes(rss));
+                        }
+
+                        let diagnostics = agent_memory.diagnostics().await;
+                        if !diagnostics.is_empty() {
+                            println!("\n  Agent Instance Memory:");
+                            for (scope, bytes, calls) in &diagnostics {
+                                println!(
+                                    "    {:<30} {}  ({} calls)",
+                                    scope,
+                                    format_bytes(*bytes),
+                                    calls
+                                );
+                            }
                         }
                         println!();
                     }

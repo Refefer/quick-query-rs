@@ -92,7 +92,12 @@ NEVER call the same tool multiple times when a single call would suffice. Before
 - Don't read every file - be strategic
 - Don't give up after one search - try alternative patterns
 - Don't describe what you're going to do - just do it and report findings
-- Don't call find_files or search_files with the same or overlapping arguments - consolidate into one call"#;
+- Don't call find_files or search_files with the same or overlapping arguments - consolidate into one call
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct ExploreAgent;
 

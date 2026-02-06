@@ -25,6 +25,7 @@ pub use execution_context::ExecutionContext;
 
 use agents::{create_agent_tools, AgentExecutor, InformUserTool, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
+use qq_core::AgentMemory;
 
 /// Log level for tracing output
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -469,6 +470,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         event_bus = event_bus.with_debug_logger(Arc::clone(logger));
     }
 
+    // Create scoped agent memory for persistent instance state
+    let agent_memory = AgentMemory::new();
+
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
         if disable_agents {
@@ -485,6 +489,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             DEFAULT_MAX_AGENT_DEPTH,
             Some(execution_context.clone()),
             Some(event_bus.clone()),
+            Some(agent_memory.clone()),
+            "chat".to_string(),
         )
     };
 
@@ -541,6 +547,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             chunker_config,
             Some(event_bus),
             debug_logger,
+            agent_memory.clone(),
         )
         .await
     } else {
@@ -556,6 +563,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             chunker_config,
             event_bus,
             debug_logger,
+            agent_memory.clone(),
         )
         .await
     }

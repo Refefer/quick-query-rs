@@ -93,7 +93,12 @@ NEVER call the same tool multiple times when a single call would suffice. Before
 - Don't bury important information - lead with what matters
 - Don't write walls of text - use headings, lists, code blocks
 - Don't be verbose when concise will do
-- Don't add placeholder content or TODOs"#;
+- Don't add placeholder content or TODOs
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct WriterAgent;
 

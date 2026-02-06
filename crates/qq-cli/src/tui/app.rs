@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tui_input::Input;
 
 use qq_core::{
-    ChunkProcessor, ChunkerConfig, CompletionRequest, Message, Provider, StreamChunk, ToolCall,
-    ToolExecutionResult, ToolRegistry,
+    AgentMemory, ChunkProcessor, ChunkerConfig, CompletionRequest, Message, Provider, StreamChunk,
+    ToolCall, ToolExecutionResult, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -724,6 +724,7 @@ pub async fn run_tui(
     chunker_config: ChunkerConfig,
     event_bus: Option<AgentEventBus>,
     debug_logger: Option<Arc<DebugLogger>>,
+    agent_memory: AgentMemory,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -885,6 +886,7 @@ pub async fn run_tui(
                                             }
                                             TuiCommand::Reset => {
                                                 session.clear();
+                                                agent_memory.clear_all().await;
                                                 app.content.clear();
                                                 app.thinking_content.clear();
                                                 app.tool_notifications.clear();
@@ -941,6 +943,22 @@ pub async fn run_tui(
                                                         crate::chat::format_bytes(rss)
                                                     ));
                                                 }
+
+                                                let diagnostics = agent_memory.diagnostics().await;
+                                                if !diagnostics.is_empty() {
+                                                    info.push_str("\n\n**Agent Instance Memory**\n\n\
+                                                        | Scope | Size | Calls |\n\
+                                                        |-------|------|-------|\n");
+                                                    for (scope, bytes, calls) in &diagnostics {
+                                                        info.push_str(&format!(
+                                                            "| {} | {} | {} |\n",
+                                                            scope,
+                                                            crate::chat::format_bytes(*bytes),
+                                                            calls
+                                                        ));
+                                                    }
+                                                }
+
                                                 app.content = info;
                                                 app.content_dirty = true;
                                             }

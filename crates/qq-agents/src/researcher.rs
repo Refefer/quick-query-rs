@@ -81,7 +81,12 @@ NEVER call the same tool multiple times when a single call would suffice.
 - Don't over-research simple questions - one good search is often enough
 - Don't copy-paste content - synthesize and explain
 - Don't ignore conflicting information - acknowledge it
-- Don't provide URLs you haven't verified contain relevant information"#;
+- Don't provide URLs you haven't verified contain relevant information
+
+## Persistent Context
+You may be called multiple times within the same session. If your conversation
+includes messages from a previous invocation, build on that context — do not
+repeat work already done. Focus on the new task while leveraging prior findings."#;
 
 pub struct ResearcherAgent;
 
