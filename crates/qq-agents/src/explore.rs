@@ -97,7 +97,13 @@ NEVER call the same tool multiple times when a single call would suffice. Before
 ## Persistent Context
 You may be called multiple times within the same session. If your conversation
 includes messages from a previous invocation, build on that context — do not
-repeat work already done. Focus on the new task while leveraging prior findings."#;
+repeat work already done. Focus on the new task while leveraging prior findings.
+
+**Agent memory also persists**: When you delegate to other agents (e.g., coder),
+those agents retain their conversation history across your calls too. If you called
+an agent earlier, calling it again will let it build on what it already discovered.
+Pass `new_instance: true` only when prior context would be misleading for a
+completely unrelated task."#;
 
 pub struct ExploreAgent;
 
