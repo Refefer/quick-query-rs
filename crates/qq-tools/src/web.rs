@@ -75,6 +75,10 @@ impl Tool for FetchWebpageTool {
         "Fetch a webpage and extract its text content. Optionally filter by CSS selector."
     }
 
+    fn is_blocking(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()

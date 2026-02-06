@@ -603,9 +603,9 @@ impl Agent {
                 let msg = Message::assistant_with_tool_calls("", tool_calls.clone());
                 loop_messages.push(msg);
 
-                // Execute tools
+                // Check tool limits and partition into executable vs limit-exceeded
+                let mut executable_calls = Vec::new();
                 for tool_call in &tool_calls {
-                    // Check tool limits before executing
                     let limit_exceeded = if let Some(ref limits) = config.tool_limits {
                         if let Some(&limit) = limits.get(&tool_call.name) {
                             let count = tool_call_counts.get(&tool_call.name).copied().unwrap_or(0);
@@ -661,13 +661,14 @@ impl Agent {
                         }
 
                         loop_messages.push(Message::tool_result(&tool_call.id, result));
-                        continue;
+                    } else {
+                        *tool_call_counts.entry(tool_call.name.clone()).or_insert(0) += 1;
+                        executable_calls.push(tool_call);
                     }
+                }
 
-                    // Increment tool call count
-                    *tool_call_counts.entry(tool_call.name.clone()).or_insert(0) += 1;
-
-                    // Emit tool start event
+                // Emit tool start events for all executable calls
+                for tool_call in &executable_calls {
                     if let Some(ref handler) = progress {
                         handler
                             .on_progress(AgentProgressEvent::ToolStart {
@@ -683,10 +684,25 @@ impl Agent {
                         tool = %tool_call.name,
                         "Executing tool"
                     );
-                    let result = execute_tool(&tools, tool_call).await;
-                    let is_error = result.starts_with("Error:");
+                }
 
-                    // Emit tool complete event
+                // Execute all tools concurrently
+                let futures: Vec<_> = executable_calls
+                    .iter()
+                    .map(|tool_call| {
+                        let tools_ref = &tools;
+                        async move {
+                            let result = execute_tool(tools_ref, tool_call).await;
+                            let is_error = result.starts_with("Error:");
+                            (tool_call, result, is_error)
+                        }
+                    })
+                    .collect();
+
+                let results = futures::future::join_all(futures).await;
+
+                // Process results and emit completion events
+                for (tool_call, result, is_error) in results {
                     if let Some(ref handler) = progress {
                         handler
                             .on_progress(AgentProgressEvent::ToolComplete {
@@ -1001,11 +1017,11 @@ async fn execute_tool(
     registry: &ToolRegistry,
     tool_call: &crate::message::ToolCall,
 ) -> String {
-    let Some(tool) = registry.get(&tool_call.name) else {
+    let Some(tool) = registry.get_arc(&tool_call.name) else {
         return format!("Error: Unknown tool '{}'", tool_call.name);
     };
 
-    match tool.execute(tool_call.arguments.clone()).await {
+    match crate::tool::execute_tool_dispatch(tool, tool_call.arguments.clone()).await {
         Ok(output) => {
             let content = if output.is_error {
                 format!("Error: {}", output.content)

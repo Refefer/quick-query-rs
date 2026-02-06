@@ -181,6 +181,14 @@ pub trait Tool: Send + Sync {
 
     fn definition(&self) -> ToolDefinition;
 
+    /// Whether this tool performs blocking (CPU-bound or synchronous I/O) work.
+    ///
+    /// When true, `execute_tool_dispatch` routes execution through
+    /// `tokio::task::spawn_blocking` to keep the async executor free.
+    fn is_blocking(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, Error>;
 }
 
@@ -257,6 +265,26 @@ impl ToolRegistry {
     }
 }
 
+/// Execute a tool, routing blocking tools through `spawn_blocking`.
+///
+/// Non-blocking tools run directly on the async executor. Blocking tools
+/// (where `is_blocking()` returns true) are dispatched to a blocking thread
+/// via `tokio::task::spawn_blocking`, using `Handle::block_on` to drive the
+/// async `execute()` method to completion on that thread.
+pub async fn execute_tool_dispatch(
+    tool: Arc<dyn Tool>,
+    arguments: Value,
+) -> Result<ToolOutput, crate::Error> {
+    if tool.is_blocking() {
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || handle.block_on(tool.execute(arguments)))
+            .await
+            .map_err(|e| crate::Error::Unknown(format!("Blocking tool task failed: {}", e)))?
+    } else {
+        tool.execute(arguments).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +320,64 @@ mod tests {
 
         let error = ToolOutput::error("failed");
         assert!(error.is_error);
+    }
+
+    /// A test tool that is non-blocking (default).
+    struct NonBlockingTool;
+
+    #[async_trait]
+    impl Tool for NonBlockingTool {
+        fn name(&self) -> &str { "non_blocking" }
+        fn description(&self) -> &str { "test" }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("non_blocking", "test")
+        }
+        async fn execute(&self, _arguments: Value) -> Result<ToolOutput, crate::Error> {
+            Ok(ToolOutput::success("non_blocking_result"))
+        }
+    }
+
+    /// A test tool that declares itself as blocking.
+    struct BlockingTool;
+
+    #[async_trait]
+    impl Tool for BlockingTool {
+        fn name(&self) -> &str { "blocking" }
+        fn description(&self) -> &str { "test" }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("blocking", "test")
+        }
+        fn is_blocking(&self) -> bool { true }
+        async fn execute(&self, _arguments: Value) -> Result<ToolOutput, crate::Error> {
+            Ok(ToolOutput::success("blocking_result"))
+        }
+    }
+
+    #[test]
+    fn test_is_blocking_default() {
+        let tool = NonBlockingTool;
+        assert!(!tool.is_blocking());
+    }
+
+    #[test]
+    fn test_is_blocking_override() {
+        let tool = BlockingTool;
+        assert!(tool.is_blocking());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_dispatch_non_blocking() {
+        let tool: Arc<dyn Tool> = Arc::new(NonBlockingTool);
+        let result = execute_tool_dispatch(tool, Value::Null).await.unwrap();
+        assert_eq!(result.content, "non_blocking_result");
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_dispatch_blocking() {
+        let tool: Arc<dyn Tool> = Arc::new(BlockingTool);
+        let result = execute_tool_dispatch(tool, Value::Null).await.unwrap();
+        assert_eq!(result.content, "blocking_result");
+        assert!(!result.is_error);
     }
 }

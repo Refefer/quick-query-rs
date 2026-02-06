@@ -354,6 +354,10 @@ impl Tool for ListFilesTool {
         "List files in a directory. Can filter by glob pattern."
     }
 
+    fn is_blocking(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
@@ -470,6 +474,10 @@ impl Tool for FindFilesTool {
 
     fn description(&self) -> &str {
         "Enhanced file discovery with recursive search, gitignore support, and filtering. Returns matching file paths."
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -704,6 +712,10 @@ impl Tool for SearchFilesTool {
         "Search for a regex pattern in files. Returns matching lines with file paths and line numbers."
     }
 
+    fn is_blocking(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
@@ -935,6 +947,10 @@ impl Tool for EditFileTool {
 
     fn description(&self) -> &str {
         "Precision file editing with search/replace and line-based operations. All edits are validated before applying."
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
     }
 
     fn definition(&self) -> ToolDefinition {

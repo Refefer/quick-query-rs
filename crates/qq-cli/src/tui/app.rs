@@ -1344,8 +1344,8 @@ async fn run_streaming_completion(
                         let arguments = tool_call.arguments.clone();
 
                         async move {
-                            let result = if let Some(tool) = registry.get(&tool_name) {
-                                match tool.execute(arguments).await {
+                            let result = if let Some(tool) = registry.get_arc(&tool_name) {
+                                match qq_core::tool::execute_tool_dispatch(tool, arguments).await {
                                     Ok(output) => ToolExecutionResult {
                                         tool_call_id: tool_call_id.clone(),
                                         content: if output.is_error {
@@ -1600,8 +1600,8 @@ async fn run_streaming_completion(
                     let arguments = tool_call.arguments.clone();
 
                     async move {
-                        let result = if let Some(tool) = registry.get(&tool_name) {
-                            match tool.execute(arguments).await {
+                        let result = if let Some(tool) = registry.get_arc(&tool_name) {
+                            match qq_core::tool::execute_tool_dispatch(tool, arguments).await {
                                 Ok(output) => ToolExecutionResult {
                                     tool_call_id: tool_call_id.clone(),
                                     content: if output.is_error {

@@ -350,7 +350,7 @@ pub async fn execute_tools_parallel_with_chunker(
             let arguments = tool_call.arguments.clone();
 
             async move {
-                let Some(tool) = registry.get(&tool_name) else {
+                let Some(tool) = registry.get_arc(&tool_name) else {
                     return ToolExecutionResult {
                         tool_call_id,
                         content: format!("Error: Unknown tool '{}'", tool_name),
@@ -358,7 +358,7 @@ pub async fn execute_tools_parallel_with_chunker(
                     };
                 };
 
-                match tool.execute(arguments).await {
+                match crate::tool::execute_tool_dispatch(tool, arguments).await {
                     Ok(output) => ToolExecutionResult {
                         tool_call_id,
                         content: if output.is_error {
