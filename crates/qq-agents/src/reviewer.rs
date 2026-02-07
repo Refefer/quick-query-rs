@@ -35,58 +35,12 @@ Your response should:
 - Note any positive patterns worth preserving
 - Be specific (file:line when possible)
 
-## Keeping Users Informed
-Use `inform_user` to notify the user about your progress WITHOUT ending your turn.
-The user sees messages immediately while you continue working. This builds trust and transparency.
-
-**When to use inform_user:**
-- When starting review: "Beginning security review of auth.rs..."
-- When you spot issues early: "Found a potential SQL injection risk - investigating..."
-- When the code looks good: "Authentication flow looks solid so far..."
-- When checking dependencies: "Analyzing how this module interacts with user input..."
-- When you find patterns: "This codebase uses prepared statements consistently - good practice..."
-- When severity is clear: "Critical issue found - stopping to document before continuing..."
-- When review scope expands: "This touches 3 other modules - expanding review scope..."
-- **When completing a phase or task in a plan**: "Phase 1 complete: security review done. Moving to Phase 2..."
-
-**Executing plans:** When you are given a multi-step plan, use `inform_user` to report completion of each phase or task, then **keep going** with the next step. Do NOT stop and wait for confirmation between steps — execute the full plan continuously, using `inform_user` to keep the user updated on progress.
-
-**Examples:**
-- inform_user({"message": "Reviewing input validation in the API handlers..."})
-- inform_user({"message": "Spotted potential issue with session handling - documenting..."})
-- inform_user({"message": "Good news - no obvious security issues in the auth flow..."})
-
-## Avoiding Redundant Tool Calls
-NEVER call the same tool multiple times when a single call would suffice. Before making a tool call, check if you already have the information from a previous call.
-
-**find_files consolidation:**
-- Use `extensions` array for multiple file types: find_files(extensions=["rs", "toml", "yaml"])
-- Search broadly once rather than narrowly many times
-
-**search_files consolidation:**
-- Use regex alternation: search_files(pattern="(unsafe|unwrap|expect)")
-
-**read_file efficiency:**
-- Never re-read a file you already read - reference your previous results
-- Use `grep` to scan for patterns: read_file(path="auth.rs", grep="(pub|unsafe|unwrap)")
-
 ## Anti-patterns to Avoid
 - Don't nitpick style when there are real bugs
 - Don't just say "this is bad" - explain why and how to fix
 - Don't review without understanding context
 - Don't miss the forest for the trees - consider overall design
-- Don't be harsh - be constructive and educational
-
-## Persistent Context
-You may be called multiple times within the same session. If your conversation
-includes messages from a previous invocation, build on that context — do not
-repeat work already done. Focus on the new task while leveraging prior findings.
-
-**Agent memory also persists**: When you delegate to other agents (e.g., explore),
-those agents retain their conversation history across your calls too. If you called
-an agent earlier, calling it again will let it build on what it already discovered.
-Pass `new_instance: true` only when prior context would be misleading for a
-completely unrelated task."#;
+- Don't be harsh - be constructive and educational"#;
 
 pub struct ReviewerAgent;
 

@@ -31,40 +31,12 @@ You create summaries like "Summarize this error log focusing on the root cause" 
 - Proportion: Summary length should match content length
 - Clarity: A summary should be easier to understand than the original
 
-## Keeping Users Informed
-Use `inform_user` to notify the user about your progress WITHOUT ending your turn.
-The user sees messages immediately while you continue working. This builds trust and transparency.
-
-**When to use inform_user:**
-- For long content: "This is a lengthy document - analyzing structure first..."
-- When you identify the type: "This appears to be a technical RFC - adjusting summary style..."
-- When you find key sections: "Found the conclusions section - prioritizing this..."
-- When content is complex: "Multiple conflicting viewpoints here - will present both sides..."
-- When you notice patterns: "This log shows a recurring error every 5 minutes..."
-- When something stands out: "Important: the document mentions a critical deadline..."
-
-**Examples:**
-- inform_user({"message": "Analyzing a 50-page document - focusing on executive summary and conclusions..."})
-- inform_user({"message": "Found 3 action items buried in the discussion - highlighting these..."})
-- inform_user({"message": "Note: this transcript has significant disagreement on the timeline..."})
-
 ## Anti-patterns to Avoid
 - Don't just extract the first paragraph
 - Don't lose important caveats or conditions
 - Don't be so brief you lose meaning
 - Don't be so verbose you defeat the purpose
-- Don't editorialize or add interpretation
-
-## Persistent Context
-You may be called multiple times within the same session. If your conversation
-includes messages from a previous invocation, build on that context — do not
-repeat work already done. Focus on the new task while leveraging prior findings.
-
-**Agent memory also persists**: When you delegate to other agents, those agents
-retain their conversation history across your calls too. If you called an agent
-earlier, calling it again will let it build on what it already discovered. Pass
-`new_instance: true` only when prior context would be misleading for a completely
-unrelated task."#;
+- Don't editorialize or add interpretation"#;
 
 pub struct SummarizerAgent;
 

@@ -191,8 +191,19 @@ impl Tool for InternalAgentTool {
             .get_builtin_max_turns(self.agent.name())
             .unwrap_or_else(|| self.agent.max_turns());
 
+        let has_sub_agents = next_depth < self.max_depth;
+        let has_tools = !self.agent.tool_names().is_empty();
+        let has_inform_user = self.event_bus.is_some();
+
+        let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
+            has_tools,
+            has_sub_agents,
+            has_inform_user,
+        });
+        let full_prompt = format!("{}\n\n---\n\n{}", preamble, self.agent.system_prompt());
+
         let mut config = AgentConfig::new(self.agent.name())
-            .with_system_prompt(self.agent.system_prompt())
+            .with_system_prompt(&full_prompt)
             .with_max_turns(max_turns);
 
         // Apply tool limits: config overrides take precedence over hardcoded defaults
@@ -414,8 +425,19 @@ impl Tool for ExternalAgentTool {
 
         let agent_tools = Arc::new(agent_tools);
 
+        let has_sub_agents = next_depth < self.max_depth;
+        let has_tools = !self.definition.tools.is_empty();
+        let has_inform_user = self.event_bus.is_some();
+
+        let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
+            has_tools,
+            has_sub_agents,
+            has_inform_user,
+        });
+        let full_prompt = format!("{}\n\n---\n\n{}", preamble, self.definition.system_prompt);
+
         let mut config = AgentConfig::new(self.agent_name.as_str())
-            .with_system_prompt(&self.definition.system_prompt)
+            .with_system_prompt(&full_prompt)
             .with_max_turns(self.definition.max_turns);
 
         // Apply tool limits if configured for this external agent

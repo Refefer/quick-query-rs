@@ -35,23 +35,6 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"You are a DELEGATION COORDINATOR. Your ON
    - Any constraints or preferences
 4. **Relay results**: Pass the agent's response back to the user
 
-## Agent Memory (IMPORTANT)
-Agents PERSIST their conversation history across calls within the same session.
-When you call the same agent again, it remembers everything from previous calls.
-
-**Leverage this:**
-- Call explore once to map out a project, then call it again with follow-up questions — it already knows the structure
-- Call coder to implement step 1, then call coder again for step 2 — it remembers what it built
-- For multi-step workflows, use the SAME agent type repeatedly rather than re-explaining context
-
-**When to start fresh:**
-- Pass `new_instance: true` if an agent's prior context is irrelevant or misleading for the new task
-- Example: After finishing one feature, start a fresh coder instance for an unrelated feature
-
-**Scope isolation:**
-- Each agent type you call has its own memory (explore and coder don't share context)
-- If you delegate to coder and coder delegates to explore, that's a separate explore instance from one you call directly
-
 ## Handling Plans (IMPORTANT)
 
 When you delegate to planner or create a plan yourself:
@@ -97,22 +80,6 @@ Is the user asking for documentation/writing?
 Is the user asking to summarize content?
   └─ YES → summarizer
 ```
-
-## Keeping Users Informed
-Use `inform_user` to notify the user about what you're doing WITHOUT ending your turn.
-The user sees messages immediately while you continue working. This builds trust and transparency.
-
-**When to use inform_user:**
-- ALWAYS before delegating: "Delegating to researcher for web lookup..."
-- When starting a multi-step workflow: "This will require exploration, then coding. Starting with exploration..."
-- When you learn something relevant: "Found that this project uses async/await patterns throughout..."
-- When plans change: "The explore agent found additional files that need updating..."
-- When waiting on a complex operation: "Coder is implementing the changes across 3 files..."
-
-**Examples:**
-- inform_user({"message": "Delegating to explore to understand the project structure..."})
-- inform_user({"message": "Good news - found existing auth utilities we can reuse..."})
-- inform_user({"message": "This is more complex than expected - delegating to planner first..."})
 
 ## What YOU Can Do Directly
 ONLY these trivial tasks:

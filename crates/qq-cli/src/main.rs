@@ -409,26 +409,32 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         .or_else(|| cli.system.clone())
         .or(settings.system_prompt.clone());
 
+    // Check test mode flags
+    let disable_tools = cli.no_tools || cli.minimal;
+    let disable_agents = cli.no_agents || cli.minimal;
+
     // When using the chat agent, combine the Chat agent's delegation prompt
     // with any user-specified prompt. The Chat agent's prompt ensures proper
     // delegation behavior while the user's prompt can add additional context.
     let system_prompt = if settings.agent == "chat" {
         let chat_agent = ChatAgent::new();
         let base_prompt = chat_agent.system_prompt();
+        let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
+            has_tools: false, // chat delegates everything
+            has_sub_agents: !disable_agents,
+            has_inform_user: true,
+        });
+        let combined = format!("{}\n\n---\n\n{}", preamble, base_prompt);
         match user_system_prompt {
             Some(user_prompt) => Some(format!(
                 "{}\n\n---\n\n## Additional Instructions\n\n{}",
-                base_prompt, user_prompt
+                combined, user_prompt
             )),
-            None => Some(base_prompt.to_string()),
+            None => Some(combined),
         }
     } else {
         user_system_prompt
     };
-
-    // Check test mode flags
-    let disable_tools = cli.no_tools || cli.minimal;
-    let disable_agents = cli.no_agents || cli.minimal;
 
     // Set up base tools (conditionally)
     let base_tools = if disable_tools {

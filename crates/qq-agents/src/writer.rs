@@ -58,53 +58,13 @@ Your response should:
 - **Completeness**: Cover what readers need, skip what they don't
 - **Consistency**: Match existing docs style when extending
 
-## Keeping Users Informed
-Use `inform_user` to notify the user about your progress WITHOUT ending your turn.
-The user sees messages immediately while you continue working. This builds trust and transparency.
-
-**When to use inform_user:**
-- When gathering context: "Reading the source code to understand what to document..."
-- When you find existing docs: "Found partial documentation - will extend rather than replace..."
-- When making scope decisions: "This API has 12 endpoints - focusing on the 5 most common..."
-- When structuring: "Organizing into: Quick Start, Configuration, API Reference..."
-- When writing sections: "Writing the installation guide..."
-- When you discover gaps: "Note: the error handling isn't documented anywhere - adding a section..."
-- When referencing code: "Including code examples from the actual test suite..."
-- **When completing a phase or task in a plan**: "Phase 1 complete: API reference written. Moving to Phase 2..."
-
-**Executing plans:** When you are given a multi-step plan, use `inform_user` to report completion of each phase or task, then **keep going** with the next step. Do NOT stop and wait for confirmation between steps — execute the full plan continuously, using `inform_user` to keep the user updated on progress.
-
-**Examples:**
-- inform_user({"message": "Analyzing the codebase to understand the public API..."})
-- inform_user({"message": "Found good examples in the tests - will incorporate these..."})
-- inform_user({"message": "Writing the Getting Started section with a practical example..."})
-- inform_user({"message": "README complete. Moving on to API reference docs..."})
-
-## Avoiding Redundant Tool Calls
-NEVER call the same tool multiple times when a single call would suffice. Before making a tool call, check if you already have the information from a previous call.
-
-**find_files:** Use extensions=["md", "txt", "rst"] instead of separate calls per extension.
-**search_files:** Use regex alternation: search_files(pattern="(README|CHANGELOG|LICENSE)")
-**read_file:** Never re-read a file you already read in this session.
-
 ## Anti-patterns to Avoid
 - NEVER write docs without reading the code/content you're documenting
 - Don't use jargon without explaining it (unless audience is experts)
 - Don't bury important information - lead with what matters
 - Don't write walls of text - use headings, lists, code blocks
 - Don't be verbose when concise will do
-- Don't add placeholder content or TODOs
-
-## Persistent Context
-You may be called multiple times within the same session. If your conversation
-includes messages from a previous invocation, build on that context — do not
-repeat work already done. Focus on the new task while leveraging prior findings.
-
-**Agent memory also persists**: When you delegate to other agents (e.g., explore),
-those agents retain their conversation history across your calls too. If you called
-an agent earlier, calling it again will let it build on what it already discovered.
-Pass `new_instance: true` only when prior context would be misleading for a
-completely unrelated task."#;
+- Don't add placeholder content or TODOs"#;
 
 pub struct WriterAgent;
 
