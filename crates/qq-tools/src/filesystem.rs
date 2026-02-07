@@ -1441,6 +1441,107 @@ impl Tool for MoveFileTool {
 }
 
 // =============================================================================
+// Copy File Tool
+// =============================================================================
+
+pub struct CopyFileTool {
+    config: FileSystemConfig,
+}
+
+impl CopyFileTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct CopyFileArgs {
+    source: String,
+    destination: String,
+}
+
+#[async_trait]
+impl Tool for CopyFileTool {
+    fn name(&self) -> &str {
+        "copy_file"
+    }
+
+    fn description(&self) -> &str {
+        "Copy a file to a new location"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property(
+                    "source",
+                    PropertySchema::string("Path to the file to copy"),
+                    true,
+                )
+                .add_property(
+                    "destination",
+                    PropertySchema::string("Target path for the copy"),
+                    true,
+                ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool("copy_file", "Write operations are disabled"));
+        }
+
+        let args: CopyFileArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("copy_file", format!("Invalid arguments: {}", e)))?;
+
+        // Resolve source path (must exist and be within root)
+        let source_path = self.config.resolve_path(&args.source)?;
+
+        // Verify source is a file (tokio::fs::copy only works on files)
+        if source_path.is_dir() {
+            return Err(Error::tool(
+                "copy_file",
+                "Source is a directory, not a file",
+            ));
+        }
+
+        // Resolve destination path (may not exist yet)
+        let dest_path = self.config.normalize_path_for_creation(&args.destination)?;
+
+        // Check destination doesn't already exist
+        if dest_path.exists() {
+            return Err(Error::tool(
+                "copy_file",
+                format!("Destination '{}' already exists", args.destination),
+            ));
+        }
+
+        // Check destination parent exists
+        if let Some(parent) = dest_path.parent() {
+            if !parent.exists() {
+                return Err(Error::tool(
+                    "copy_file",
+                    format!(
+                        "Destination parent directory '{}' does not exist",
+                        parent.display()
+                    ),
+                ));
+            }
+        }
+
+        // Perform the copy
+        let bytes_copied = fs::copy(&source_path, &dest_path)
+            .await
+            .map_err(|e| Error::tool("copy_file", format!("Failed to copy: {}", e)))?;
+
+        Ok(ToolOutput::success(format!(
+            "Successfully copied '{}' to '{}' ({} bytes)",
+            args.source, args.destination, bytes_copied
+        )))
+    }
+}
+
+// =============================================================================
 // Create Directory Tool
 // =============================================================================
 
@@ -1755,6 +1856,7 @@ pub fn create_filesystem_tools_arc(config: FileSystemConfig) -> Vec<Arc<dyn Tool
         tools.push(Arc::new(WriteFileTool::new(config.clone())));
         tools.push(Arc::new(EditFileTool::new(config.clone())));
         tools.push(Arc::new(MoveFileTool::new(config.clone())));
+        tools.push(Arc::new(CopyFileTool::new(config.clone())));
         tools.push(Arc::new(CreateDirectoryTool::new(config.clone())));
         tools.push(Arc::new(RemoveFileTool::new(config.clone())));
         tools.push(Arc::new(RemoveDirectoryTool::new(config)));

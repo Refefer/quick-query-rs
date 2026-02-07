@@ -33,6 +33,7 @@ You implement features like "Add input validation to the login form" or "Refacto
   - `replace_lines`: Replace entire line ranges
 - `write_file`: Create new files (use only when creating, not modifying)
 - `move_file`: Move or rename files and directories (useful for refactoring)
+- `copy_file`: Copy a file to a new location
 - `create_directory`: Create new directories (with recursive parent creation)
 - `rm_file`: Remove a file
 - `rm_directory`: Remove a directory (supports recursive deletion)
@@ -108,7 +109,7 @@ impl InternalAgent for CoderAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "edit_file", "write_file", "move_file", "create_directory", "rm_file", "rm_directory", "find_files", "search_files"]
+        &["read_file", "edit_file", "write_file", "move_file", "copy_file", "create_directory", "rm_file", "rm_directory", "find_files", "search_files"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -116,6 +117,7 @@ impl InternalAgent for CoderAgent {
         limits.insert("write_file".to_string(), 20);
         limits.insert("edit_file".to_string(), 50);
         limits.insert("move_file".to_string(), 20);
+        limits.insert("copy_file".to_string(), 20);
         limits.insert("create_directory".to_string(), 10);
         limits.insert("rm_file".to_string(), 20);
         limits.insert("rm_directory".to_string(), 10);
@@ -146,6 +148,7 @@ mod tests {
         assert!(agent.tool_names().contains(&"edit_file"));
         assert!(agent.tool_names().contains(&"write_file"));
         assert!(agent.tool_names().contains(&"move_file"));
+        assert!(agent.tool_names().contains(&"copy_file"));
         assert!(agent.tool_names().contains(&"create_directory"));
         assert!(agent.tool_names().contains(&"rm_file"));
         assert!(agent.tool_names().contains(&"rm_directory"));
@@ -160,6 +163,7 @@ mod tests {
         assert_eq!(limits.get("write_file"), Some(&20));
         assert_eq!(limits.get("edit_file"), Some(&50));
         assert_eq!(limits.get("move_file"), Some(&20));
+        assert_eq!(limits.get("copy_file"), Some(&20));
         assert_eq!(limits.get("create_directory"), Some(&10));
         assert_eq!(limits.get("rm_file"), Some(&20));
         assert_eq!(limits.get("rm_directory"), Some(&10));

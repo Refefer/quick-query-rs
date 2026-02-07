@@ -42,6 +42,7 @@ NEVER assume a destination. If the prompt says "Write a README" without specifyi
 - `read_file`: Understand what you're documenting deeply
 - `write_file`: Create or update content files
 - `edit_file`: Precision editing with search/replace — use when updating specific sections of existing files
+- `copy_file`: Copy a file to a new location
 - `create_directory`: Create directories for organizing documentation
 
 ## Output Expectations
@@ -118,13 +119,14 @@ impl InternalAgent for WriterAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "write_file", "edit_file", "create_directory", "find_files", "search_files"]
+        &["read_file", "write_file", "edit_file", "copy_file", "create_directory", "find_files", "search_files"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
         limits.insert("write_file".to_string(), 10);
         limits.insert("edit_file".to_string(), 10);
+        limits.insert("copy_file".to_string(), 10);
         limits.insert("create_directory".to_string(), 5);
         limits.insert("find_files".to_string(), 10);
         Some(limits)
@@ -152,6 +154,7 @@ mod tests {
         assert!(agent.tool_names().contains(&"read_file"));
         assert!(agent.tool_names().contains(&"write_file"));
         assert!(agent.tool_names().contains(&"edit_file"));
+        assert!(agent.tool_names().contains(&"copy_file"));
         assert!(agent.tool_names().contains(&"create_directory"));
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
@@ -163,6 +166,7 @@ mod tests {
         let limits = agent.tool_limits().expect("writer should have tool limits");
         assert_eq!(limits.get("write_file"), Some(&10));
         assert_eq!(limits.get("edit_file"), Some(&10));
+        assert_eq!(limits.get("copy_file"), Some(&10));
         assert_eq!(limits.get("create_directory"), Some(&5));
         assert_eq!(limits.get("find_files"), Some(&10));
     }
