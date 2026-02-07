@@ -15,7 +15,12 @@ use crate::markdown::create_skin;
 /// that to ratatui Text using ansi-to-tui.
 pub fn markdown_to_text(content: &str, width: Option<usize>) -> Text<'static> {
     let skin = create_skin();
-    let rendered = skin.text(content, width);
+    let processed = if let Some(w) = width {
+        crate::markdown::preprocess_tables(content, w)
+    } else {
+        content.to_string()
+    };
+    let rendered = skin.text(&processed, width);
     let ansi_string = format!("{}", rendered);
 
     ansi_string
