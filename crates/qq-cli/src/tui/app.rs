@@ -201,6 +201,9 @@ pub struct TuiApp {
     // Markdown rendering cache (avoids re-parsing every frame)
     content_cache: Option<ContentCache>,
     content_dirty: bool,
+
+    /// Whether the UI needs to be redrawn (set on any state change, cleared after draw)
+    needs_redraw: bool,
 }
 
 impl Default for TuiApp {
@@ -238,11 +241,13 @@ impl TuiApp {
             streaming_state: StreamingState::Idle,
             content_cache: None,
             content_dirty: true,
+            needs_redraw: true,
         }
     }
 
     /// Reset for a new response (preserves conversation history)
     pub fn start_response(&mut self, user_input: &str) {
+        self.needs_redraw = true;
         // Add separator and user message to existing content
         if !self.content.is_empty() {
             self.content.push('\n');
@@ -275,6 +280,7 @@ impl TuiApp {
 
     /// Handle a stream event
     pub fn handle_stream_event(&mut self, event: StreamEvent) {
+        self.needs_redraw = true;
         match event {
             StreamEvent::Start { model: _ } => {
                 // Connection established, waiting for first token
@@ -378,6 +384,7 @@ impl TuiApp {
 
     /// Handle an agent event from the event bus
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        self.needs_redraw = true;
         match event {
             AgentEvent::IterationStart {
                 agent_name,
@@ -483,6 +490,7 @@ impl TuiApp {
 
     /// Handle input action
     pub fn handle_input_action(&mut self, action: InputAction) {
+        self.needs_redraw = true;
         match action {
             InputAction::Char(c) => {
                 // Insert character at cursor position
@@ -790,32 +798,35 @@ pub async fn run_tui(
     let tick_rate = Duration::from_millis(33); // ~30fps
 
     loop {
-        // Render
-        terminal.draw(|f| {
-            let area = f.area();
+        // Render only when state has changed
+        if app.needs_redraw {
+            terminal.draw(|f| {
+                let area = f.area();
 
-            // Build layout config - must be identical to what ui::render expects
-            let mut layout_config = LayoutConfig::new();
-            let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
-            let thinking_lines = app.thinking_content.line_count() as u16;
-            layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
+                // Build layout config - must be identical to what ui::render expects
+                let mut layout_config = LayoutConfig::new();
+                let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
+                let thinking_lines = app.thinking_content.line_count() as u16;
+                layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
 
-            // Configure input pane based on text wrapping
-            let input_lines = ui::calculate_input_lines(app.input.value(), area.width);
-            layout_config.set_input_lines(input_lines);
+                // Configure input pane based on text wrapping
+                let input_lines = ui::calculate_input_lines(app.input.value(), area.width);
+                layout_config.set_input_lines(input_lines);
 
-            // Compute layout ONCE and use for both scroll dimensions and rendering
-            let layout = layout_config.compute(area);
-            if let Some(&content_rect) = layout.get(&PaneId::Content) {
-                // Update scroll dimensions BEFORE rendering
-                // Subtract 2 for borders
-                let viewport_height = content_rect.height.saturating_sub(2);
-                let content_width = content_rect.width.saturating_sub(2);
-                app.update_scroll_dimensions(viewport_height, content_width);
-            }
+                // Compute layout ONCE and use for both scroll dimensions and rendering
+                let layout = layout_config.compute(area);
+                if let Some(&content_rect) = layout.get(&PaneId::Content) {
+                    // Update scroll dimensions BEFORE rendering
+                    // Subtract 2 for borders
+                    let viewport_height = content_rect.height.saturating_sub(2);
+                    let content_width = content_rect.width.saturating_sub(2);
+                    app.update_scroll_dimensions(viewport_height, content_width);
+                }
 
-            ui::render(&app, f, &layout);
-        })?;
+                ui::render(&app, f, &layout);
+            })?;
+            app.needs_redraw = false;
+        }
 
         // Handle events with timeout for render ticks
         let timeout = if app.is_streaming {
@@ -864,6 +875,7 @@ pub async fn run_tui(
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
+                    app.needs_redraw = true;
                     // Handle help overlay dismissal
                     if app.show_help {
                         app.show_help = false;
@@ -1051,9 +1063,11 @@ pub async fn run_tui(
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             app.scroll.scroll_up(3);
+                            app.needs_redraw = true;
                         }
                         MouseEventKind::ScrollDown => {
                             app.scroll.scroll_down(3);
+                            app.needs_redraw = true;
                         }
                         _ => {
                             // Ignore other mouse events
@@ -1062,6 +1076,7 @@ pub async fn run_tui(
                 }
                 Event::Resize(_, _) => {
                     // Terminal resized - next render will update dimensions
+                    app.needs_redraw = true;
                 }
                 _ => {}
             }
