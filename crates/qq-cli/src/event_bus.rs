@@ -60,6 +60,13 @@ pub enum AgentEvent {
         continuation_number: u32,
         max_continuations: u32,
     },
+    /// A transient error occurred and the LLM call is being retried.
+    Retry {
+        agent_name: String,
+        attempt: u32,
+        max_retries: u32,
+        error: String,
+    },
 }
 
 impl From<AgentProgressEvent> for AgentEvent {
@@ -107,6 +114,17 @@ impl From<AgentProgressEvent> for AgentEvent {
                 agent_name,
                 input_bytes,
                 output_bytes,
+            },
+            AgentProgressEvent::Retry {
+                agent_name,
+                attempt,
+                max_retries,
+                error,
+            } => AgentEvent::Retry {
+                agent_name,
+                attempt,
+                max_retries,
+                error,
             },
             // AssistantResponse is only used for debug logging; never broadcast
             AgentProgressEvent::AssistantResponse { .. } => {

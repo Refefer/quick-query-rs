@@ -91,7 +91,7 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Error::Network(_) | Error::RateLimit(_) | Error::Timeout(_)
+            Error::Network(_) | Error::RateLimit(_) | Error::Timeout(_) | Error::Stream(_)
         )
     }
 
@@ -121,6 +121,7 @@ mod tests {
     fn test_is_retryable() {
         assert!(Error::network("timeout").is_retryable());
         assert!(Error::rate_limit("too many requests").is_retryable());
+        assert!(Error::stream("transport error").is_retryable());
         assert!(!Error::auth("invalid key").is_retryable());
     }
 }

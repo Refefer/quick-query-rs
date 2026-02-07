@@ -560,6 +560,13 @@ pub enum AgentProgressEvent {
         /// Bytes received from the LLM (response)
         output_bytes: usize,
     },
+    /// A transient error occurred and the LLM call is being retried.
+    Retry {
+        agent_name: String,
+        attempt: u32,
+        max_retries: u32,
+        error: String,
+    },
 }
 
 /// Handler for receiving agent progress events.
@@ -717,23 +724,84 @@ impl Agent {
                 "Agent iteration starting"
             );
 
-            // Build request messages by chaining base + loop
-            let request_messages: Vec<Message> = base_messages.iter()
-                .chain(loop_messages.iter())
-                .cloned()
-                .collect();
-
             // Count input bytes (messages being sent)
-            let input_bytes: usize = request_messages.iter().map(|m| m.byte_count()).sum();
-
-            let request = CompletionRequest::new(request_messages)
-                .with_tools(tools.definitions());
+            let input_bytes: usize = base_messages.iter()
+                .chain(loop_messages.iter())
+                .map(|m| m.byte_count())
+                .sum();
 
             // Use streaming if we have a progress handler, otherwise use complete()
-            let (content, tool_calls, usage) = if progress.is_some() {
-                run_streaming_iteration(&provider, &agent_name, request, progress.as_ref()).await?
-            } else {
-                run_complete_iteration(&provider, &config, request).await?
+            // Wrap with retry logic for transient transport/stream errors
+            let (content, tool_calls, usage) = {
+                let mut last_error = None;
+                let mut result = None;
+                for attempt in 0..=MAX_STREAM_RETRIES {
+                    if attempt > 0 {
+                        let delay = INITIAL_RETRY_DELAY * 2u32.pow(attempt - 1);
+                        tracing::warn!(
+                            agent = %config.id,
+                            attempt = attempt,
+                            max_retries = MAX_STREAM_RETRIES,
+                            delay_secs = delay.as_secs(),
+                            "Retrying after transient error"
+                        );
+                        if let Some(ref handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::Retry {
+                                    agent_name: agent_name.clone(),
+                                    attempt,
+                                    max_retries: MAX_STREAM_RETRIES,
+                                    error: last_error
+                                        .as_ref()
+                                        .map(|e: &Error| e.to_string())
+                                        .unwrap_or_default(),
+                                })
+                                .await;
+                        }
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    // Re-build the request for each attempt (need a fresh clone)
+                    let attempt_request = CompletionRequest::new(
+                        base_messages
+                            .iter()
+                            .chain(loop_messages.iter())
+                            .cloned()
+                            .collect(),
+                    )
+                    .with_tools(tools.definitions());
+
+                    let iter_result = if progress.is_some() {
+                        run_streaming_iteration(
+                            &provider,
+                            &agent_name,
+                            attempt_request,
+                            progress.as_ref(),
+                        )
+                        .await
+                    } else {
+                        run_complete_iteration(&provider, &config, attempt_request).await
+                    };
+
+                    match iter_result {
+                        Ok(val) => {
+                            result = Some(val);
+                            break;
+                        }
+                        Err(e) if e.is_retryable() && attempt < MAX_STREAM_RETRIES => {
+                            tracing::warn!(
+                                agent = %config.id,
+                                error = %e,
+                                "Transient error, will retry"
+                            );
+                            last_error = Some(e);
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // Safe: loop either sets result or returns Err
+                result.unwrap()
             };
 
             // Count output bytes (response received)
@@ -1041,6 +1109,12 @@ impl Agent {
 /// Per-chunk inactivity timeout for streaming responses.
 /// If no data is received for this duration, the stream is considered stalled.
 const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Maximum number of retries for transient streaming/transport errors.
+const MAX_STREAM_RETRIES: u32 = 3;
+
+/// Initial retry delay (doubles each attempt: 1s, 2s, 4s).
+const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run a single iteration using streaming (for progress reporting).
 async fn run_streaming_iteration(

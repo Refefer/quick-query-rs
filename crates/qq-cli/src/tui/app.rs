@@ -363,6 +363,16 @@ impl TuiApp {
                 self.session_input_bytes += input_bytes;
                 self.session_output_bytes += output_bytes;
             }
+            StreamEvent::RetryNotice {
+                attempt,
+                max_retries,
+                error,
+            } => {
+                self.status_message = Some(format!(
+                    "Transport error, retrying ({}/{})... {}",
+                    attempt, max_retries, error
+                ));
+            }
         }
     }
 
@@ -451,6 +461,17 @@ impl TuiApp {
                     agent_name, continuation_number, max_continuations
                 ));
                 self.content_dirty = true;
+            }
+            AgentEvent::Retry {
+                agent_name,
+                attempt,
+                max_retries,
+                error,
+            } => {
+                self.status_message = Some(format!(
+                    "{}: Retrying ({}/{}) - {}",
+                    agent_name, attempt, max_retries, error
+                ));
             }
         }
     }
@@ -1204,6 +1225,12 @@ fn print_conversation(content: &str) {
 /// If no data is received for this duration, the stream is considered stalled.
 const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Maximum number of retries for transient streaming/transport errors.
+const MAX_STREAM_RETRIES: u32 = 3;
+
+/// Initial retry delay (doubles each attempt: 1s, 2s, 4s).
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Run streaming completion in a separate task
 async fn run_streaming_completion(
     provider: Arc<dyn Provider>,
@@ -1289,17 +1316,50 @@ async fn run_streaming_completion(
 
         // Non-streaming mode: use complete() instead of stream()
         if no_stream {
-            let response = match provider.complete(request).await {
-                Ok(r) => r,
-                Err(e) => {
-                    execution_context.reset().await;
-                    let _ = tx
-                        .send(StreamEvent::Error {
-                            message: e.to_string(),
-                        })
-                        .await;
-                    return;
+            let response = {
+                let mut last_err = None;
+                let mut resp = None;
+                for attempt in 0..=MAX_STREAM_RETRIES {
+                    if attempt > 0 {
+                        let delay = INITIAL_RETRY_DELAY * 2u32.pow(attempt - 1);
+                        let _ = tx
+                            .send(StreamEvent::RetryNotice {
+                                attempt,
+                                max_retries: MAX_STREAM_RETRIES,
+                                error: last_err
+                                    .as_ref()
+                                    .map(|e: &qq_core::Error| e.to_string())
+                                    .unwrap_or_default(),
+                            })
+                            .await;
+                        tokio::time::sleep(delay).await;
+                    }
+                    match provider.complete(request.clone()).await {
+                        Ok(r) => {
+                            resp = Some(r);
+                            break;
+                        }
+                        Err(e) if e.is_retryable() && attempt < MAX_STREAM_RETRIES => {
+                            tracing::warn!(
+                                attempt = attempt,
+                                error = %e,
+                                "TUI non-stream: transient error, will retry"
+                            );
+                            last_err = Some(e);
+                            continue;
+                        }
+                        Err(e) => {
+                            execution_context.reset().await;
+                            let _ = tx
+                                .send(StreamEvent::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
                 }
+                resp.unwrap()
             };
 
             let content = response.message.content.to_string_lossy();
@@ -1466,132 +1526,179 @@ async fn run_streaming_completion(
             return;
         }
 
-        // Streaming mode: use stream()
-        let mut stream = match provider.stream(request).await {
-            Ok(s) => s,
-            Err(e) => {
-                execution_context.reset().await;
-                let _ = tx
-                    .send(StreamEvent::Error {
-                        message: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-
+        // Streaming mode: use stream() with retry logic for transient errors
+        let mut stream_retries = 0u32;
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None;
         let mut output_bytes: usize = 0;
         let mut cancelled = false;
 
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = cancel_token.cancelled() => {
-                    // Cancellation requested - exit the streaming loop
-                    cancelled = true;
-                    break;
+        'stream_retry: loop {
+            let mut stream = match provider.stream(request.clone()).await {
+                Ok(s) => s,
+                Err(e) if e.is_retryable() && stream_retries < MAX_STREAM_RETRIES => {
+                    stream_retries += 1;
+                    let delay = INITIAL_RETRY_DELAY * 2u32.pow(stream_retries - 1);
+                    tracing::warn!(
+                        attempt = stream_retries,
+                        error = %e,
+                        "TUI stream creation: transient error, will retry"
+                    );
+                    let _ = tx
+                        .send(StreamEvent::RetryNotice {
+                            attempt: stream_retries,
+                            max_retries: MAX_STREAM_RETRIES,
+                            error: e.to_string(),
+                        })
+                        .await;
+                    tokio::time::sleep(delay).await;
+                    continue 'stream_retry;
                 }
+                Err(e) => {
+                    execution_context.reset().await;
+                    let _ = tx
+                        .send(StreamEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            };
 
-                result = tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()) => {
-                    match result {
-                        Ok(Some(Ok(StreamChunk::Start { model }))) => {
-                            let _ = tx.send(StreamEvent::Start { model }).await;
-                        }
-                        Ok(Some(Ok(StreamChunk::ThinkingDelta { content: delta }))) => {
-                            output_bytes += delta.len();
-                            let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
-                        }
-                        Ok(Some(Ok(StreamChunk::Delta { content: delta }))) => {
-                            output_bytes += delta.len();
-                            content.push_str(&delta);
-                            let _ = tx.send(StreamEvent::ContentDelta(delta)).await;
-                        }
-                        Ok(Some(Ok(StreamChunk::ToolCallStart { id, name }))) => {
-                            // Finish pending tool call
-                            if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
-                                let args: serde_json::Value =
-                                    serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
-                                tool_calls.push(ToolCall::new(tc_id, tc_name, args));
-                            }
-                            current_tool_call = Some((id.clone(), name.clone(), String::new()));
-                            let _ = tx.send(StreamEvent::ToolCallStart { id, name }).await;
-                        }
-                        Ok(Some(Ok(StreamChunk::ToolCallDelta { arguments }))) => {
-                            output_bytes += arguments.len();
-                            if let Some((_, _, ref mut args)) = current_tool_call {
-                                args.push_str(&arguments);
-                            }
-                            let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
-                        }
-                        Ok(Some(Ok(StreamChunk::Done { usage }))) => {
-                            // Finish pending tool call
-                            if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
-                                let args: serde_json::Value =
-                                    serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
-                                tool_calls.push(ToolCall::new(tc_id, tc_name, args));
-                            }
+            loop {
+                tokio::select! {
+                    biased;
 
-                            // Send byte counts for this iteration
-                            let _ = tx
-                                .send(StreamEvent::ByteCount {
-                                    input_bytes,
-                                    output_bytes,
-                                })
-                                .await;
+                    _ = cancel_token.cancelled() => {
+                        // Cancellation requested - exit the streaming loop
+                        cancelled = true;
+                        break 'stream_retry;
+                    }
 
-                            // Log assistant response
-                            if let Some(ref logger) = debug_logger {
-                                logger.log_assistant_response(&content, None, tool_calls.len());
+                    result = tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()) => {
+                        match result {
+                            Ok(Some(Ok(StreamChunk::Start { model }))) => {
+                                let _ = tx.send(StreamEvent::Start { model }).await;
                             }
+                            Ok(Some(Ok(StreamChunk::ThinkingDelta { content: delta }))) => {
+                                output_bytes += delta.len();
+                                let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
+                            }
+                            Ok(Some(Ok(StreamChunk::Delta { content: delta }))) => {
+                                output_bytes += delta.len();
+                                content.push_str(&delta);
+                                let _ = tx.send(StreamEvent::ContentDelta(delta)).await;
+                            }
+                            Ok(Some(Ok(StreamChunk::ToolCallStart { id, name }))) => {
+                                // Finish pending tool call
+                                if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                                    let args: serde_json::Value =
+                                        serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                                    tool_calls.push(ToolCall::new(tc_id, tc_name, args));
+                                }
+                                current_tool_call = Some((id.clone(), name.clone(), String::new()));
+                                let _ = tx.send(StreamEvent::ToolCallStart { id, name }).await;
+                            }
+                            Ok(Some(Ok(StreamChunk::ToolCallDelta { arguments }))) => {
+                                output_bytes += arguments.len();
+                                if let Some((_, _, ref mut args)) = current_tool_call {
+                                    args.push_str(&arguments);
+                                }
+                                let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
+                            }
+                            Ok(Some(Ok(StreamChunk::Done { usage }))) => {
+                                // Finish pending tool call
+                                if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
+                                    let args: serde_json::Value =
+                                        serde_json::from_str(&tc_args).unwrap_or(serde_json::Value::Null);
+                                    tool_calls.push(ToolCall::new(tc_id, tc_name, args));
+                                }
 
-                            if tool_calls.is_empty() {
-                                // No tool calls - we're done, send final content for session
+                                // Send byte counts for this iteration
+                                let _ = tx
+                                    .send(StreamEvent::ByteCount {
+                                        input_bytes,
+                                        output_bytes,
+                                    })
+                                    .await;
+
+                                // Log assistant response
+                                if let Some(ref logger) = debug_logger {
+                                    logger.log_assistant_response(&content, None, tool_calls.len());
+                                }
+
+                                if tool_calls.is_empty() {
+                                    // No tool calls - we're done, send final content for session
+                                    execution_context.reset().await;
+                                    let _ = tx
+                                        .send(StreamEvent::Done {
+                                            usage,
+                                            content: content.clone(),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                                // Break to handle tool calls
+                                break 'stream_retry;
+                            }
+                            Ok(Some(Ok(StreamChunk::Error { message }))) => {
+                                // StreamChunk::Error is a protocol-level error from the server,
+                                // not a transport error - don't retry these
+                                execution_context.reset().await;
+                                let _ = tx.send(StreamEvent::Error { message }).await;
+                                return;
+                            }
+                            Ok(Some(Err(e))) if e.is_retryable() && stream_retries < MAX_STREAM_RETRIES => {
+                                // Mid-stream transport error - retry from scratch
+                                stream_retries += 1;
+                                let delay = INITIAL_RETRY_DELAY * 2u32.pow(stream_retries - 1);
+                                tracing::warn!(
+                                    attempt = stream_retries,
+                                    error = %e,
+                                    "TUI mid-stream: transient error, will retry"
+                                );
+                                // Reset partial state since LLM will re-generate from scratch
+                                content.clear();
+                                tool_calls.clear();
+                                current_tool_call = None;
+                                output_bytes = 0;
+                                let _ = tx
+                                    .send(StreamEvent::RetryNotice {
+                                        attempt: stream_retries,
+                                        max_retries: MAX_STREAM_RETRIES,
+                                        error: e.to_string(),
+                                    })
+                                    .await;
+                                tokio::time::sleep(delay).await;
+                                continue 'stream_retry;
+                            }
+                            Ok(Some(Err(e))) => {
                                 execution_context.reset().await;
                                 let _ = tx
-                                    .send(StreamEvent::Done {
-                                        usage,
-                                        content: content.clone(),
+                                    .send(StreamEvent::Error {
+                                        message: e.to_string(),
                                     })
                                     .await;
                                 return;
                             }
-                            // Break to handle tool calls
-                            break;
-                        }
-                        Ok(Some(Ok(StreamChunk::Error { message }))) => {
-                            execution_context.reset().await;
-                            let _ = tx.send(StreamEvent::Error { message }).await;
-                            return;
-                        }
-                        Ok(Some(Err(e))) => {
-                            execution_context.reset().await;
-                            let _ = tx
-                                .send(StreamEvent::Error {
-                                    message: e.to_string(),
-                                })
-                                .await;
-                            return;
-                        }
-                        Ok(None) => {
-                            // Stream ended unexpectedly
-                            break;
-                        }
-                        Err(_elapsed) => {
-                            // Timeout - no chunk received within STREAM_CHUNK_TIMEOUT
-                            execution_context.reset().await;
-                            let _ = tx
-                                .send(StreamEvent::Error {
-                                    message: format!(
-                                        "Stream timed out: no data received for {} seconds",
-                                        STREAM_CHUNK_TIMEOUT.as_secs()
-                                    ),
-                                })
-                                .await;
-                            return;
+                            Ok(None) => {
+                                // Stream ended unexpectedly
+                                break 'stream_retry;
+                            }
+                            Err(_elapsed) => {
+                                // Timeout - no chunk received within STREAM_CHUNK_TIMEOUT
+                                execution_context.reset().await;
+                                let _ = tx
+                                    .send(StreamEvent::Error {
+                                        message: format!(
+                                            "Stream timed out: no data received for {} seconds",
+                                            STREAM_CHUNK_TIMEOUT.as_secs()
+                                        ),
+                                    })
+                                    .await;
+                                return;
+                            }
                         }
                     }
                 }

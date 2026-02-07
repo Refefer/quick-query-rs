@@ -34,6 +34,8 @@ pub enum StreamEvent {
     SessionUpdate { messages: Vec<Message> },
     /// Byte counts for input/output
     ByteCount { input_bytes: usize, output_bytes: usize },
+    /// A transient error occurred and the stream is being retried
+    RetryNotice { attempt: u32, max_retries: u32, error: String },
 }
 
 /// Input action from keyboard events
