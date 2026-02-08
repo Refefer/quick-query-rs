@@ -64,8 +64,9 @@ Options:
       --base-url <URL>       API base URL override
       --provider <NAME>      Provider override
       --no-stream            Disable streaming
-  -d, --debug                Enable debug output
-      --debug-file <FILE>    Write debug log to file
+      --log-level <LEVEL>    Log level (trace, debug, info, warn, error; default: warn)
+  -d, --debug                Enable debug logging (shorthand for --log-level debug)
+      --log-file <FILE>      Write debug log to file (JSON-lines format)
       --no-tools             Disable all tools
       --no-agents            Disable all agents
       --minimal              Minimal mode (no tools, no agents)
@@ -120,14 +121,20 @@ qq chat --no-tui
 
 ## Chat Commands
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show help summary |
-| `/quit`, `/exit` | Exit chat |
-| `/clear` | Clear conversation history |
-| `/history` | Show message count |
-| `/tools` | List available tools |
-| `/system <msg>` | Override system prompt |
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/help` | `/?` | Show help summary |
+| `/quit` | `/exit`, `/q` | Exit chat |
+| `/clear` | `/c` | Clear conversation history |
+| `/reset` | | Clear conversation + all agent memory |
+| `/history` | `/h` | Show message count |
+| `/memory` | `/mem` | Show memory usage diagnostics |
+| `/tools` | `/t` | List available tools |
+| `/agents` | `/a` | List available agents |
+| `/delegate` | `/d` | Delegate to agent: `/delegate <agent> <task>` |
+| `/system` | `/sys` | Set system prompt |
+| `/debug` | | Debug commands (messages, count, dump) |
+| `@agent <task>` | | Quick agent invocation |
 
 ## Configuration
 
@@ -260,19 +267,23 @@ max_chunks = 5
 qq-cli/
 ├── src/
 │   ├── main.rs          # Entry point, CLI parsing
-│   ├── chat.rs          # Legacy readline chat
+│   ├── chat.rs          # Chat session management and readline chat
 │   ├── config.rs        # Configuration loading
 │   ├── markdown.rs      # Markdown rendering
-│   ├── agents/          # Agent execution, agent tools
-│   │   ├── mod.rs
-│   │   ├── executor.rs  # AgentExecutor
-│   │   └── tools.rs     # Agent-as-tool wrappers
+│   ├── agents/          # Agent execution
+│   │   ├── mod.rs       # Agent executor
+│   │   ├── agent_tool.rs    # Agent-as-tool wrappers, scoped memory
+│   │   ├── continuation.rs  # Continuation/summarization for long runs
+│   │   └── inform_user.rs   # Non-blocking user notification tool
 │   ├── tui/             # TUI implementation
 │   │   ├── mod.rs
-│   │   ├── app.rs       # Main TUI app state
+│   │   ├── app.rs       # Main TUI app state and event loop
 │   │   ├── ui.rs        # UI rendering
-│   │   ├── input.rs     # Input handling
-│   │   └── events.rs    # Event processing
+│   │   ├── layout.rs    # Layout calculations
+│   │   ├── scroll.rs    # Scroll state management
+│   │   ├── markdown.rs  # TUI markdown renderer
+│   │   ├── events.rs    # Event processing
+│   │   └── widgets/     # Custom TUI widgets
 │   ├── event_bus.rs     # Agent event bus
 │   ├── execution_context.rs  # Agent/tool stack tracking
 │   └── debug_log.rs     # Debug logging
@@ -283,8 +294,9 @@ qq-cli/
 ### Debug Mode
 
 ```bash
-qq -d -p "prompt"           # Debug to stderr
-qq --debug-file debug.log   # Debug to file
+qq -d -p "prompt"                # Debug to stderr
+qq --log-file debug.jsonl        # Debug to file (JSON-lines)
+qq --log-level trace -p "prompt" # Maximum verbosity
 ```
 
 ### View Configuration

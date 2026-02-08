@@ -86,8 +86,9 @@ Options:
   -t, --temperature <TEMP>   Temperature (0.0-2.0)
       --max-tokens <N>       Maximum tokens to generate
   -A, --agent <AGENT>        Primary agent
-  -d, --debug                Enable debug output
-      --debug-file <PATH>    Write debug log to file
+      --log-level <LEVEL>    Log level (trace, debug, info, warn, error)
+  -d, --debug                Enable debug logging (shorthand for --log-level debug)
+      --log-file <FILE>      Write debug log to file (JSON-lines format)
       --no-stream            Disable streaming output
       --no-tui               Disable TUI, use readline
       --no-tools             Disable all tools

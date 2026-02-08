@@ -371,8 +371,9 @@ let agent_tools = registry.subset_from_strs(&["read_file", "write_file"]);
 
 | Category | Tools | Description |
 |----------|-------|-------------|
-| **Filesystem** | `read_file`, `write_file`, `list_files`, `search_files` | Sandboxed file operations |
-| **Memory** | `memory_store`, `memory_get`, `memory_list`, `memory_delete` | Persistent key-value storage |
+| **Filesystem (read)** | `read_file`, `list_files`, `find_files`, `search_files` | Sandboxed read operations |
+| **Filesystem (write)** | `write_file`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory` | Write operations (require `allow_write`) |
+| **Memory** | `add_memory`, `read_memory`, `list_memories`, `delete_memory` | Persistent SQLite-backed key-value storage |
 | **Web** | `fetch_webpage`, `web_search` | Web content retrieval |
 | **Processing** | `process_large_data` | Chunk and summarize large outputs |
 
@@ -454,15 +455,67 @@ To prevent infinite recursion, agent depth is tracked:
 ```rust
 const DEFAULT_MAX_AGENT_DEPTH: usize = 3;
 
-// Agent tools are created with depth tracking
+// Agent tools are created with depth tracking and scoped memory
 create_agent_tools(
     &base_tools,
     provider,
     &agents_config,
     current_depth,      // Incremented for each nested agent
     max_agent_depth,    // Stops creating agent tools at max depth
+    agent_memory,       // Shared AgentMemory for scoped persistence
+    scope,              // Call chain path (e.g., "chat/coder")
 )
 ```
+
+### Agent Memory Scoping
+
+Agent instances persist conversation history across invocations within a session. Memory is scoped by call chain path:
+
+```
+"chat/explore"        — explore called by chat
+"chat/coder"          — coder called by chat
+"chat/coder/explore"  — explore called by coder, called by chat
+```
+
+Each scope is an independent `AgentInstanceState` stored in the central `AgentMemory`:
+
+```rust
+pub struct AgentMemory {
+    instances: Arc<RwLock<HashMap<String, AgentInstanceState>>>,
+    max_instance_bytes: usize,  // Default: 200KB per scope
+}
+```
+
+The `new_instance` parameter on agent tool calls controls scope behavior:
+- `false` (default): Agent continues with full context from prior calls
+- `true`: Clears the scope before execution for a fresh start
+
+When a scope exceeds its byte budget, `trim_to_budget()` removes oldest messages using `find_safe_trim_point()` to avoid orphaning tool call/result pairs.
+
+### Context Compaction
+
+`ChatSession` manages main conversation memory with tiered compaction:
+
+1. **LLM Summary** (preferred): When context exceeds `max_context_bytes` (default 500KB), older messages are summarized by the LLM into a single system message
+2. **Partial Summary**: If LLM summarization is unavailable, messages are partially trimmed
+3. **Truncation** (fallback): Direct removal of oldest messages
+
+Key parameters:
+- `max_context_bytes`: 500KB default with 10% hysteresis to avoid thrashing
+- `preserve_recent`: 10 most recent messages are always kept
+- `find_safe_split_point()`: Ensures tool call sequences are never split mid-pair
+
+Agent-specific compaction prompts (via `compact_prompt()`) customize what information is preserved during summarization. For example, the coder agent preserves file paths and code patterns, while the researcher preserves sources and findings.
+
+### Continuation Pattern
+
+When an agent exhausts its `max_turns`, execution does not simply fail. Instead:
+
+1. The full conversation is summarized into a structured progress report (steps taken, discoveries, remaining work)
+2. The agent is re-invoked with the summary as context
+3. Up to 3 continuation attempts are made by default
+
+This is implemented in `qq-cli/src/agents/continuation.rs` via `execute_with_continuation()`.
 
 ### Progress Reporting
 

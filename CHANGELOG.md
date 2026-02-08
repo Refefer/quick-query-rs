@@ -8,7 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial documentation suite (ARCHITECTURE.md, crate READMEs)
+
+#### Tools
+- Filesystem tools: `find_files`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`
+- Enhanced `read_file` with grep filtering, line ranges (start_line/end_line), head/tail shortcuts
+
+#### Chat
+- Chat commands: `/reset`, `/agents` (`/a`), `/delegate` (`/d`), `/memory` (`/mem`), `/debug`
+- `@agent <task>` quick invocation syntax
+- Bracketed paste support in TUI
+
+#### Memory Management
+- ChatSession tiered memory compaction (LLM summary > partial > truncation)
+- `/memory` command for memory usage diagnostics
+- Agent memory scoping per call chain path with `new_instance` parameter
+- Agent-specific compaction prompts for memory summarization
+- Continuation/summarization for long agent runs (auto-resume on max_turns)
+- TUI content size bounded at 2MB
+
+#### Agent Framework
+- `inform_user` tool for non-blocking agent status notifications
+- Shared agent preamble system (common framework instructions)
+- Per-agent tool call limits via `tool_limits()` configuration
+- Enhanced tool descriptions to guide LLM batching and efficiency
+
+#### CLI
+- `--log-level` flag (trace, debug, info, warn, error)
+- `--log-file` flag (JSON-lines debug log; replaces deprecated `--debug-file`)
+
+#### TUI
+- UTF-8 safe truncation in web fetch tool
+- Table preprocessing in TUI markdown renderer
+
+#### Documentation
+- Initial documentation suite (ARCHITECTURE.md, crate READMEs, PRD)
 
 ## [0.1.0] - 2026-02
 
@@ -48,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Filesystem**: `read_file`, `write_file`, `list_files`, `search_files`
   - Sandboxed to configurable root directory
   - Write access disabled by default
-- **Memory**: `memory_store`, `memory_get`, `memory_list`, `memory_delete`
+- **Memory**: `add_memory`, `read_memory`, `list_memories`, `delete_memory`
   - Persistent SQLite-backed key-value storage
   - In-memory mode for testing
 - **Web**: `fetch_webpage`, `web_search`

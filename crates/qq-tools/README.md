@@ -20,10 +20,17 @@ Sandboxed file operations with configurable root directory.
 
 | Tool | Description | Write Required |
 |------|-------------|----------------|
-| `read_file` | Read contents of a file | No |
-| `write_file` | Write content to a file | Yes |
-| `list_files` | List files in a directory | No |
+| `read_file` | Read file contents with line ranges, grep filtering, head/tail | No |
+| `list_files` | List files in a directory (non-recursive) | No |
+| `find_files` | Recursive file discovery with gitignore support | No |
 | `search_files` | Search file contents with regex | No |
+| `write_file` | Write full content to a file (creates or overwrites) | Yes |
+| `edit_file` | Precision editing: search/replace, insert, delete, replace_lines | Yes |
+| `move_file` | Move or rename a file or directory | Yes |
+| `copy_file` | Copy a file to a new location | Yes |
+| `create_directory` | Create a new directory (recursive by default) | Yes |
+| `rm_file` | Remove a file | Yes |
+| `rm_directory` | Remove a directory (optional recursive) | Yes |
 
 ```rust
 use qq_tools::{create_filesystem_tools_arc, FileSystemConfig};
@@ -46,9 +53,49 @@ let tools = create_filesystem_tools_arc(config);
 **read_file**
 ```json
 {
-  "path": "relative/path/to/file.txt"
+  "path": "relative/path/to/file.txt",
+  "start_line": 10,
+  "end_line": 50,
+  "grep": "TODO|FIXME",
+  "context": 2,
+  "head": 20,
+  "tail": 10,
+  "line_numbers": true
 }
 ```
+Only `path` is required. Use `start_line`/`end_line` for line ranges, `head`/`tail` for shortcuts, or `grep` with optional `context` for regex filtering.
+
+**list_files**
+```json
+{
+  "path": "relative/directory",
+  "pattern": "*.rs"
+}
+```
+
+**find_files**
+```json
+{
+  "path": "src",
+  "pattern": "**/*.rs",
+  "extensions": ["rs", "toml"],
+  "max_depth": 3,
+  "file_type": "file",
+  "include_hidden": false,
+  "limit": 100
+}
+```
+All parameters are optional. Respects `.gitignore` by default.
+
+**search_files**
+```json
+{
+  "pattern": "TODO|FIXME",
+  "path": "src",
+  "file_pattern": "*.rs"
+}
+```
+Only `pattern` (regex) is required.
 
 **write_file**
 ```json
@@ -58,21 +105,58 @@ let tools = create_filesystem_tools_arc(config);
 }
 ```
 
-**list_files**
+**edit_file**
 ```json
 {
-  "path": "relative/directory",
-  "recursive": false,
-  "pattern": "*.rs"
+  "path": "src/main.rs",
+  "edits": [
+    { "old": "fn old_name()", "new": "fn new_name()" },
+    { "operation": "insert", "after_line": 10, "content": "// new comment" },
+    { "operation": "delete", "start_line": 5, "end_line": 8 }
+  ],
+  "create_if_missing": false,
+  "show_diff": true,
+  "dry_run": false
+}
+```
+Supports `replace` (default), `insert`, `delete`, and `replace_lines` operations. Multiple edits are applied in sequence.
+
+**move_file**
+```json
+{
+  "source": "old/path.rs",
+  "destination": "new/path.rs"
 }
 ```
 
-**search_files**
+**copy_file**
 ```json
 {
-  "path": "relative/directory",
-  "pattern": "TODO|FIXME",
-  "file_pattern": "*.rs"
+  "source": "original/file.rs",
+  "destination": "copy/file.rs"
+}
+```
+
+**create_directory**
+```json
+{
+  "path": "new/nested/directory",
+  "recursive": true
+}
+```
+
+**rm_file**
+```json
+{
+  "path": "file/to/remove.txt"
+}
+```
+
+**rm_directory**
+```json
+{
+  "path": "directory/to/remove",
+  "recursive": false
 }
 ```
 
@@ -82,10 +166,10 @@ Persistent key-value storage backed by SQLite.
 
 | Tool | Description |
 |------|-------------|
-| `memory_store` | Store a key-value pair |
-| `memory_get` | Retrieve a value by key |
-| `memory_list` | List all stored keys |
-| `memory_delete` | Delete a key-value pair |
+| `add_memory` | Store a named memory (creates or overwrites) |
+| `read_memory` | Retrieve a memory by name |
+| `list_memories` | List all stored memory names |
+| `delete_memory` | Delete a memory by name |
 
 ```rust
 use qq_tools::{create_memory_tools_arc, MemoryStore};
@@ -102,30 +186,30 @@ let tools = create_memory_tools_arc(store);
 
 #### Tool Parameters
 
-**memory_store**
+**add_memory**
 ```json
 {
-  "key": "project_notes",
+  "name": "project_notes",
   "value": "Remember to update the documentation"
 }
 ```
 
-**memory_get**
+**read_memory**
 ```json
 {
-  "key": "project_notes"
+  "name": "project_notes"
 }
 ```
 
-**memory_list**
+**list_memories**
 ```json
 {}
 ```
 
-**memory_delete**
+**delete_memory**
 ```json
 {
-  "key": "project_notes"
+  "name": "project_notes"
 }
 ```
 

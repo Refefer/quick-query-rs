@@ -62,8 +62,9 @@ LLM provider implementations:
 
 #### qq-tools
 Built-in tools for agentic workflows:
-- **Filesystem**: `read_file`, `write_file`, `list_files`, `search_files`
-- **Memory**: `memory_store`, `memory_get`, `memory_list`, `memory_delete` (SQLite-backed)
+- **Filesystem (read)**: `read_file`, `list_files`, `find_files`, `search_files`
+- **Filesystem (write)**: `write_file`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`
+- **Memory**: `add_memory`, `read_memory`, `list_memories`, `delete_memory` (SQLite-backed)
 - **Web**: `fetch_webpage`, `web_search` (with optional Perplexica integration)
 - **Processing**: `process_large_data` for chunking and summarization
 
@@ -96,10 +97,16 @@ Agent definitions and implementations:
 #### Chat Commands
 - [x] `/help` - Show help
 - [x] `/quit`, `/exit` - Exit chat
-- [x] `/clear` - Clear conversation
+- [x] `/clear` - Clear conversation history
+- [x] `/reset` - Clear conversation + all agent memory
 - [x] `/history` - Show message count
+- [x] `/memory` - Show memory usage diagnostics
 - [x] `/tools` - List available tools
+- [x] `/agents` - List available agents
+- [x] `/delegate <agent> <task>` - Delegate to specific agent
 - [x] `/system <msg>` - Set system prompt
+- [x] `/debug` - Debug commands (messages, count, dump)
+- [x] `@agent <task>` - Quick agent invocation
 
 #### Configuration
 - [x] Profile-centric configuration model
@@ -139,6 +146,15 @@ Agent definitions and implementations:
 - [x] Multi-line input support
 - [x] Status bar with profile and model info
 
+#### Memory Management
+- [x] ChatSession tiered memory compaction (LLM summary > partial > truncation)
+- [x] `/memory` command for memory usage diagnostics
+- [x] `/reset` vs `/clear` distinction (reset clears agent memory too)
+- [x] Agent memory scoping per call chain path
+- [x] `new_instance` parameter for agent tool calls
+- [x] Continuation/summarization for long agent runs (auto-resume on max_turns)
+- [x] Agent-specific compaction prompts
+
 #### Infrastructure
 - [x] Async task manager for background work
 - [x] Agent framework with channels for communication
@@ -162,7 +178,6 @@ Agent definitions and implementations:
 
 #### Additional Tools
 - [ ] `run_command` - Execute shell commands (sandboxed)
-- [ ] `edit_file` - Structured file editing with diffs
 - [ ] `git_*` - Git operations
 
 #### Provider Enhancements
@@ -240,7 +255,9 @@ Options:
       --base-url <URL>       API base URL override
       --provider <NAME>      Provider override
       --no-stream            Disable streaming
-  -d, --debug                Enable debug output
+      --log-level <LEVEL>    Log level (trace, debug, info, warn, error; default: warn)
+  -d, --debug                Enable debug logging (shorthand for --log-level debug)
+      --log-file <FILE>      Write debug log to file (JSON-lines format)
   -A, --agent <AGENT>        Primary agent to use
 
 Commands:

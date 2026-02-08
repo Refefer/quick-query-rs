@@ -10,25 +10,26 @@ Agents are LLM-powered assistants with specific system prompts and tool access. 
 - Execute tasks autonomously using tools
 - Delegate to other agents (agent-as-tool pattern)
 - Run in stateful or stateless modes
+- Persist conversation history across invocations (scoped memory)
 
 ## Built-in Agents
 
 | Agent | Purpose | Tools |
 |-------|---------|-------|
-| **chat** | Interactive conversations and delegation | `read_file`, `write_file`, `list_files`, `search_files` |
-| **explore** | Filesystem exploration and discovery | `read_file`, `list_files`, `search_files` |
-| **researcher** | Web research and synthesis | `web_search`, `fetch_webpage` |
-| **coder** | Code generation and modification | `read_file`, `write_file`, `list_files`, `search_files` |
-| **reviewer** | Code review and analysis | `read_file`, `list_files`, `search_files` |
-| **summarizer** | Content summarization | (none - pure LLM) |
-| **planner** | Task decomposition and planning | (none - uses other agents) |
-| **writer** | Documentation and content creation | `read_file`, `write_file`, `list_files`, `search_files` |
+| **chat** | Interactive conversations and delegation | (none — delegates via agent tools) |
+| **explore** | Filesystem exploration and discovery | `read_file`, `find_files`, `search_files` |
+| **researcher** | Web research and synthesis | `web_search`, `fetch_webpage`, `read_memory` |
+| **coder** | Code generation and modification | `read_file`, `edit_file`, `write_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`, `find_files`, `search_files` |
+| **reviewer** | Code review and analysis | `read_file`, `find_files`, `search_files` |
+| **summarizer** | Content summarization | (none — pure LLM) |
+| **planner** | Task decomposition and planning | `read_memory` (plus agent delegation tools) |
+| **writer** | Documentation and content creation | `read_file`, `write_file`, `edit_file`, `copy_file`, `create_directory`, `find_files`, `search_files` |
 
 ## Agent Details
 
 ### ChatAgent
 
-The default interactive agent. Coordinates conversations and delegates to specialized agents.
+The default interactive agent. Coordinates conversations by delegating to specialized agents.
 
 ```rust
 use qq_agents::ChatAgent;
@@ -39,9 +40,9 @@ let agent = ChatAgent::with_prompt("You are a coding mentor...".into());
 ```
 
 **Key behaviors:**
-- Responds to general queries directly
-- Delegates complex tasks to specialized agents
-- Can access filesystem for context
+- Has no direct tools — works entirely through delegation to sub-agents
+- Responds to simple queries directly, delegates complex tasks to specialized agents
+- Uses `inform_user` tool to send status messages to the user without ending its turn
 
 ### ExploreAgent
 
@@ -187,7 +188,7 @@ let coder = CoderAgent::new();
 
 let config = AgentConfig::new(coder.name())
     .with_system_prompt(coder.system_prompt())
-    .with_max_iterations(coder.max_iterations());
+    .with_max_iterations(coder.max_turns());
 
 // Stateless one-shot execution
 let result = Agent::run_once(
@@ -238,6 +239,7 @@ Implement this trait to create new internal agents:
 
 ```rust
 use qq_agents::InternalAgent;
+use std::collections::HashMap;
 
 pub struct MyAgent;
 
@@ -271,8 +273,20 @@ impl InternalAgent for MyAgent {
         &["tool_a", "tool_b"]
     }
 
-    fn max_iterations(&self) -> usize {
+    fn max_turns(&self) -> usize {
         50  // Default is 20
+    }
+
+    // Optional: per-tool call limits
+    fn tool_limits(&self) -> Option<HashMap<String, usize>> {
+        let mut limits = HashMap::new();
+        limits.insert("tool_a".to_string(), 10);
+        Some(limits)
+    }
+
+    // Optional: custom compaction prompt for memory summarization
+    fn compact_prompt(&self) -> &str {
+        "Summarize this agent conversation, preserving key findings and decisions."
     }
 }
 ```
@@ -295,6 +309,27 @@ This enables:
 - Automatic agent selection by the LLM
 - Recursive delegation (with depth limits)
 - Consistent tool interface
+
+### Scoped Memory
+
+Each agent invocation is identified by its call chain path, creating isolated memory scopes:
+
+- `"chat/explore"` — explore agent called by chat
+- `"chat/coder/explore"` — explore agent called by coder, which was called by chat
+
+The `new_instance` parameter (default: `false`) controls memory:
+- `false`: The agent continues with full context from prior calls in this scope.
+- `true`: Clears the agent's memory for a fresh start. Use when prior context would be misleading.
+
+Each scope has a 200KB memory budget. When exceeded, older messages are automatically trimmed at safe boundaries (preserving tool call/result pairs).
+
+### Continuation
+
+When an agent exhausts its `max_turns`, its progress is automatically summarized and it is re-invoked with that summary as context. This allows long tasks to complete without losing progress. Up to 3 continuation attempts are made by default.
+
+### Compaction Prompts
+
+Each agent can customize how its conversation history is summarized when memory is compacted, via the `compact_prompt()` method. For example, the coder agent's compaction preserves file paths, code patterns, and design decisions, while the researcher preserves sources, key findings, and conflicting information.
 
 ## Configuration via qq-cli
 

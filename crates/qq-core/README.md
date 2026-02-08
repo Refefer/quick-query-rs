@@ -36,6 +36,9 @@ let msg = Message::assistant_with_tool_calls("", vec![tool_call]);
 
 // Tool result
 let result = Message::tool_result("call_123", "File contents here");
+
+// Memory tracking
+let bytes = msg.byte_count(); // Counts content + tool_calls + tool_call_id
 ```
 
 ### Provider Trait
@@ -128,6 +131,28 @@ let r1 = agent.process("Hello").await?;
 let r2 = agent.process("Tell me more").await?;  // Has context from r1
 ```
 
+### Agent Memory
+
+Scoped memory for agent instances across invocations:
+
+```rust
+use qq_core::{AgentMemory, AgentInstanceState};
+
+// Central store keyed by scope path (e.g., "chat/explore", "chat/coder/explore")
+let memory = AgentMemory::new();
+
+// Store messages for a scope
+memory.store_messages("chat/explore", messages).await;
+
+// Retrieve prior history
+let history = memory.get_messages("chat/explore").await;
+
+// Clear a scope (for new_instance: true)
+memory.clear_scope("chat/explore").await;
+```
+
+Each scope has a 200KB budget (`DEFAULT_MAX_INSTANCE_BYTES`). When exceeded, `AgentInstanceState::trim_to_budget()` removes oldest messages at safe boundaries, preserving tool call/result pairs.
+
 ### Parallel Execution
 
 Execute multiple tools or LLM calls concurrently:
@@ -172,7 +197,7 @@ let summarized = processor.process("very long content...", "user's original ques
 | `message` | Message types, roles, content, tool calls |
 | `provider` | Provider trait, request/response types, streaming |
 | `tool` | Tool trait, definitions, parameters, registry |
-| `agent` | Agent framework, channels, registry, progress events |
+| `agent` | Agent framework, channels, registry, progress events, `AgentMemory`, `AgentInstanceState` |
 | `task` | Task manager, parallel execution helpers |
 | `chunker` | Large output processing |
 | `error` | Error types |
