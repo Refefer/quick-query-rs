@@ -33,8 +33,13 @@ pub struct BuiltinAgentOverride {
 /// External agent definition from agents.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
-    /// Description of what the agent does
+    /// Short description for display (/agents, /tools)
     pub description: String,
+
+    /// Rich description sent to LLMs when this agent is exposed as a tool.
+    /// Falls back to `description` if not set.
+    #[serde(default)]
+    pub tool_description: Option<String>,
 
     /// System prompt for the agent
     pub system_prompt: String,

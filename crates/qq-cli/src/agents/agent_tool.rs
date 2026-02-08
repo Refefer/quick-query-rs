@@ -4,6 +4,7 @@
 //! the LLM can invoke. Agents can call other agents up to a maximum depth,
 //! after which they only have access to base tools.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,6 +21,188 @@ use crate::ExecutionContext;
 /// Maximum nesting depth for agent calls.
 /// At depth 0, agents can call other agents. At max_depth, they only get base tools.
 pub const DEFAULT_MAX_AGENT_DEPTH: u32 = 5;
+
+// =============================================================================
+// Shared agent tool helpers
+// =============================================================================
+
+/// Resolved configuration for executing an agent as a tool.
+struct AgentToolConfig {
+    agent_name: String,
+    system_prompt: String,
+    tool_names: Vec<String>,
+    max_turns: usize,
+    tool_limits: Option<HashMap<String, usize>>,
+    compact_prompt: String,
+}
+
+/// Build the standard agent tool definition.
+///
+/// Both `InternalAgentTool` and `ExternalAgentTool` use identical parameter schemas;
+/// only the name and description differ.
+fn agent_tool_definition(name: &str, description: &str) -> ToolDefinition {
+    let task_description = "A high-level goal or question for the agent. \
+        Describe WHAT you want to achieve, not HOW to do it. \
+        The agent autonomously decides which tools to use and how to accomplish the task.";
+
+    ToolDefinition::new(name, description).with_parameters(
+        ToolParameters::new()
+            .add_property("task", PropertySchema::string(task_description), true)
+            .add_property(
+                "new_instance",
+                PropertySchema::boolean(
+                    "Start with a fresh context, discarding previous conversation history. \
+                     Default: false (reuses history from prior calls)."
+                ).with_default(serde_json::Value::Bool(false)),
+                false,
+            ),
+    )
+}
+
+/// Shared execution logic for both internal and external agent tools.
+///
+/// Handles scope management, tool setup, agent execution, memory compaction,
+/// and result formatting.
+async fn execute_agent(
+    config: AgentToolConfig,
+    task: String,
+    new_instance: bool,
+    base_tools: &Arc<ToolRegistry>,
+    provider: &Arc<dyn Provider>,
+    external_agents: &AgentsConfig,
+    enabled_agents: &Option<Vec<String>>,
+    current_depth: u32,
+    max_depth: u32,
+    execution_context: &Option<ExecutionContext>,
+    event_bus: &Option<AgentEventBus>,
+    agent_memory: &Option<AgentMemory>,
+    scope: &str,
+) -> Result<ToolOutput, Error> {
+    let child_scope = format!("{}/{}", scope, config.agent_name);
+
+    // Clear scope if fresh instance requested
+    if new_instance {
+        if let Some(ref memory) = agent_memory {
+            memory.clear_scope(&child_scope).await;
+        }
+    }
+
+    // Load prior conversation history
+    let prior_history = if let Some(ref memory) = agent_memory {
+        memory.get_messages(&child_scope).await
+    } else {
+        Vec::new()
+    };
+
+    // Build tools for this agent: start with base tools it needs
+    let mut agent_tools = base_tools.subset(&config.tool_names);
+
+    // If not at max depth, add agent tools so this agent can call other agents
+    let next_depth = current_depth + 1;
+    if next_depth < max_depth {
+        let nested_agent_tools = create_agent_tools(
+            base_tools,
+            Arc::clone(provider),
+            external_agents,
+            enabled_agents,
+            next_depth,
+            max_depth,
+            execution_context.clone(),
+            event_bus.clone(),
+            agent_memory.clone(),
+            child_scope.clone(),
+        );
+        for tool in nested_agent_tools {
+            agent_tools.register(tool);
+        }
+    }
+
+    // Add inform_user tool if event bus is available
+    if let Some(ref event_bus) = event_bus {
+        agent_tools.register(Arc::new(InformUserTool::new(
+            event_bus.clone(),
+            &config.agent_name,
+        )));
+    }
+
+    let agent_tools = Arc::new(agent_tools);
+
+    let has_sub_agents = next_depth < max_depth;
+    let has_tools = !config.tool_names.is_empty();
+    let has_inform_user = event_bus.is_some();
+
+    let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
+        has_tools,
+        has_sub_agents,
+        has_inform_user,
+    });
+    let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
+
+    let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
+        .with_system_prompt(&full_prompt)
+        .with_max_turns(config.max_turns);
+
+    if let Some(limits) = config.tool_limits {
+        agent_cfg = agent_cfg.with_tool_limits(limits);
+    }
+
+    // Create progress handler if event bus is available
+    let progress = event_bus.as_ref().map(|bus| bus.create_handler());
+
+    // Use continuation wrapper for execution
+    let continuation_config = ContinuationConfig::default();
+    let result = execute_with_continuation(
+        Arc::clone(provider),
+        agent_tools,
+        agent_cfg,
+        task,
+        progress,
+        continuation_config,
+        event_bus.as_ref(),
+        prior_history,
+    )
+    .await;
+
+    // Store results back to memory, with LLM compaction
+    match &result {
+        AgentExecutionResult::Success { messages, .. }
+        | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
+            if let Some(ref memory) = agent_memory {
+                let tool_calls: u32 = messages
+                    .iter()
+                    .map(|m| m.tool_calls.len() as u32)
+                    .sum();
+
+                let compacted =
+                    compact_agent_messages(provider, messages.clone(), &config.compact_prompt).await;
+
+                memory
+                    .store_messages(&child_scope, compacted, tool_calls)
+                    .await;
+            }
+        }
+        AgentExecutionResult::Error(_) => {} // don't store on error
+    }
+
+    match result {
+        AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
+        AgentExecutionResult::MaxContinuationsReached {
+            partial_result,
+            continuations,
+            ..
+        } => Ok(ToolOutput::success(format!(
+            "Task partially completed after {} continuations.\n\n{}",
+            continuations, partial_result
+        ))),
+        AgentExecutionResult::Error(e) => {
+            Ok(ToolOutput::error(format!("Agent error: {}", e)))
+        }
+    }
+}
+
+// =============================================================================
+// InternalAgentTool
+// =============================================================================
 
 /// A tool that wraps an internal agent.
 pub struct InternalAgentTool {
@@ -80,7 +263,6 @@ impl InternalAgentTool {
             scope,
         }
     }
-
 }
 
 #[derive(Deserialize)]
@@ -101,30 +283,7 @@ impl Tool for InternalAgentTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        let description = self.agent.tool_description().to_string();
-
-        // The task parameter description also guides proper usage
-        let task_description = concat!(
-            "A high-level goal or question for the agent. ",
-            "Describe WHAT you want to achieve, not HOW to do it. ",
-            "The agent autonomously decides which tools to use and how to accomplish the task."
-        );
-
-        ToolDefinition::new(self.name(), description).with_parameters(
-            ToolParameters::new()
-                .add_property(
-                    "task",
-                    PropertySchema::string(task_description),
-                    true,
-                )
-                .add_property(
-                    "new_instance",
-                    PropertySchema::boolean(
-                        "Start with a fresh context, discarding previous conversation history. Default: false (reuses history from prior calls)."
-                    ).with_default(serde_json::Value::Bool(false)),
-                    false,
-                ),
-        )
+        agent_tool_definition(self.name(), self.agent.tool_description())
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
@@ -136,143 +295,49 @@ impl Tool for InternalAgentTool {
             ctx.push_agent(self.agent.name()).await;
         }
 
-        let child_scope = format!("{}/{}", self.scope, self.agent.name());
-
-        // Clear scope if fresh instance requested
-        if args.new_instance {
-            if let Some(ref memory) = self.agent_memory {
-                memory.clear_scope(&child_scope).await;
-            }
-        }
-
-        // Load prior conversation history
-        let prior_history = if let Some(ref memory) = self.agent_memory {
-            memory.get_messages(&child_scope).await
-        } else {
-            Vec::new()
-        };
-
-        // Build tools for this agent: start with base tools it needs
-        let mut agent_tools = self.base_tools.subset_from_strs(self.agent.tool_names());
-
-        // If not at max depth, add agent tools so this agent can call other agents
-        let next_depth = self.current_depth + 1;
-        if next_depth < self.max_depth {
-            let nested_agent_tools = create_agent_tools(
-                &self.base_tools,
-                Arc::clone(&self.provider),
-                &self.external_agents,
-                &self.enabled_agents,
-                next_depth,
-                self.max_depth,
-                self.execution_context.clone(),
-                self.event_bus.clone(),
-                self.agent_memory.clone(),
-                child_scope.clone(),
-            );
-            for tool in nested_agent_tools {
-                agent_tools.register(tool);
-            }
-        }
-
-        // Add inform_user tool if event bus is available
-        if let Some(ref event_bus) = self.event_bus {
-            agent_tools.register(Arc::new(InformUserTool::new(
-                event_bus.clone(),
-                self.agent.name(),
-            )));
-        }
-
-        let agent_tools = Arc::new(agent_tools);
-
-        // Get max_turns: config override takes precedence over hardcoded default
+        // Resolve config: builtin overrides > agent defaults
         let max_turns = self
             .external_agents
             .get_builtin_max_turns(self.agent.name())
             .unwrap_or_else(|| self.agent.max_turns());
 
-        let has_sub_agents = next_depth < self.max_depth;
-        let has_tools = !self.agent.tool_names().is_empty();
-        let has_inform_user = self.event_bus.is_some();
+        let tool_limits = if let Some(limits) = self.external_agents.get_builtin_tool_limits(self.agent.name()) {
+            Some(limits.clone())
+        } else {
+            self.agent.tool_limits()
+        };
 
-        let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
-            has_tools,
-            has_sub_agents,
-            has_inform_user,
-        });
-        let full_prompt = format!("{}\n\n---\n\n{}", preamble, self.agent.system_prompt());
+        let compact_prompt = self
+            .external_agents
+            .get_builtin_compact_prompt(self.agent.name())
+            .unwrap_or_else(|| self.agent.compact_prompt())
+            .to_string();
 
-        let mut config = AgentConfig::new(self.agent.name())
-            .with_system_prompt(&full_prompt)
-            .with_max_turns(max_turns);
+        let config = AgentToolConfig {
+            agent_name: self.agent.name().to_string(),
+            system_prompt: self.agent.system_prompt().to_string(),
+            tool_names: self.agent.tool_names().iter().map(|s| s.to_string()).collect(),
+            max_turns,
+            tool_limits,
+            compact_prompt,
+        };
 
-        // Apply tool limits: config overrides take precedence over hardcoded defaults
-        if let Some(limits) = self.external_agents.get_builtin_tool_limits(self.agent.name()) {
-            // Use config override
-            config = config.with_tool_limits(limits.clone());
-        } else if let Some(limits) = self.agent.tool_limits() {
-            // Fall back to hardcoded defaults
-            config = config.with_tool_limits(limits);
-        }
-
-        // Create progress handler if event bus is available
-        let progress = self.event_bus.as_ref().map(|bus| bus.create_handler());
-
-        // Use continuation wrapper for execution
-        let continuation_config = ContinuationConfig::default();
-        let result = execute_with_continuation(
-            Arc::clone(&self.provider),
-            agent_tools,
+        let output = execute_agent(
             config,
-            args.task.clone(),
-            progress,
-            continuation_config,
-            self.event_bus.as_ref(),
-            prior_history,
+            args.task,
+            args.new_instance,
+            &self.base_tools,
+            &self.provider,
+            &self.external_agents,
+            &self.enabled_agents,
+            self.current_depth,
+            self.max_depth,
+            &self.execution_context,
+            &self.event_bus,
+            &self.agent_memory,
+            &self.scope,
         )
         .await;
-
-        // Store results back to memory, with LLM compaction
-        match &result {
-            AgentExecutionResult::Success { messages, .. }
-            | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
-                if let Some(ref memory) = self.agent_memory {
-                    let tool_calls: u32 = messages
-                        .iter()
-                        .map(|m| m.tool_calls.len() as u32)
-                        .sum();
-
-                    // Resolve compaction prompt: config override > agent default
-                    let prompt = self
-                        .external_agents
-                        .get_builtin_compact_prompt(self.agent.name())
-                        .unwrap_or_else(|| self.agent.compact_prompt());
-
-                    let compacted =
-                        compact_agent_messages(&self.provider, messages.clone(), prompt).await;
-
-                    memory
-                        .store_messages(&child_scope, compacted, tool_calls)
-                        .await;
-                }
-            }
-            AgentExecutionResult::Error(_) => {} // don't store on error
-        }
-
-        let output = match result {
-            AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
-            AgentExecutionResult::MaxContinuationsReached {
-                partial_result,
-                continuations,
-                ..
-            } => Ok(ToolOutput::success(format!(
-                "Task partially completed after {} continuations.\n\n{}",
-                continuations, partial_result
-            ))),
-            AgentExecutionResult::Error(e) => {
-                Ok(ToolOutput::error(format!("Agent error: {}", e)))
-            }
-        };
 
         // Pop agent context
         if let Some(ref ctx) = self.execution_context {
@@ -283,6 +348,10 @@ impl Tool for InternalAgentTool {
     }
 }
 
+// =============================================================================
+// ExternalAgentTool
+// =============================================================================
+
 /// A tool that wraps an external (config-defined) agent.
 pub struct ExternalAgentTool {
     /// Tool name (e.g., "Agent[doc_researcher]")
@@ -290,7 +359,7 @@ pub struct ExternalAgentTool {
     /// Agent name
     agent_name: String,
     /// Agent definition from config
-    definition: AgentDefinition,
+    agent_def: AgentDefinition,
     /// Base tools (filesystem, memory, web) - used to build agent's tool set
     base_tools: Arc<ToolRegistry>,
     /// Provider for LLM calls
@@ -333,7 +402,7 @@ impl ExternalAgentTool {
         Self {
             tool_name,
             agent_name: name.to_string(),
-            definition,
+            agent_def: definition,
             base_tools: Arc::new(base_tools.clone()),
             provider,
             external_agents,
@@ -346,7 +415,6 @@ impl ExternalAgentTool {
             scope,
         }
     }
-
 }
 
 #[async_trait]
@@ -356,25 +424,14 @@ impl Tool for ExternalAgentTool {
     }
 
     fn description(&self) -> &str {
-        &self.definition.description
+        &self.agent_def.description
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), &self.definition.description).with_parameters(
-            ToolParameters::new()
-                .add_property(
-                    "task",
-                    PropertySchema::string("The task or question. Be specific about what you want to know or accomplish."),
-                    true,
-                )
-                .add_property(
-                    "new_instance",
-                    PropertySchema::boolean(
-                        "Start with a fresh context, discarding previous conversation history. Default: false (reuses history from prior calls)."
-                    ).with_default(serde_json::Value::Bool(false)),
-                    false,
-                ),
-        )
+        let desc = self.agent_def.tool_description
+            .as_deref()
+            .unwrap_or(&self.agent_def.description);
+        agent_tool_definition(self.name(), desc)
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
@@ -386,134 +443,40 @@ impl Tool for ExternalAgentTool {
             ctx.push_agent(&self.agent_name).await;
         }
 
-        let child_scope = format!("{}/{}", self.scope, self.agent_name);
-
-        // Clear scope if fresh instance requested
-        if args.new_instance {
-            if let Some(ref memory) = self.agent_memory {
-                memory.clear_scope(&child_scope).await;
-            }
-        }
-
-        // Load prior conversation history
-        let prior_history = if let Some(ref memory) = self.agent_memory {
-            memory.get_messages(&child_scope).await
+        let tool_limits = if self.agent_def.tool_limits.is_empty() {
+            None
         } else {
-            Vec::new()
+            Some(self.agent_def.tool_limits.clone())
         };
 
-        // Build tools for this agent: start with base tools it needs
-        let mut agent_tools = self.base_tools.subset(&self.definition.tools);
+        let config = AgentToolConfig {
+            agent_name: self.agent_name.clone(),
+            system_prompt: self.agent_def.system_prompt.clone(),
+            tool_names: self.agent_def.tools.clone(),
+            max_turns: self.agent_def.max_turns,
+            tool_limits,
+            compact_prompt: self.agent_def.compact_prompt
+                .as_deref()
+                .unwrap_or(DEFAULT_COMPACT_PROMPT)
+                .to_string(),
+        };
 
-        // If not at max depth, add agent tools so this agent can call other agents
-        let next_depth = self.current_depth + 1;
-        if next_depth < self.max_depth {
-            let nested_agent_tools = create_agent_tools(
-                &self.base_tools,
-                Arc::clone(&self.provider),
-                &self.external_agents,
-                &self.enabled_agents,
-                next_depth,
-                self.max_depth,
-                self.execution_context.clone(),
-                self.event_bus.clone(),
-                self.agent_memory.clone(),
-                child_scope.clone(),
-            );
-            for tool in nested_agent_tools {
-                agent_tools.register(tool);
-            }
-        }
-
-        // Add inform_user tool if event bus is available
-        if let Some(ref event_bus) = self.event_bus {
-            agent_tools.register(Arc::new(InformUserTool::new(
-                event_bus.clone(),
-                &self.agent_name,
-            )));
-        }
-
-        let agent_tools = Arc::new(agent_tools);
-
-        let has_sub_agents = next_depth < self.max_depth;
-        let has_tools = !self.definition.tools.is_empty();
-        let has_inform_user = self.event_bus.is_some();
-
-        let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
-            has_tools,
-            has_sub_agents,
-            has_inform_user,
-        });
-        let full_prompt = format!("{}\n\n---\n\n{}", preamble, self.definition.system_prompt);
-
-        let mut config = AgentConfig::new(self.agent_name.as_str())
-            .with_system_prompt(&full_prompt)
-            .with_max_turns(self.definition.max_turns);
-
-        // Apply tool limits if configured for this external agent
-        if !self.definition.tool_limits.is_empty() {
-            config = config.with_tool_limits(self.definition.tool_limits.clone());
-        }
-
-        // Create progress handler if event bus is available
-        let progress = self.event_bus.as_ref().map(|bus| bus.create_handler());
-
-        // Use continuation wrapper for execution
-        let continuation_config = ContinuationConfig::default();
-        let result = execute_with_continuation(
-            Arc::clone(&self.provider),
-            agent_tools,
+        let output = execute_agent(
             config,
-            args.task.clone(),
-            progress,
-            continuation_config,
-            self.event_bus.as_ref(),
-            prior_history,
+            args.task,
+            args.new_instance,
+            &self.base_tools,
+            &self.provider,
+            &self.external_agents,
+            &self.enabled_agents,
+            self.current_depth,
+            self.max_depth,
+            &self.execution_context,
+            &self.event_bus,
+            &self.agent_memory,
+            &self.scope,
         )
         .await;
-
-        // Store results back to memory, with LLM compaction
-        match &result {
-            AgentExecutionResult::Success { messages, .. }
-            | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
-                if let Some(ref memory) = self.agent_memory {
-                    let tool_calls: u32 = messages
-                        .iter()
-                        .map(|m| m.tool_calls.len() as u32)
-                        .sum();
-
-                    // Resolve compaction prompt: definition > default
-                    let prompt = self
-                        .definition
-                        .compact_prompt
-                        .as_deref()
-                        .unwrap_or(DEFAULT_COMPACT_PROMPT);
-
-                    let compacted =
-                        compact_agent_messages(&self.provider, messages.clone(), prompt).await;
-
-                    memory
-                        .store_messages(&child_scope, compacted, tool_calls)
-                        .await;
-                }
-            }
-            AgentExecutionResult::Error(_) => {}
-        }
-
-        let output = match result {
-            AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
-            AgentExecutionResult::MaxContinuationsReached {
-                partial_result,
-                continuations,
-                ..
-            } => Ok(ToolOutput::success(format!(
-                "Task partially completed after {} continuations.\n\n{}",
-                continuations, partial_result
-            ))),
-            AgentExecutionResult::Error(e) => {
-                Ok(ToolOutput::error(format!("Agent error: {}", e)))
-            }
-        };
 
         // Pop agent context
         if let Some(ref ctx) = self.execution_context {
@@ -523,6 +486,10 @@ impl Tool for ExternalAgentTool {
         output
     }
 }
+
+// =============================================================================
+// create_agent_tools
+// =============================================================================
 
 /// Create agent tools for all enabled agents.
 ///
@@ -604,6 +571,10 @@ pub fn create_agent_tools(
 
     tools
 }
+
+// =============================================================================
+// Agent memory compaction
+// =============================================================================
 
 /// Threshold in bytes at which agent memory compaction is triggered.
 /// Set below the 200KB trim_to_budget safety net to allow summarization before truncation.
@@ -714,5 +685,21 @@ async fn compact_agent_messages(
             tracing::warn!(error = %e, "Agent memory compaction failed, falling back to trim_to_budget");
             messages
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_tool_definition_structure() {
+        let def = agent_tool_definition("Agent[test]", "Test agent description");
+        assert_eq!(def.name, "Agent[test]");
+        assert_eq!(def.description, "Test agent description");
+        assert!(def.parameters.required.contains(&"task".to_string()));
+        assert!(!def.parameters.required.contains(&"new_instance".to_string()));
+        assert!(def.parameters.properties.contains_key("task"));
+        assert!(def.parameters.properties.contains_key("new_instance"));
     }
 }

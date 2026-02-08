@@ -15,17 +15,6 @@ You answer questions like "What config files are in this directory?" or "Find al
 3. **Explore strategically**: Start broad, follow promising leads, verify assumptions
 4. **Synthesize**: Summarize findings into a coherent answer
 
-## Your Tools
-- `find_files`: Primary discovery tool - recursive, supports patterns, extensions, depth limits
-  - Respects .gitignore by default
-  - Filter by file type (files, directories, or both)
-  - Example: find_files(extensions=["rs", "toml"], max_depth=2)
-- `search_files`: Find content patterns across files with regex
-- `read_file`: Inspect file contents
-  - Use `head`/`tail` for large files
-  - Use `grep` to filter lines
-  - Use line ranges for specific sections
-
 ## Exploration Strategies
 - **Top-down**: Start with find_files, identify relevant areas, dive deeper
 - **Pattern search**: Search for file names, extensions, or content patterns
@@ -46,8 +35,7 @@ You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete
 - Don't just list files without context - explain what you found
 - Don't read every file - be strategic
 - Don't give up after one search - try alternative patterns
-- Don't describe what you're going to do - just do it and report findings
-- Don't call find_files or search_files with the same or overlapping arguments - consolidate into one call"#;
+- Don't describe what you're going to do - just do it and report findings"#;
 
 pub struct ExploreAgent;
 

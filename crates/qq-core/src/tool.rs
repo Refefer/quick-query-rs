@@ -177,7 +177,15 @@ impl ToolOutput {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Short summary for user display (e.g., /tools command).
     fn description(&self) -> &str;
+
+    /// Rich description sent to LLMs as part of the tool definition.
+    /// Includes usage examples, dos/don'ts, and behavioral guidance.
+    /// Default: falls back to `description()`.
+    fn tool_description(&self) -> &str {
+        self.description()
+    }
 
     fn definition(&self) -> ToolDefinition;
 
@@ -351,6 +359,12 @@ mod tests {
         async fn execute(&self, _arguments: Value) -> Result<ToolOutput, crate::Error> {
             Ok(ToolOutput::success("blocking_result"))
         }
+    }
+
+    #[test]
+    fn test_tool_description_defaults_to_description() {
+        let tool = NonBlockingTool;
+        assert_eq!(tool.tool_description(), tool.description());
     }
 
     #[test]

@@ -172,11 +172,21 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents with optional line ranges, grep filtering, and head/tail. The grep param accepts regex — use alternation to filter for multiple patterns at once: grep=\"(TODO|FIXME|HACK)\" instead of calling read_file multiple times. For small files, just read the whole file."
+        "Read file contents with line ranges, grep, head/tail"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Read file contents with optional line ranges, grep filtering, and head/tail.\n\n\
+         Usage guidance:\n\
+         - The grep param accepts regex — use alternation to filter for multiple patterns at once: \
+         grep=\"(TODO|FIXME|HACK)\" instead of calling read_file multiple times.\n\
+         - For small files, just read the whole file instead of grepping repeatedly.\n\
+         - When you know the target file, use read_file(grep=...) instead of search_files.\n\
+         - Never re-read a file you already read in this session."
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property("path", PropertySchema::string("Path to the file to read"), true)
                 .add_property(
@@ -351,6 +361,10 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
+        "List files in a directory (non-recursive)"
+    }
+
+    fn tool_description(&self) -> &str {
         "List files in a directory (non-recursive). Supports glob filtering. For recursive search, use find_files."
     }
 
@@ -359,7 +373,7 @@ impl Tool for ListFilesTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property(
                     "path",
@@ -473,7 +487,15 @@ impl Tool for FindFilesTool {
     }
 
     fn description(&self) -> &str {
-        "Recursive file discovery with gitignore support. Returns matching paths. Use extensions array to find multiple types in one call: extensions=[\"rs\",\"toml\"] instead of separate calls. Combine with pattern glob for further filtering."
+        "Find files recursively with pattern/extension filtering"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Recursive file discovery with gitignore support. Returns matching paths.\n\n\
+         Usage guidance:\n\
+         - Use extensions array for multiple types: extensions=[\"rs\",\"toml\"] instead of separate calls.\n\
+         - Combine with pattern glob for further filtering.\n\
+         - Respects .gitignore by default."
     }
 
     fn is_blocking(&self) -> bool {
@@ -481,7 +503,7 @@ impl Tool for FindFilesTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property(
                     "path",
@@ -709,7 +731,16 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a regex pattern across files. Returns matching lines with paths and line numbers. Use alternation to search for multiple terms in one call: pattern=\"(foo|bar|baz)\" instead of separate calls per term. For a single known file, prefer read_file with grep instead."
+        "Search for regex patterns across files"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Search for a regex pattern across files. Returns matching lines with paths and line numbers.\n\n\
+         Usage guidance:\n\
+         - Use alternation to search for multiple terms in one call: pattern=\"(foo|bar|baz)\" \
+         instead of separate calls per term.\n\
+         - For a single known file, prefer read_file with grep instead.\n\
+         - One broad search is better than many narrow ones."
     }
 
     fn is_blocking(&self) -> bool {
@@ -717,7 +748,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property(
                     "pattern",
@@ -839,11 +870,19 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write full content to a file (creates or overwrites). For targeted changes to an existing file, prefer edit_file."
+        "Create a file or overwrite existing content"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Write full content to a file (creates or overwrites).\n\n\
+         Usage guidance:\n\
+         - Use ONLY for creating NEW files.\n\
+         - For modifying existing files, ALWAYS use edit_file instead (more precise, shows diff).\n\
+         - Never overwrite a file you haven't read first."
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property("path", PropertySchema::string("Path to the file to write"), true)
                 .add_property("content", PropertySchema::string("Content to write to the file"), true),
@@ -946,7 +985,18 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Precision file editing: search/replace, insert, delete, and replace_lines operations. The edits array accepts multiple operations in sequence — batch all edits to a file into one call instead of calling edit_file repeatedly for each change."
+        "Edit files with search/replace, insert, delete operations"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Precision file editing: search/replace, insert, delete, and replace_lines operations.\n\n\
+         Usage guidance:\n\
+         - PREFERRED tool for modifying existing files (more precise than write_file, shows diff).\n\
+         - The edits array accepts multiple operations in sequence — batch all edits to a file \
+         into one call instead of calling edit_file repeatedly for each change.\n\
+         - Operation types: replace (literal or regex), insert (at line), delete (line range), \
+         replace_lines (replace entire line range).\n\
+         - Pattern: search first, read second, modify third."
     }
 
     fn is_blocking(&self) -> bool {
@@ -954,7 +1004,7 @@ impl Tool for EditFileTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property("path", PropertySchema::string("Path to the file to edit"), true)
                 .add_property(

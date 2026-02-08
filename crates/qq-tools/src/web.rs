@@ -72,7 +72,16 @@ impl Tool for FetchWebpageTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a webpage and extract its text content. Optionally filter by CSS selector."
+        "Fetch a webpage and extract its text content"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Fetch a webpage and extract its text content.\n\n\
+         Usage guidance:\n\
+         - Use after web_search when the synthesized summary isn't sufficient for your needs.\n\
+         - Optionally filter by CSS selector to extract specific content.\n\
+         - Content is automatically cleaned: scripts, styles, nav/footer removed.\n\
+         - Output is truncated at 50KB."
     }
 
     fn is_blocking(&self) -> bool {
@@ -80,7 +89,7 @@ impl Tool for FetchWebpageTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description()).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property("url", PropertySchema::string("URL of the webpage to fetch"), true)
                 .add_property(
@@ -424,8 +433,12 @@ impl Tool for WebSearchTool {
         "Search the web using natural language queries"
     }
 
+    fn tool_description(&self) -> &str {
+        WEB_SEARCH_DESCRIPTION
+    }
+
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), WEB_SEARCH_DESCRIPTION).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property("query", PropertySchema::string("The search query string (can be natural language)"), true),
         )

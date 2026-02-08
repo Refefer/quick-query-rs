@@ -41,14 +41,22 @@ impl Tool for InformUserTool {
         "Send a status message to the user without ending your turn"
     }
 
+    fn tool_description(&self) -> &str {
+        "Send a status message to the user without ending your turn.\n\n\
+         Use this to keep the user informed about what you're doing \
+         (e.g., 'Delegating to researcher...', 'Analyzing results...').\n\n\
+         When to use:\n\
+         - Before starting significant work: what you are about to do\n\
+         - When you discover something notable: key findings or unexpected issues\n\
+         - When completing phases of a multi-step task: progress updates\n\
+         - When plans change: why you are adjusting your approach\n\n\
+         This is fire-and-forget: does not pause execution or wait for a response.\n\
+         When executing multi-step plans, report completion of each step, then keep going.\n\
+         DO NOT stop between steps to wait for confirmation."
+    }
+
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            "inform_user",
-            "Send a status message to the user without ending your turn. \
-             Use this to keep the user informed about what you're doing \
-             (e.g., 'Delegating to researcher...', 'Analyzing results...'). \
-             The message is displayed immediately and you continue executing.",
-        )
+        ToolDefinition::new("inform_user", self.tool_description())
         .with_parameters(
             ToolParameters::new().add_property(
                 "message",

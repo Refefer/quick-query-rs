@@ -68,20 +68,9 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
     if ctx.has_inform_user {
         sections.push(
             "### Keeping the User Informed\n\
-             Use `inform_user` to send status messages to the user WITHOUT ending your turn.\n\
-             The user sees these immediately while you continue working.\n\
-             \n\
-             When to use it:\n\
-             - Before starting significant work: what you are about to do\n\
-             - When you discover something notable: key findings or unexpected issues\n\
-             - When completing phases of a multi-step task: progress updates\n\
-             - When plans change: why you are adjusting your approach\n\
-             \n\
-             This is fire-and-forget: calling inform_user does not pause execution or wait\n\
-             for a response. Use it freely for transparency.\n\
-             \n\
-             When executing multi-step plans, use inform_user to report completion of each step,\n\
-             then keep going. Do NOT stop between steps to wait for confirmation."
+             You have the `inform_user` tool for sending status messages to the user without ending your turn.\n\
+             Use it before starting significant work, when discovering something notable, and when completing\n\
+             phases of multi-step tasks. See the tool's description for full guidance."
                 .to_string(),
         );
     }
@@ -90,18 +79,9 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
     if ctx.has_tools {
         sections.push(
             "### Tool Usage Efficiency\n\
-             NEVER call the same tool multiple times when a single call would suffice. Before\n\
-             making a tool call, check if you already have the information from a previous call.\n\
-             \n\
-             - Consolidate searches: use regex alternation (e.g., `\"(struct|impl) Config\"`)\n\
-               instead of separate searches for each pattern.\n\
-             - Consolidate file discovery: use arrays (e.g., `extensions=[\"rs\", \"toml\"]`)\n\
-               instead of one call per file type.\n\
-             - Consolidate edits: batch multiple edit operations into one edit_file call.\n\
-             - When you know the target file, use read_file(grep=...) instead of search_files.\n\
-             - For small files, just read the whole file instead of grepping repeatedly.\n\
-             - Never re-read a file you already read in this session.\n\
-             - One broad search is better than many narrow ones."
+             Before making a tool call, check if you already have the information from a previous call.\n\
+             Read each tool's description carefully — they contain batching and consolidation guidance.\n\
+             Never re-read a file you already read in this session."
                 .to_string(),
         );
     }

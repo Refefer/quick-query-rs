@@ -58,12 +58,15 @@ impl Tool for ProcessLargeDataTool {
         "Chunk and summarize large content that's too big to analyze directly"
     }
 
+    fn tool_description(&self) -> &str {
+        "Process large content by splitting it into chunks and summarizing each chunk. \
+         Use this when you receive data too large to analyze directly, such as very long \
+         file listings, large log outputs, or extensive search results. The tool will \
+         chunk the content and provide a condensed summary while preserving key information."
+    }
+
     fn definition(&self) -> ToolDefinition {
-        let long_desc = "Process large content by splitting it into chunks and summarizing each chunk. \
-            Use this when you receive data too large to analyze directly, such as very long \
-            file listings, large log outputs, or extensive search results. The tool will \
-            chunk the content and provide a condensed summary while preserving key information.";
-        ToolDefinition::new(self.name(), long_desc).with_parameters(
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
                 .add_property(
                     "content",

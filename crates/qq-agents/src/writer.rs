@@ -36,15 +36,6 @@ NEVER assume a destination. If the prompt says "Write a README" without specifyi
 - **API docs**: Consistent format, show don't tell, cover edge cases
 - **Changelog/Release notes**: What changed, why it matters, migration steps
 
-## Your Tools
-- `find_files`: Discover project structure for context (recursive, gitignore-aware)
-- `search_files`: Find relevant code, patterns, existing docs
-- `read_file`: Understand what you're documenting deeply
-- `write_file`: Create or update content files
-- `edit_file`: Precision editing with search/replace — use when updating specific sections of existing files
-- `copy_file`: Copy a file to a new location
-- `create_directory`: Create directories for organizing documentation
-
 ## Output Expectations
 Your response should:
 - Confirm the output destination was followed (or note that clarification was requested)
