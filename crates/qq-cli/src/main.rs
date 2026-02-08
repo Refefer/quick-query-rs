@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use qq_agents::{ChatAgent, InternalAgent};
+use qq_agents::{ProjectManagerAgent, InternalAgent};
 use qq_core::{
     execute_tools_parallel_with_chunker, ChunkProcessor, CompletionRequest, Message, Provider,
     ToolRegistry,
 };
-use qq_providers::openai::OpenAIProvider;
+use qq_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
 mod agents;
 mod chat;
@@ -131,7 +131,7 @@ pub struct Cli {
     pub no_tui: bool,
 
     /// Primary agent to use for interactive sessions (overrides profile)
-    /// Can be any internal agent: chat, explore, researcher, coder, reviewer, summarizer, planner, writer
+    /// Can be any internal agent: pm, explore, researcher, coder, reviewer, summarizer, planner, writer
     #[arg(short = 'A', long)]
     pub agent: Option<String>,
 
@@ -141,8 +141,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start interactive chat mode
-    Chat {
+    /// Start interactive project management mode
+    Manage {
         /// Initial system prompt for the conversation
         #[arg(short, long)]
         system: Option<String>,
@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
 
     match &cli.command {
-        Some(Commands::Chat { system }) => {
+        Some(Commands::Manage { system }) => {
             chat_mode(&cli, &config, system.clone()).await
         }
         Some(Commands::Profiles) => {
@@ -413,14 +413,14 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     let disable_tools = cli.no_tools || cli.minimal;
     let disable_agents = cli.no_agents || cli.minimal;
 
-    // When using the chat agent, combine the Chat agent's delegation prompt
-    // with any user-specified prompt. The Chat agent's prompt ensures proper
+    // When using the PM agent, combine the PM agent's coordination prompt
+    // with any user-specified prompt. The PM agent's prompt ensures proper
     // delegation behavior while the user's prompt can add additional context.
-    let system_prompt = if settings.agent == "chat" {
-        let chat_agent = ChatAgent::new();
-        let base_prompt = chat_agent.system_prompt();
+    let system_prompt = if settings.agent == "pm" || settings.agent == "chat" {
+        let pm_agent = ProjectManagerAgent::new();
+        let base_prompt = pm_agent.system_prompt();
         let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
-            has_tools: false, // chat delegates everything
+            has_tools: true, // PM has task tracking tools
             has_sub_agents: !disable_agents,
             has_inform_user: true,
         });
@@ -437,12 +437,20 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Set up base tools (conditionally)
-    let base_tools = if disable_tools {
+    let mut base_tools = if disable_tools {
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
         ToolRegistry::new()
     } else {
         build_tools_registry(config)?
     };
+
+    // Register task tracking tools (session-scoped, in-memory)
+    if !disable_tools {
+        let task_store = std::sync::Arc::new(qq_tools::TaskStore::new());
+        for tool in qq_tools::create_task_tools_arc(task_store) {
+            base_tools.register(tool);
+        }
+    }
 
     // Load agents config
     let agents_config = AgentsConfig::load().unwrap_or_default();
@@ -496,7 +504,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             Some(execution_context.clone()),
             Some(event_bus.clone()),
             Some(agent_memory.clone()),
-            "chat".to_string(),
+            "pm".to_string(),
         )
     };
 
@@ -642,7 +650,7 @@ fn list_profiles(config: &Config) -> Result<()> {
             }
 
             // Primary agent
-            if resolved.agent != "chat" {
+            if resolved.agent != "pm" && resolved.agent != "chat" {
                 println!("    Primary agent: {}", resolved.agent);
             }
         } else {
@@ -722,6 +730,7 @@ fn show_config(config: &Config) -> Result<()> {
 struct ResolvedSettings {
     profile_name: String,
     provider_name: String,
+    provider_type: String,
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
@@ -754,7 +763,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
     let api_key = cli
         .base_url
         .as_ref()
-        .and_then(|_| Some("none".to_string())) // If base_url provided via CLI, allow dummy key
+        .map(|_| "none".to_string()) // If base_url provided via CLI, allow dummy key
         .or_else(|| provider_config.and_then(|p| p.api_key.clone()))
         .or_else(|| std::env::var(format!("{}_API_KEY", provider_name.to_uppercase())).ok())
         .with_context(|| {
@@ -795,9 +804,17 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         .clone()
         .unwrap_or_else(|| resolved_profile.agent.clone());
 
+    // Resolve provider type
+    let provider_type = resolve_provider_type(
+        resolved_profile.provider_type.as_deref(),
+        &provider_name,
+        base_url.as_deref(),
+    );
+
     Ok(ResolvedSettings {
         profile_name,
         provider_name,
+        provider_type,
         api_key,
         base_url,
         model,
@@ -808,16 +825,111 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
     })
 }
 
+/// Resolve the provider type from explicit config, provider name, or base_url.
+///
+/// Priority:
+/// 1. Explicit `type` in provider config always wins
+/// 2. If no type but base_url is set → "openai" (OpenAI-compatible mode)
+/// 3. If no type and no base_url → infer from provider name
+fn resolve_provider_type(
+    explicit_type: Option<&str>,
+    provider_name: &str,
+    base_url: Option<&str>,
+) -> String {
+    // 1. Explicit type always wins
+    if let Some(t) = explicit_type {
+        return t.to_lowercase();
+    }
+
+    // 2. If base_url is set, default to openai-compatible
+    if base_url.is_some() {
+        return "openai".to_string();
+    }
+
+    // 3. Infer from provider name
+    let name = provider_name.to_lowercase();
+    match name.as_str() {
+        "anthropic" | "claude" => "anthropic".to_string(),
+        "gemini" | "google" => "gemini".to_string(),
+        _ => "openai".to_string(),
+    }
+}
+
 fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn Provider>> {
-    let mut provider = OpenAIProvider::new(&settings.api_key);
-
-    if let Some(model) = &settings.model {
-        provider = provider.with_default_model(model);
+    match settings.provider_type.as_str() {
+        "anthropic" => {
+            let mut provider = AnthropicProvider::new(&settings.api_key);
+            if let Some(model) = &settings.model {
+                provider = provider.with_default_model(model);
+            }
+            if let Some(url) = &settings.base_url {
+                provider = provider.with_base_url(url);
+            }
+            Ok(Box::new(provider))
+        }
+        "gemini" => {
+            let mut provider = GeminiProvider::new(&settings.api_key);
+            if let Some(model) = &settings.model {
+                provider = provider.with_default_model(model);
+            }
+            if let Some(url) = &settings.base_url {
+                provider = provider.with_base_url(url);
+            }
+            Ok(Box::new(provider))
+        }
+        _ => {
+            // Default: OpenAI-compatible
+            let mut provider = OpenAIProvider::new(&settings.api_key);
+            if let Some(model) = &settings.model {
+                provider = provider.with_default_model(model);
+            }
+            if let Some(url) = &settings.base_url {
+                provider = provider.with_base_url(url);
+            }
+            Ok(Box::new(provider))
+        }
     }
-    if let Some(url) = &settings.base_url {
-        provider = provider.with_base_url(url);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_provider_type_explicit() {
+        assert_eq!(resolve_provider_type(Some("anthropic"), "whatever", None), "anthropic");
+        assert_eq!(resolve_provider_type(Some("gemini"), "whatever", None), "gemini");
+        assert_eq!(resolve_provider_type(Some("openai"), "whatever", None), "openai");
+        // Explicit type wins even with base_url
+        assert_eq!(
+            resolve_provider_type(Some("anthropic"), "openai", Some("http://localhost:8080")),
+            "anthropic"
+        );
     }
 
-    Ok(Box::new(provider))
+    #[test]
+    fn test_resolve_provider_type_base_url_defaults_openai() {
+        assert_eq!(
+            resolve_provider_type(None, "custom", Some("http://localhost:11434/v1")),
+            "openai"
+        );
+        assert_eq!(
+            resolve_provider_type(None, "anthropic", Some("http://proxy.example.com")),
+            "openai"
+        );
+    }
+
+    #[test]
+    fn test_resolve_provider_type_name_inference() {
+        assert_eq!(resolve_provider_type(None, "anthropic", None), "anthropic");
+        assert_eq!(resolve_provider_type(None, "claude", None), "anthropic");
+        assert_eq!(resolve_provider_type(None, "Anthropic", None), "anthropic");
+        assert_eq!(resolve_provider_type(None, "gemini", None), "gemini");
+        assert_eq!(resolve_provider_type(None, "google", None), "gemini");
+        assert_eq!(resolve_provider_type(None, "Google", None), "gemini");
+        assert_eq!(resolve_provider_type(None, "openai", None), "openai");
+        assert_eq!(resolve_provider_type(None, "groq", None), "openai");
+        assert_eq!(resolve_provider_type(None, "ollama", None), "openai");
+    }
 }
 

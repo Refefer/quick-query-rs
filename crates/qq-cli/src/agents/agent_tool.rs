@@ -63,6 +63,7 @@ fn agent_tool_definition(name: &str, description: &str) -> ToolDefinition {
 ///
 /// Handles scope management, tool setup, agent execution, memory compaction,
 /// and result formatting.
+#[allow(clippy::too_many_arguments)]
 async fn execute_agent(
     config: AgentToolConfig,
     task: String,
@@ -228,11 +229,12 @@ pub struct InternalAgentTool {
     event_bus: Option<AgentEventBus>,
     /// Scoped agent memory for persistent instance state
     agent_memory: Option<AgentMemory>,
-    /// Scope path for this tool (e.g., "chat" at depth 0)
+    /// Scope path for this tool (e.g., "pm" at depth 0)
     scope: String,
 }
 
 impl InternalAgentTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent: Box<dyn InternalAgent>,
         base_tools: &ToolRegistry,
@@ -383,6 +385,7 @@ pub struct ExternalAgentTool {
 }
 
 impl ExternalAgentTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: &str,
         definition: AgentDefinition,
@@ -505,7 +508,8 @@ impl Tool for ExternalAgentTool {
 /// * `execution_context` - Optional context for tracking execution stack
 /// * `event_bus` - Optional event bus for progress reporting
 /// * `agent_memory` - Optional scoped agent memory for persistent instance state
-/// * `scope` - Current scope path (e.g., "chat", "chat/coder")
+/// * `scope` - Current scope path (e.g., "pm", "pm/coder")
+#[allow(clippy::too_many_arguments)]
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
     provider: Arc<dyn Provider>,

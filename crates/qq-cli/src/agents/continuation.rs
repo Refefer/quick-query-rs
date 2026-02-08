@@ -206,6 +206,7 @@ pub enum AgentExecutionResult {
 ///
 /// This wraps `Agent::run_once_with_progress()` and handles max_turns exceeded
 /// by generating a summary and re-executing with context.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_with_continuation(
     provider: Arc<dyn Provider>,
     tools: Arc<ToolRegistry>,

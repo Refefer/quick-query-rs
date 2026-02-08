@@ -110,7 +110,7 @@ pub fn calculate_input_lines(input_text: &str, available_width: u16) -> u16 {
     }
 
     // Calculate wrapped line count
-    let wrapped_lines = (input_text.len() + text_width - 1) / text_width;
+    let wrapped_lines = input_text.len().div_ceil(text_width);
     wrapped_lines as u16
 }
 

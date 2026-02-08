@@ -56,14 +56,19 @@ pub struct ProfileEntry {
     pub agents: Option<Vec<String>>,
 
     /// Primary agent to use for interactive sessions.
-    /// Defaults to "chat" if not specified.
-    /// Can be any internal or external agent name (e.g., "chat", "explore", "researcher").
+    /// Defaults to "pm" if not specified.
+    /// Can be any internal or external agent name (e.g., "pm", "explore", "researcher").
     #[serde(default)]
     pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderConfigEntry {
+    /// Provider type: "openai", "anthropic", or "gemini".
+    /// If omitted, inferred from base_url (defaults to openai) or provider name.
+    #[serde(rename = "type", default)]
+    pub provider_type: Option<String>,
+
     #[serde(default)]
     pub api_key: Option<String>,
 
@@ -246,7 +251,8 @@ impl Config {
                  [providers.openai]\n\
                  api_key = \"sk-...\"\n\n\
                  [profiles.default]\n\
-                 provider = \"openai\"\n"
+                 provider = \"openai\"\n\n\
+                 Supported providers: openai, anthropic, gemini (set type in provider config)\n"
             )
         }
     }
@@ -275,13 +281,13 @@ impl Config {
         let provider_config = self.providers.get(&provider_name);
 
         // Resolve the system prompt
-        let system_prompt = profile.prompt.as_ref().and_then(|p| {
+        let system_prompt = profile.prompt.as_ref().map(|p| {
             // First check if it's a named prompt
             if let Some(prompt_entry) = self.prompts.get(p) {
-                Some(prompt_entry.prompt.clone())
+                prompt_entry.prompt.clone()
             } else {
                 // Otherwise treat it as an inline prompt
-                Some(p.clone())
+                p.clone()
             }
         });
 
@@ -291,14 +297,17 @@ impl Config {
             .unwrap_or_default();
         parameters.extend(profile.parameters.clone());
 
+        let provider_type = provider_config.and_then(|p| p.provider_type.clone());
+
         Some(ResolvedProfile {
             provider_name,
+            provider_type,
             provider_config: provider_config.cloned(),
             system_prompt,
             model: profile.model.clone(),
             parameters,
             agents: profile.agents.clone(),
-            agent: profile.agent.clone().unwrap_or_else(|| "chat".to_string()),
+            agent: profile.agent.clone().unwrap_or_else(|| "pm".to_string()),
         })
     }
 }
@@ -308,12 +317,13 @@ impl Config {
 #[allow(dead_code)]
 pub struct ResolvedProfile {
     pub provider_name: String,
+    pub provider_type: Option<String>,
     pub provider_config: Option<ProviderConfigEntry>,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
     pub agents: Option<Vec<String>>,
-    /// Primary agent for interactive sessions (default: "chat")
+    /// Primary agent for interactive sessions (default: "pm")
     pub agent: String,
 }
 
@@ -346,6 +356,40 @@ mod tests {
         assert!(config.providers.contains_key("openai"));
         assert!(config.providers.contains_key("anthropic"));
         assert!(config.profiles.contains_key("default"));
+    }
+
+    #[test]
+    fn test_parse_provider_with_type() {
+        let toml = r#"
+            default_profile = "default"
+
+            [providers.claude]
+            type = "anthropic"
+            api_key = "sk-ant-test"
+            default_model = "claude-sonnet-4-20250514"
+
+            [providers.google]
+            type = "gemini"
+            api_key = "AIza-test"
+
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+
+            [profiles.default]
+            provider = "claude"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        let claude = config.providers.get("claude").unwrap();
+        assert_eq!(claude.provider_type.as_deref(), Some("anthropic"));
+        assert_eq!(claude.default_model.as_deref(), Some("claude-sonnet-4-20250514"));
+
+        let google = config.providers.get("google").unwrap();
+        assert_eq!(google.provider_type.as_deref(), Some("gemini"));
+
+        let ollama = config.providers.get("ollama").unwrap();
+        assert_eq!(ollama.provider_type, None);
     }
 
     #[test]

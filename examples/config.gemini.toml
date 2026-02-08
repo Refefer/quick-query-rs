@@ -1,0 +1,18 @@
+# Gemini-Only Configuration
+# Copy to: ~/.config/qq/config.toml
+#
+# Minimal setup for using Google Gemini.
+# Set GEMINI_API_KEY env var or configure api_key below.
+
+default_profile = "default"
+
+[providers.gemini]
+# api_key = "AIza..."  # Or set GEMINI_API_KEY env var
+default_model = "gemini-2.5-flash"
+
+[profiles.default]
+provider = "gemini"
+
+[profiles.pro]
+provider = "gemini"
+model = "gemini-2.5-pro"

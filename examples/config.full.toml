@@ -22,15 +22,24 @@ default_model = "gpt-4o"                # Override global default for this provi
 # reasoning_effort = "medium"                    # For o1/reasoning models
 # chat_template_kwargs = { reasoning_effort = "high" }  # For custom templates
 
-# Anthropic Configuration (for future use)
+# Anthropic Configuration (native provider)
+# Type is auto-detected from provider name "anthropic"
 [providers.anthropic]
-api_key = "sk-ant-your-anthropic-key-here"
-default_model = "claude-3-5-sonnet-20241022"
+api_key = "sk-ant-your-anthropic-key-here"  # Or set ANTHROPIC_API_KEY env var
+default_model = "claude-sonnet-4-20250514"
 
-# Google Gemini Configuration (for future use)
+# Google Gemini Configuration (native provider)
+# Type is auto-detected from provider name "gemini"
 [providers.gemini]
-api_key = "your-gemini-api-key-here"
-default_model = "gemini-1.5-pro"
+api_key = "your-gemini-api-key-here"  # Or set GEMINI_API_KEY env var
+default_model = "gemini-2.5-flash"
+
+# Custom-named provider with explicit type
+# Use `type` when your provider name doesn't match the provider type
+[providers.my-claude]
+type = "anthropic"
+api_key = "sk-ant-your-key"
+base_url = "https://my-proxy.example.com/v1"  # Optional proxy
 
 # Mistral Configuration (for future use)
 [providers.mistral]

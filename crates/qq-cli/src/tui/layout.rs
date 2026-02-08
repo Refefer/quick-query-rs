@@ -39,17 +39,17 @@ pub enum PaneSize {
 
 impl PaneSize {
     /// Convert to a ratatui Constraint
-    fn to_constraint(&self) -> Constraint {
+    fn to_constraint(self) -> Constraint {
         match self {
-            PaneSize::Fixed(lines) => Constraint::Length(*lines),
+            PaneSize::Fixed(lines) => Constraint::Length(lines),
             PaneSize::Fill => Constraint::Min(5), // Minimum 5 lines for content
             PaneSize::Dynamic { min, max, content_lines } => {
                 // Add 2 for borders
                 let desired = content_lines.saturating_add(2);
-                let clamped = desired.clamp(*min, *max);
+                let clamped = desired.clamp(min, max);
                 Constraint::Length(clamped)
             }
-            PaneSize::Percentage(pct) => Constraint::Percentage(*pct),
+            PaneSize::Percentage(pct) => Constraint::Percentage(pct),
         }
     }
 }

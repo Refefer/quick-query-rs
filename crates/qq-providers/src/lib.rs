@@ -2,6 +2,10 @@
 //!
 //! This crate provides implementations of the Provider trait for various LLM APIs.
 
+pub mod anthropic;
+pub mod gemini;
 pub mod openai;
 
+pub use anthropic::AnthropicProvider;
+pub use gemini::GeminiProvider;
 pub use openai::OpenAIProvider;

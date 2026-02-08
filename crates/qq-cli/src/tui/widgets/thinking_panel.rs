@@ -259,7 +259,7 @@ impl Widget for ThinkingPanel<'_> {
                 if line_width == 0 {
                     1 // Empty lines still take 1 row
                 } else {
-                    ((line_width + inner_width - 1) / inner_width) as u16
+                    line_width.div_ceil(inner_width) as u16
                 }
             })
             .sum();

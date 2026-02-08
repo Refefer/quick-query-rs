@@ -10,7 +10,7 @@ A fast, extensible command-line interface for interacting with Large Language Mo
 - **One-shot completions** — Quick, single-prompt queries for scripts or ad-hoc use
 - **Interactive chat** — Rich TUI with streaming, markdown rendering, and conversation history
 - **Agentic workflows** — 8 built-in agents (coder, researcher, planner, etc.) with automatic tool use
-- **Provider agnostic** — Works with OpenAI, Ollama, vLLM, Together, Groq, and any OpenAI-compatible API
+- **Multi-provider** — Native support for OpenAI, Anthropic Claude, and Google Gemini, plus any OpenAI-compatible API (Ollama, vLLM, Groq, etc.)
 - **Pure Rust** — No ncurses dependency, cross-platform, fast startup
 
 ## Quick Start
@@ -34,8 +34,17 @@ Create `~/.config/qq/config.toml`:
 ```toml
 default_profile = "default"
 
+# OpenAI
 [providers.openai]
 api_key = "sk-..."  # Or set OPENAI_API_KEY env var
+
+# Anthropic (native)
+[providers.anthropic]
+api_key = "sk-ant-..."  # Or set ANTHROPIC_API_KEY env var
+
+# Google Gemini (native)
+[providers.gemini]
+api_key = "AIza..."  # Or set GEMINI_API_KEY env var
 
 [profiles.default]
 provider = "openai"
@@ -48,21 +57,21 @@ model = "gpt-4o"
 # One-shot completion
 qq -p "Explain async/await in Rust"
 
-# Interactive chat
-qq chat
+# Interactive project management mode
+qq manage
 
 # With specific agent
 qq -A researcher -p "Best practices for error handling in Rust"
 
 # With specific profile
-qq -P coding chat
+qq -P coding manage
 ```
 
 ## Built-in Agents
 
 | Agent | Purpose |
 |-------|---------|
-| **chat** | Interactive conversations and delegation |
+| **pm** | Project manager: coordinates agents, tracks tasks, ensures delivery |
 | **explore** | Filesystem exploration and discovery |
 | **researcher** | Web research and synthesis |
 | **coder** | Code generation and modification |
@@ -96,7 +105,7 @@ Options:
       --minimal              No tools, no agents
 
 Commands:
-  chat       Interactive chat mode
+  manage     Interactive project management mode
   profiles   List configured profiles
   config     Show current configuration
 ```
@@ -164,6 +173,8 @@ enable_web = true
 See the [examples/](examples/) directory:
 - `config.basic.toml` — Minimal setup
 - `config.full.toml` — All options
+- `config.anthropic.toml` — Anthropic Claude setup
+- `config.gemini.toml` — Google Gemini setup
 - `config.local-llm.toml` — Ollama/vLLM setup
 - `config.multi-provider.toml` — Multiple providers
 - `config.openai-compatible.toml` — OpenAI-compatible APIs
@@ -211,7 +222,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 | Problem | Solution |
 |---------|----------|
 | `qq: command not found` | Add `~/.cargo/bin` to your PATH |
-| `401 Unauthorized` | Check API key in config or `OPENAI_API_KEY` env var |
+| `401 Unauthorized` | Check API key in config or env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
 | Build fails with SQLite error | Ensure C compiler is installed |
 | Garbled TUI output | Use a terminal with ANSI support, or try `--no-tui` |
 

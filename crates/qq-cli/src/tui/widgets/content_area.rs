@@ -53,8 +53,6 @@ impl Widget for ContentArea<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let title = if self.is_streaming {
             " Response... "
-        } else if self.content.is_empty() {
-            " Response "
         } else {
             " Response "
         };

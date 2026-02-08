@@ -262,8 +262,8 @@ impl Tool for ReadFileTool {
                 if regex.is_match(line) {
                     let start = i.saturating_sub(context);
                     let end = (i + context + 1).min(total_lines);
-                    for j in start..end {
-                        included[j] = true;
+                    for item in included.iter_mut().take(end).skip(start) {
+                        *item = true;
                     }
                 }
             }
@@ -288,10 +288,8 @@ impl Tool for ReadFileTool {
             // Handle start_line/end_line/limit with backward compatibility for offset
             let start = if let Some(sl) = args.start_line {
                 sl.saturating_sub(1) // Convert 1-indexed to 0-indexed
-            } else if let Some(off) = args.offset {
-                off // offset is already 0-indexed (backward compat)
             } else {
-                0
+                args.offset.unwrap_or_default()
             };
 
             let end = if let Some(el) = args.end_line {
@@ -319,8 +317,8 @@ impl Tool for ReadFileTool {
             .collect();
 
         let output = if result_lines.is_empty() {
-            if args.grep.is_some() {
-                format!("No lines matching '{}' in {}", args.grep.unwrap(), args.path)
+            if let Some(ref grep) = args.grep {
+                format!("No lines matching '{}' in {}", grep, args.path)
             } else {
                 format!("File {} is empty or line range is out of bounds", args.path)
             }
@@ -611,6 +609,7 @@ impl Tool for FindFilesTool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_files_sync(
     base_path: &Path,
     root: &Path,
@@ -1171,14 +1170,12 @@ fn apply_edits(content: &str, edits: &[EditOperation], path: &str) -> Result<(St
                         let new = re.replace(&full_content, replace.as_str()).to_string();
                         (new, count)
                     }
+                } else if *all {
+                    let count = full_content.matches(search).count();
+                    (full_content.replace(search, replace), count)
                 } else {
-                    if *all {
-                        let count = full_content.matches(search).count();
-                        (full_content.replace(search, replace), count)
-                    } else {
-                        let count = if full_content.contains(search) { 1 } else { 0 };
-                        (full_content.replacen(search, replace, 1), count)
-                    }
+                    let count = if full_content.contains(search) { 1 } else { 0 };
+                    (full_content.replacen(search, replace, 1), count)
                 };
 
                 if count == 0 && *must_match {
@@ -1274,9 +1271,10 @@ fn apply_edits(content: &str, edits: &[EditOperation], path: &str) -> Result<(St
 
     // Reconstruct content preserving trailing newline behavior
     let mut result = lines.join("\n");
-    if ends_with_newline || (!content.is_empty() && result.is_empty()) {
-        result.push('\n');
-    } else if !content.is_empty() && !result.is_empty() && content.ends_with('\n') {
+    if ends_with_newline
+        || (!content.is_empty() && result.is_empty())
+        || (!content.is_empty() && !result.is_empty() && content.ends_with('\n'))
+    {
         result.push('\n');
     }
 

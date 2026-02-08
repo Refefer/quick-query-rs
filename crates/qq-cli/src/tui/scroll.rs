@@ -124,11 +124,7 @@ impl ScrollState {
         self.offset = (self.offset + amount).min(max);
 
         // Re-enable auto-scroll when reaching the bottom
-        if self.offset >= max && max > 0 {
-            self.auto_scroll = true;
-        } else {
-            self.auto_scroll = false;
-        }
+        self.auto_scroll = self.offset >= max && max > 0;
     }
 
     /// Page up (scroll by half viewport).

@@ -1,34 +1,53 @@
 # Multi-Provider Configuration
 # Copy to: ~/.config/qq/config.toml
 #
-# Configure multiple providers and switch between them using --provider flag.
-# Example: qq --provider anthropic -p "Hello"
+# Configure multiple providers and switch between them using profiles or --provider flag.
+# Example: qq -P claude-profile manage
 
-default_provider = "openai"
-default_model = "gpt-4o"
+default_profile = "default"
 
 # OpenAI - for general tasks
 [providers.openai]
-api_key = "sk-your-openai-key"
+api_key = "sk-your-openai-key"  # Or set OPENAI_API_KEY env var
 default_model = "gpt-4o"
 
-# Anthropic - for complex reasoning (future support)
+# Anthropic - native provider (auto-detected from name)
 [providers.anthropic]
-api_key = "sk-ant-your-anthropic-key"
-default_model = "claude-3-5-sonnet-20241022"
+api_key = "sk-ant-your-anthropic-key"  # Or set ANTHROPIC_API_KEY env var
+default_model = "claude-sonnet-4-20250514"
 
-# Groq - for fast inference (via OpenAI-compatible API)
-# Use with: qq --provider groq -p "Hello"
-# Note: Currently requires using openai provider with custom base_url
-# [providers.groq]
-# api_key = "your-groq-key"
-# base_url = "https://api.groq.com/openai/v1"
-# default_model = "llama-3.1-70b-versatile"
+# Google Gemini - native provider (auto-detected from name)
+[providers.gemini]
+api_key = "your-gemini-api-key"  # Or set GEMINI_API_KEY env var
+default_model = "gemini-2.5-flash"
 
-# Local Ollama - for offline/private use
-# Use with: qq --provider local -p "Hello"
-# Note: Currently requires using openai provider with custom base_url
-# [providers.local]
-# api_key = "ollama"
-# base_url = "http://localhost:11434/v1"
-# default_model = "llama3.1"
+# Groq - fast inference (OpenAI-compatible, auto-detected from base_url)
+[providers.groq]
+api_key = "your-groq-key"
+base_url = "https://api.groq.com/openai/v1"
+default_model = "llama-3.1-70b-versatile"
+
+# Local Ollama - for offline/private use (OpenAI-compatible, auto-detected from base_url)
+[providers.local]
+api_key = "ollama"
+base_url = "http://localhost:11434/v1"
+default_model = "llama3.1"
+
+# Profiles
+[profiles.default]
+provider = "openai"
+model = "gpt-4o"
+
+[profiles.claude]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[profiles.gemini]
+provider = "gemini"
+model = "gemini-2.5-pro"
+
+[profiles.fast]
+provider = "groq"
+
+[profiles.local]
+provider = "local"

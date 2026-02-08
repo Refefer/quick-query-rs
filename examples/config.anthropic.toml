@@ -1,0 +1,18 @@
+# Anthropic-Only Configuration
+# Copy to: ~/.config/qq/config.toml
+#
+# Minimal setup for using Anthropic Claude.
+# Set ANTHROPIC_API_KEY env var or configure api_key below.
+
+default_profile = "default"
+
+[providers.anthropic]
+# api_key = "sk-ant-..."  # Or set ANTHROPIC_API_KEY env var
+default_model = "claude-sonnet-4-20250514"
+
+[profiles.default]
+provider = "anthropic"
+
+[profiles.opus]
+provider = "anthropic"
+model = "claude-opus-4-20250514"

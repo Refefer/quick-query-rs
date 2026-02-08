@@ -6,8 +6,10 @@ This crate provides implementations of the `Provider` trait from `qq-core` for v
 
 ## Overview
 
-Currently implements:
-- **OpenAI Provider** - Full support for OpenAI API and any OpenAI-compatible endpoint
+Implements three native providers:
+- **OpenAI Provider** - OpenAI API and any OpenAI-compatible endpoint (Ollama, vLLM, Groq, etc.)
+- **Anthropic Provider** - Native Anthropic Claude Messages API
+- **Gemini Provider** - Native Google Gemini Generative Language API
 
 ## Supported Providers
 
@@ -26,19 +28,54 @@ The `OpenAIProvider` works with:
 | **OpenRouter** | Multi-provider routing |
 | **LM Studio** | Local desktop inference |
 
+### Anthropic Provider
+
+The `AnthropicProvider` implements the Anthropic Messages API natively:
+
+| Feature | Details |
+|---------|---------|
+| **Auth** | `x-api-key` header |
+| **API version** | `2023-06-01` |
+| **Streaming** | SSE with typed events (`content_block_start`, `content_block_delta`, etc.) |
+| **Thinking** | Native `thinking` content blocks extracted to `CompletionResponse::thinking` |
+| **Tool calls** | `tool_use` / `tool_result` content blocks |
+| **Models** | `claude-sonnet-4-20250514`, `claude-opus-4-20250514`, `claude-haiku-3-5-20241022` |
+
+**Note:** `max_tokens` is required by Anthropic. Defaults to 8192 when not specified.
+
+### Gemini Provider
+
+The `GeminiProvider` implements the Google Generative Language API natively:
+
+| Feature | Details |
+|---------|---------|
+| **Auth** | API key in query parameter (`?key=`) |
+| **Streaming** | SSE with `alt=sse`, each event is a full response chunk |
+| **Tool calls** | `functionCall` / `functionResponse` parts |
+| **Tool call IDs** | Synthetic (`gemini_tc_0`, `gemini_tc_1`, ...) — Gemini doesn't provide IDs |
+| **Models** | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash` |
+
 ## Usage
 
 ### Basic Usage
 
 ```rust
-use qq_providers::OpenAIProvider;
+use qq_providers::{OpenAIProvider, AnthropicProvider, GeminiProvider};
 use qq_core::{Provider, CompletionRequest, Message};
 
-// Create provider with API key
+// OpenAI
 let provider = OpenAIProvider::new("sk-your-api-key")
     .with_default_model("gpt-4o");
 
-// Make a completion request
+// Anthropic
+let provider = AnthropicProvider::new("sk-ant-your-key")
+    .with_default_model("claude-sonnet-4-20250514");
+
+// Gemini
+let provider = GeminiProvider::new("AIza-your-key")
+    .with_default_model("gemini-2.5-flash");
+
+// All providers implement the same trait
 let request = CompletionRequest::new(vec![
     Message::system("You are a helpful assistant"),
     Message::user("Hello!"),
@@ -96,66 +133,56 @@ for tool_call in &response.message.tool_calls {
 For self-hosted or alternative providers:
 
 ```rust
-// Ollama
-let provider = OpenAIProvider::new("ollama")  // Key not needed for Ollama
+// Ollama (OpenAI-compatible)
+let provider = OpenAIProvider::new("ollama")
     .with_base_url("http://localhost:11434/v1")
     .with_default_model("llama2");
 
-// vLLM
-let provider = OpenAIProvider::new("vllm")
-    .with_base_url("http://localhost:8000/v1")
-    .with_default_model("meta-llama/Llama-2-7b-chat-hf");
-
-// Together AI
-let provider = OpenAIProvider::new("your-together-key")
-    .with_base_url("https://api.together.xyz/v1")
-    .with_default_model("meta-llama/Llama-2-70b-chat-hf");
+// Anthropic proxy
+let provider = AnthropicProvider::new("sk-ant-key")
+    .with_base_url("https://my-proxy.example.com/v1");
 ```
 
-### Extra Parameters
+## Configuration via qq-cli
 
-Pass provider-specific parameters:
+In `~/.config/qq/config.toml`:
 
-```rust
-let request = CompletionRequest::new(messages)
-    .with_extra_param("reasoning_effort", serde_json::json!("high"))  // o1-series
-    .with_extra_param("seed", serde_json::json!(42));  // Reproducibility
+```toml
+# OpenAI (type auto-detected from name)
+[providers.openai]
+api_key = "sk-..."  # Or use OPENAI_API_KEY env var
+default_model = "gpt-4o"
+
+# Anthropic (type auto-detected from name)
+[providers.anthropic]
+api_key = "sk-ant-..."  # Or use ANTHROPIC_API_KEY env var
+default_model = "claude-sonnet-4-20250514"
+
+# Gemini (type auto-detected from name)
+[providers.gemini]
+api_key = "AIza..."  # Or use GEMINI_API_KEY env var
+default_model = "gemini-2.5-flash"
+
+# Explicit type for custom-named providers
+[providers.my-claude-proxy]
+type = "anthropic"
+api_key = "sk-ant-..."
+base_url = "https://proxy.example.com/v1"
+
+# OpenAI-compatible (auto-detected when base_url is set)
+[providers.ollama]
+base_url = "http://localhost:11434/v1"
+default_model = "llama3.1"
 ```
 
-## API Reference
+## Provider Type Resolution
 
-### OpenAIProvider
-
-```rust
-impl OpenAIProvider {
-    /// Create with API key
-    pub fn new(api_key: impl Into<String>) -> Self;
-
-    /// Set custom base URL
-    pub fn with_base_url(self, url: impl Into<String>) -> Self;
-
-    /// Set default model
-    pub fn with_default_model(self, model: impl Into<String>) -> Self;
-}
-```
-
-### Provider Trait Implementation
-
-```rust
-impl Provider for OpenAIProvider {
-    fn name(&self) -> &str;
-    fn default_model(&self) -> Option<&str>;
-
-    async fn complete(&self, request: CompletionRequest)
-        -> Result<CompletionResponse, Error>;
-
-    async fn stream(&self, request: CompletionRequest)
-        -> Result<StreamResult, Error>;
-
-    fn supports_tools(&self) -> bool;  // true
-    fn supports_vision(&self) -> bool; // false (may change)
-}
-```
+1. Explicit `type` field always wins
+2. If no `type` but `base_url` is set → defaults to `"openai"` (OpenAI-compatible)
+3. If no `type` and no `base_url` → infer from provider name:
+   - `"anthropic"` or `"claude"` → Anthropic
+   - `"gemini"` or `"google"` → Gemini
+   - Everything else → OpenAI
 
 ## Stream Chunk Types
 
@@ -163,42 +190,11 @@ impl Provider for OpenAIProvider {
 |-------|-------------|
 | `Start { model }` | Stream started with model name |
 | `Delta { content }` | Content delta |
-| `ThinkingDelta { content }` | Reasoning/thinking content (o1-series) |
+| `ThinkingDelta { content }` | Reasoning/thinking content |
 | `ToolCallStart { id, name }` | Tool call started |
 | `ToolCallDelta { arguments }` | Tool call arguments delta |
 | `Done { usage }` | Stream complete with usage stats |
 | `Error { message }` | Stream error |
-
-## Configuration via qq-cli
-
-In `~/.config/qq/config.toml`:
-
-```toml
-[providers.openai]
-api_key = "sk-..."  # Or use OPENAI_API_KEY env var
-base_url = "https://api.openai.com/v1"  # Optional
-default_model = "gpt-4o"
-
-[providers.openai.parameters]
-# Extra parameters for all requests
-temperature = 0.7
-
-[providers.ollama]
-api_key = "ollama"  # Placeholder
-base_url = "http://localhost:11434/v1"
-default_model = "llama2"
-```
-
-## Adding New Providers
-
-To add a new provider:
-
-1. Create a new module in `src/`
-2. Implement the `Provider` trait from `qq-core`
-3. Handle streaming via `StreamResult` (a pinned async stream)
-4. Export from `lib.rs`
-
-See `openai.rs` for a complete implementation example.
 
 ## Dependencies
 

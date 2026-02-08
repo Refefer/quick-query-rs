@@ -338,28 +338,26 @@ impl Provider for OpenAIProvider {
                                 for choice in response.choices {
                                     // Handle reasoning/thinking content (o1 models)
                                     if let Some(reasoning) = choice.delta.reasoning_content {
-                                        if !reasoning.is_empty() {
-                                            if tx
+                                        if !reasoning.is_empty()
+                                            && tx
                                                 .send(Ok(StreamChunk::ThinkingDelta { content: reasoning }))
                                                 .await
                                                 .is_err()
-                                            {
-                                                debug!("Stream receiver dropped, exiting");
-                                                return;
-                                            }
+                                        {
+                                            debug!("Stream receiver dropped, exiting");
+                                            return;
                                         }
                                     }
 
                                     if let Some(content) = choice.delta.content {
-                                        if !content.is_empty() {
-                                            if tx
+                                        if !content.is_empty()
+                                            && tx
                                                 .send(Ok(StreamChunk::Delta { content }))
                                                 .await
                                                 .is_err()
-                                            {
-                                                debug!("Stream receiver dropped, exiting");
-                                                return;
-                                            }
+                                        {
+                                            debug!("Stream receiver dropped, exiting");
+                                            return;
                                         }
                                     }
 
@@ -382,17 +380,16 @@ impl Provider for OpenAIProvider {
                                                 }
                                             }
                                             if let Some(args) = tc.function.and_then(|f| f.arguments) {
-                                                if !args.is_empty() {
-                                                    if tx
+                                                if !args.is_empty()
+                                                    && tx
                                                         .send(Ok(StreamChunk::ToolCallDelta {
                                                             arguments: args,
                                                         }))
                                                         .await
                                                         .is_err()
-                                                    {
-                                                        debug!("Stream receiver dropped, exiting");
-                                                        return;
-                                                    }
+                                                {
+                                                    debug!("Stream receiver dropped, exiting");
+                                                    return;
                                                 }
                                             }
                                         }

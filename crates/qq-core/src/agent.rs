@@ -175,9 +175,7 @@ fn find_safe_trim_point(messages: &[Message]) -> usize {
     }
 
     // Start at index 1 and walk forward to find the first safe boundary
-    for i in 1..messages.len() {
-        let msg = &messages[i];
-
+    for (i, msg) in messages.iter().enumerate().skip(1) {
         // If this message is a tool result, we're inside a sequence — keep scanning
         if msg.tool_call_id.is_some() {
             continue;

@@ -344,8 +344,8 @@ fn parse_command(input: &str) -> ChatCommand {
     }
 
     // Check for @agent syntax: @agent_name <task>
-    if trimmed.starts_with('@') {
-        let parts: Vec<&str> = trimmed[1..].splitn(2, char::is_whitespace).collect();
+    if let Some(stripped) = trimmed.strip_prefix('@') {
+        let parts: Vec<&str> = stripped.splitn(2, char::is_whitespace).collect();
         let agent = parts[0].to_string();
         let task = parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default();
 
@@ -622,6 +622,7 @@ fn dump_messages_to_file(messages: &[Message], filename: &str) -> std::io::Resul
 }
 
 /// Run interactive chat mode
+#[allow(clippy::too_many_arguments)]
 pub async fn run_chat(
     cli: &Cli,
     _config: &AppConfig,
@@ -864,6 +865,7 @@ pub async fn run_chat(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_completion(
     cli: &Cli,
     provider: &Arc<dyn Provider>,

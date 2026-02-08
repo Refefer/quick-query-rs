@@ -48,7 +48,7 @@ Foundation types and traits:
 
 #### qq-cli
 User-facing command-line interface:
-- **Commands**: `chat`, `profiles`, `config`
+- **Commands**: `manage`, `profiles`, `config`
 - **TUI Mode**: Rich terminal interface with ratatui
 - **Chat Mode**: Interactive REPL with readline, history, streaming markdown
 - **Configuration**: TOML-based profiles, providers, prompts
@@ -70,7 +70,7 @@ Built-in tools for agentic workflows:
 
 #### qq-agents
 Agent definitions and implementations:
-- **ChatAgent**: Interactive coordinator with delegation
+- **ProjectManagerAgent**: Project manager with task tracking and delegation
 - **ExploreAgent**: Filesystem exploration and discovery
 - **ResearcherAgent**: Web research and synthesis (fast/in-depth modes)
 - **CoderAgent**: Autonomous code generation
@@ -85,7 +85,7 @@ Agent definitions and implementations:
 
 #### CLI Interface
 - [x] One-shot completion mode (`qq -p "prompt"`)
-- [x] Interactive chat mode (`qq chat`)
+- [x] Interactive project management mode (`qq manage`)
 - [x] TUI mode with ratatui for rich terminal interface
 - [x] Legacy readline mode (`--no-tui`)
 - [x] Profile management (`qq profiles`)
@@ -126,7 +126,7 @@ Agent definitions and implementations:
 - [x] Agent depth limiting to prevent infinite recursion
 
 #### Built-in Agents (8 total)
-- [x] **chat** - Interactive conversations and delegation
+- [x] **pm** - Project manager: coordinates agents, tracks tasks, ensures delivery
 - [x] **explore** - Filesystem exploration
 - [x] **researcher** - Web research (fast/in-depth modes)
 - [x] **coder** - Code generation and modification
@@ -181,8 +181,8 @@ Agent definitions and implementations:
 - [ ] `git_*` - Git operations
 
 #### Provider Enhancements
-- [ ] Anthropic Claude native provider
-- [ ] Google Gemini provider
+- [x] Anthropic Claude native provider
+- [x] Google Gemini provider
 - [ ] Provider fallback chains
 - [ ] Request retry with backoff
 
@@ -261,7 +261,7 @@ Options:
   -A, --agent <AGENT>        Primary agent to use
 
 Commands:
-  chat       Interactive chat mode
+  manage     Interactive project management mode
   profiles   List configured profiles
   config     Show configuration
 ```

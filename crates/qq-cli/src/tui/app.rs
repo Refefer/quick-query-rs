@@ -149,7 +149,7 @@ const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 pub struct TuiApp {
     // Display state
     pub profile: String,
-    /// Primary agent name for this session (e.g., "chat", "explore")
+    /// Primary agent name for this session (e.g., "pm", "explore")
     pub primary_agent: String,
     pub content: String,
     pub thinking_content: ThinkingBuffer,
@@ -208,7 +208,7 @@ pub struct TuiApp {
 
 impl Default for TuiApp {
     fn default() -> Self {
-        Self::new("auto", "chat", ExecutionContext::new())
+        Self::new("auto", "pm", ExecutionContext::new())
     }
 }
 
@@ -740,6 +740,7 @@ fn setup_panic_hook() {
 }
 
 /// Run the TUI chat interface
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tui(
     cli: &Cli,
     _config: &AppConfig,
@@ -1266,6 +1267,7 @@ const MAX_STREAM_RETRIES: u32 = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Run streaming completion in a separate task
+#[allow(clippy::too_many_arguments)]
 async fn run_streaming_completion(
     provider: Arc<dyn Provider>,
     tools_registry: ToolRegistry,
