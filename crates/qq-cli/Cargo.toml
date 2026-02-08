@@ -31,9 +31,8 @@ futures = { workspace = true }
 tokio-stream = { workspace = true }
 rustyline = { workspace = true }
 crossterm = { workspace = true }
-termimad = { workspace = true }
+pulldown-cmark = { workspace = true }
 ratatui = { workspace = true }
-ansi-to-tui = "8"
 tui-input = { workspace = true }
 atty = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }

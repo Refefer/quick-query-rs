@@ -1,31 +1,19 @@
-//! Markdown rendering for TUI using termimad and ansi-to-tui.
+//! Markdown rendering for TUI.
 //!
-//! This module converts markdown to ratatui `Text` by:
-//! 1. Using termimad to render markdown to ANSI-styled strings
-//! 2. Using ansi-to-tui to convert ANSI strings to ratatui `Text`
+//! Converts markdown to ratatui `Text` using the pulldown-cmark based renderer.
 
-use ansi_to_tui::IntoText;
 use ratatui::text::Text;
 
-use crate::markdown::create_skin;
+use crate::markdown::{preprocess_tables, render_to_text};
 
 /// Render markdown to ratatui Text.
-///
-/// Uses termimad to render markdown to ANSI-styled output, then converts
-/// that to ratatui Text using ansi-to-tui.
 pub fn markdown_to_text(content: &str, width: Option<usize>) -> Text<'static> {
-    let skin = create_skin();
     let processed = if let Some(w) = width {
-        crate::markdown::preprocess_tables(content, w)
+        preprocess_tables(content, w)
     } else {
         content.to_string()
     };
-    let rendered = skin.text(&processed, width);
-    let ansi_string = format!("{}", rendered);
-
-    ansi_string
-        .into_text()
-        .unwrap_or_else(|_| Text::raw(content.to_string()))
+    render_to_text(&processed)
 }
 
 #[cfg(test)]

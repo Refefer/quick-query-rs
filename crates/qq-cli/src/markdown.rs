@@ -2,16 +2,444 @@
 //!
 //! This module provides markdown rendering that works with streaming LLM output,
 //! re-rendering content as it arrives to display proper formatting.
+//!
+//! Uses pulldown-cmark to parse markdown and produces ratatui `Text` directly.
+//! The TUI path uses `Text` as-is; the CLI path converts via `text_to_ansi()`.
 
-use std::io::{self, Write};
+use std::io::{self, Write as _};
 
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
-    style::Color,
-    terminal::{Clear, ClearType},
+    terminal::{size as terminal_size, Clear, ClearType},
     ExecutableCommand,
 };
-use termimad::{MadSkin, terminal_size};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+};
+
+/// Style definitions for markdown elements, matching the previous termimad color scheme.
+struct MarkdownStyle {
+    bold: Style,
+    italic: Style,
+    inline_code: Style,
+    code_block: Style,
+    h1: Style,
+    h2: Style,
+    h3: Style,
+    h4_h6: Style,
+    bullet: Style,
+    blockquote: Style,
+    link: Style,
+    strikethrough: Style,
+}
+
+impl Default for MarkdownStyle {
+    fn default() -> Self {
+        Self {
+            bold: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            italic: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::ITALIC),
+            inline_code: Style::default().fg(Color::Yellow),
+            code_block: Style::default().fg(Color::Yellow),
+            h1: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            h2: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            h3: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            h4_h6: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::ITALIC),
+            bullet: Style::default().fg(Color::Cyan),
+            blockquote: Style::default().fg(Color::DarkGray),
+            link: Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::UNDERLINED),
+            strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
+        }
+    }
+}
+
+/// Render markdown content to ratatui `Text`.
+///
+/// This is the core rendering function used by both TUI and CLI paths.
+pub fn render_to_text(content: &str) -> Text<'static> {
+    let styles = MarkdownStyle::default();
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(content, options);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut style_stack: Vec<Style> = Vec::new();
+    let mut had_paragraph = false;
+    let mut in_code_block = false;
+    let mut in_blockquote = false;
+
+    // List tracking: stack of (is_ordered, next_number)
+    let mut list_stack: Vec<(bool, u64)> = Vec::new();
+    let mut pending_item_prefix: Option<Vec<Span<'static>>> = None;
+
+    // Link URL storage
+    let mut link_url: Option<String> = None;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Paragraph) => {
+                if had_paragraph {
+                    flush_line(&mut lines, &mut current_spans);
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                flush_line(&mut lines, &mut current_spans);
+                lines.push(Line::default());
+                had_paragraph = true;
+            }
+
+            Event::Start(Tag::Heading { level, .. }) => {
+                let style = match level {
+                    HeadingLevel::H1 => styles.h1,
+                    HeadingLevel::H2 => styles.h2,
+                    HeadingLevel::H3 => styles.h3,
+                    _ => styles.h4_h6,
+                };
+                let prefix = match level {
+                    HeadingLevel::H1 => "# ",
+                    HeadingLevel::H2 => "## ",
+                    HeadingLevel::H3 => "### ",
+                    HeadingLevel::H4 => "#### ",
+                    HeadingLevel::H5 => "##### ",
+                    HeadingLevel::H6 => "###### ",
+                };
+                style_stack.push(style);
+                current_spans.push(Span::styled(prefix.to_string(), style));
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                style_stack.pop();
+                flush_line(&mut lines, &mut current_spans);
+                lines.push(Line::default());
+                had_paragraph = true;
+            }
+
+            Event::Start(Tag::Strong) => {
+                style_stack.push(styles.bold);
+            }
+            Event::End(TagEnd::Strong) => {
+                style_stack.pop();
+            }
+
+            Event::Start(Tag::Emphasis) => {
+                style_stack.push(styles.italic);
+            }
+            Event::End(TagEnd::Emphasis) => {
+                style_stack.pop();
+            }
+
+            Event::Start(Tag::Strikethrough) => {
+                style_stack.push(styles.strikethrough);
+            }
+            Event::End(TagEnd::Strikethrough) => {
+                style_stack.pop();
+            }
+
+            Event::Start(Tag::BlockQuote(_)) => {
+                in_blockquote = true;
+                style_stack.push(styles.blockquote);
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                in_blockquote = false;
+                style_stack.pop();
+                flush_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Start(Tag::CodeBlock(_)) => {
+                in_code_block = true;
+                style_stack.push(styles.code_block);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = false;
+                style_stack.pop();
+                // Ensure blank line after code block
+                if lines.last().is_some_and(|l| !l.spans.is_empty()) {
+                    lines.push(Line::default());
+                }
+            }
+
+            Event::Start(Tag::List(start)) => {
+                if let Some(n) = start {
+                    list_stack.push((true, n));
+                } else {
+                    list_stack.push((false, 0));
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+                // Blank line after list ends (only for top-level lists)
+                if list_stack.is_empty()
+                    && lines.last().is_none_or(|l| !l.spans.is_empty())
+                {
+                    lines.push(Line::default());
+                }
+            }
+
+            Event::Start(Tag::Item) => {
+                let indent_level = list_stack.len().saturating_sub(1);
+                let indent = "  ".repeat(indent_level);
+                if let Some((is_ordered, ref mut num)) = list_stack.last_mut() {
+                    if *is_ordered {
+                        let prefix = format!("{}{}. ", indent, num);
+                        *num += 1;
+                        pending_item_prefix =
+                            Some(vec![Span::styled(prefix, styles.bullet)]);
+                    } else {
+                        let prefix = format!("{}- ", indent);
+                        pending_item_prefix =
+                            Some(vec![Span::styled(prefix, styles.bullet)]);
+                    }
+                }
+            }
+            Event::End(TagEnd::Item) => {
+                flush_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                link_url = Some(dest_url.to_string());
+                style_stack.push(styles.link);
+            }
+            Event::End(TagEnd::Link) => {
+                style_stack.pop();
+                if let Some(url) = link_url.take() {
+                    let effective = effective_style(&style_stack);
+                    current_spans.push(Span::styled(
+                        format!(" ({})", url),
+                        effective,
+                    ));
+                }
+            }
+
+            Event::Code(text) => {
+                // Prepend list item prefix if pending
+                if let Some(prefix) = pending_item_prefix.take() {
+                    current_spans.extend(prefix);
+                }
+                current_spans.push(Span::styled(text.to_string(), styles.inline_code));
+            }
+
+            Event::Text(text) => {
+                // Prepend list item prefix if pending
+                if let Some(prefix) = pending_item_prefix.take() {
+                    current_spans.extend(prefix);
+                }
+
+                let style = effective_style(&style_stack);
+
+                if in_code_block {
+                    // Code blocks: emit each line separately
+                    for (i, line) in text.split('\n').enumerate() {
+                        if i > 0 {
+                            flush_line(&mut lines, &mut current_spans);
+                        }
+                        if !line.is_empty() {
+                            current_spans.push(Span::styled(line.to_string(), style));
+                        }
+                    }
+                } else if in_blockquote {
+                    // Blockquote: add "│ " prefix to each line
+                    for (i, line) in text.split('\n').enumerate() {
+                        if i > 0 {
+                            flush_line(&mut lines, &mut current_spans);
+                        }
+                        if i > 0 || current_spans.is_empty() {
+                            current_spans
+                                .push(Span::styled("│ ".to_string(), styles.blockquote));
+                        }
+                        if !line.is_empty() {
+                            current_spans.push(Span::styled(line.to_string(), style));
+                        }
+                    }
+                } else {
+                    current_spans.push(Span::styled(text.to_string(), style));
+                }
+            }
+
+            Event::SoftBreak => {
+                current_spans.push(Span::raw(" ".to_string()));
+            }
+            Event::HardBreak => {
+                flush_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Rule => {
+                flush_line(&mut lines, &mut current_spans);
+                let rule = "─".repeat(40);
+                lines.push(Line::from(Span::styled(
+                    rule,
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::default());
+            }
+
+            // Table events - shouldn't occur after preprocess_tables, but handle gracefully
+            Event::Start(Tag::Table(_))
+            | Event::End(TagEnd::Table)
+            | Event::Start(Tag::TableHead)
+            | Event::End(TagEnd::TableHead)
+            | Event::Start(Tag::TableRow)
+            | Event::End(TagEnd::TableRow)
+            | Event::Start(Tag::TableCell)
+            | Event::End(TagEnd::TableCell) => {}
+
+            _ => {}
+        }
+    }
+
+    // Flush any remaining content
+    if !current_spans.is_empty() {
+        flush_line(&mut lines, &mut current_spans);
+    }
+
+    // Remove trailing empty lines
+    while lines.last().is_some_and(|l| l.spans.is_empty()) {
+        lines.pop();
+    }
+
+    Text::from(lines)
+}
+
+/// Flush the current span accumulator into a completed line.
+fn flush_line(lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>) {
+    if spans.is_empty() {
+        return;
+    }
+    lines.push(Line::from(std::mem::take(spans)));
+}
+
+/// Compute the effective style by patching all styles on the stack together.
+fn effective_style(stack: &[Style]) -> Style {
+    let mut style = Style::default();
+    for s in stack {
+        style = style.patch(*s);
+    }
+    style
+}
+
+/// Convert ratatui `Text` to an ANSI-escaped string for direct terminal output.
+pub fn text_to_ansi(text: &Text) -> String {
+    let mut out = String::new();
+    for (i, line) in text.lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        for span in &line.spans {
+            let style = span.style;
+            let has_style = style.fg.is_some()
+                || style.bg.is_some()
+                || style
+                    .add_modifier
+                    .intersects(Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED | Modifier::CROSSED_OUT);
+
+            if has_style {
+                out.push_str(&style_to_ansi(&style));
+                out.push_str(&span.content);
+                out.push_str("\x1b[0m");
+            } else {
+                out.push_str(&span.content);
+            }
+        }
+    }
+    out
+}
+
+/// Convert a ratatui Style to an ANSI SGR escape sequence.
+fn style_to_ansi(style: &Style) -> String {
+    let mut codes = Vec::new();
+
+    if style.add_modifier.contains(Modifier::BOLD) {
+        codes.push("1".to_string());
+    }
+    if style.add_modifier.contains(Modifier::ITALIC) {
+        codes.push("3".to_string());
+    }
+    if style.add_modifier.contains(Modifier::UNDERLINED) {
+        codes.push("4".to_string());
+    }
+    if style.add_modifier.contains(Modifier::CROSSED_OUT) {
+        codes.push("9".to_string());
+    }
+
+    if let Some(fg) = style.fg {
+        if let Some(code) = color_to_ansi_fg(fg) {
+            codes.push(code);
+        }
+    }
+
+    if let Some(bg) = style.bg {
+        if let Some(code) = color_to_ansi_bg(bg) {
+            codes.push(code);
+        }
+    }
+
+    if codes.is_empty() {
+        String::new()
+    } else {
+        format!("\x1b[{}m", codes.join(";"))
+    }
+}
+
+/// Map a ratatui Color to an ANSI foreground color code.
+fn color_to_ansi_fg(color: Color) -> Option<String> {
+    match color {
+        Color::Black => Some("30".to_string()),
+        Color::Red => Some("31".to_string()),
+        Color::Green => Some("32".to_string()),
+        Color::Yellow => Some("33".to_string()),
+        Color::Blue => Some("34".to_string()),
+        Color::Magenta => Some("35".to_string()),
+        Color::Cyan => Some("36".to_string()),
+        Color::White => Some("37".to_string()),
+        Color::DarkGray => Some("90".to_string()),
+        Color::LightRed => Some("91".to_string()),
+        Color::LightGreen => Some("92".to_string()),
+        Color::LightYellow => Some("93".to_string()),
+        Color::LightBlue => Some("94".to_string()),
+        Color::LightMagenta => Some("95".to_string()),
+        Color::LightCyan => Some("96".to_string()),
+        Color::Gray => Some("37".to_string()),
+        Color::Indexed(n) => Some(format!("38;5;{}", n)),
+        Color::Rgb(r, g, b) => Some(format!("38;2;{};{};{}", r, g, b)),
+        _ => None,
+    }
+}
+
+/// Map a ratatui Color to an ANSI background color code.
+fn color_to_ansi_bg(color: Color) -> Option<String> {
+    match color {
+        Color::Black => Some("40".to_string()),
+        Color::Red => Some("41".to_string()),
+        Color::Green => Some("42".to_string()),
+        Color::Yellow => Some("43".to_string()),
+        Color::Blue => Some("44".to_string()),
+        Color::Magenta => Some("45".to_string()),
+        Color::Cyan => Some("46".to_string()),
+        Color::White => Some("47".to_string()),
+        Color::DarkGray => Some("100".to_string()),
+        Color::LightRed => Some("101".to_string()),
+        Color::LightGreen => Some("102".to_string()),
+        Color::LightYellow => Some("103".to_string()),
+        Color::LightBlue => Some("104".to_string()),
+        Color::LightMagenta => Some("105".to_string()),
+        Color::LightCyan => Some("106".to_string()),
+        Color::Gray => Some("47".to_string()),
+        Color::Indexed(n) => Some(format!("48;5;{}", n)),
+        Color::Rgb(r, g, b) => Some(format!("48;2;{};{};{}", r, g, b)),
+        _ => None,
+    }
+}
 
 /// A streaming markdown renderer that accumulates content and re-renders.
 pub struct MarkdownRenderer {
@@ -19,8 +447,6 @@ pub struct MarkdownRenderer {
     content: String,
     /// Number of lines we've rendered (for clearing)
     rendered_lines: u16,
-    /// The markdown skin for styling
-    skin: MadSkin,
     /// Terminal width
     term_width: usize,
 }
@@ -28,13 +454,12 @@ pub struct MarkdownRenderer {
 impl MarkdownRenderer {
     /// Create a new markdown renderer.
     pub fn new() -> Self {
-        let (width, _) = terminal_size();
+        let (width, _) = terminal_size().unwrap_or((80, 24));
         let term_width = (width as usize).saturating_sub(2).max(40);
 
         Self {
             content: String::new(),
             rendered_lines: 0,
-            skin: create_skin(),
             term_width,
         }
     }
@@ -61,8 +486,8 @@ impl MarkdownRenderer {
 
         // Preprocess tables that would be too narrow, then render markdown
         let processed = preprocess_tables(&self.content, self.term_width);
-        let rendered = self.skin.text(&processed, Some(self.term_width));
-        let output = format!("{}", rendered);
+        let ratatui_text = render_to_text(&processed);
+        let output = text_to_ansi(&ratatui_text);
 
         // Count lines for next clear
         self.rendered_lines = output.lines().count() as u16;
@@ -103,41 +528,20 @@ impl Default for MarkdownRenderer {
 
 /// Render markdown content to stdout (one-shot, non-streaming).
 pub fn render_markdown(content: &str) {
-    let (width, _) = terminal_size();
+    let (width, _) = terminal_size().unwrap_or((80, 24));
     let term_width = (width as usize).saturating_sub(2).max(40);
-    let skin = create_skin();
     let processed = preprocess_tables(content, term_width);
-    let rendered = skin.text(&processed, Some(term_width));
-    println!("{}", rendered);
-}
-
-/// Create a styled markdown skin for terminal output.
-pub fn create_skin() -> MadSkin {
-    let mut skin = MadSkin::default();
-
-    // Customize colors for better terminal appearance
-    skin.bold.set_fg(Color::White);
-    skin.italic.set_fg(Color::Magenta);
-    skin.inline_code.set_fg(Color::Yellow);
-    skin.code_block.set_fg(Color::Yellow);
-
-    // Headers
-    skin.headers[0].set_fg(Color::Green);
-    skin.headers[1].set_fg(Color::Green);
-    skin.headers[2].set_fg(Color::Cyan);
-
-    // Lists and quotes
-    skin.bullet.set_fg(Color::Cyan);
-    skin.quote_mark.set_fg(Color::DarkGrey);
-
-    skin
+    let ratatui_text = render_to_text(&processed);
+    let output = text_to_ansi(&ratatui_text);
+    println!("{}", output);
 }
 
 /// Minimum characters per column before we self-render the table.
 const MIN_COL_WIDTH: usize = 10;
 
-/// Preprocess markdown content to self-render tables whose columns would be
-/// too narrow for termimad to display readably. Tables that fit are left as-is.
+/// Preprocess markdown content to self-render tables with box-drawing characters.
+/// All tables are self-rendered regardless of column width, ensuring consistent
+/// readable output.
 pub(crate) fn preprocess_tables(content: &str, width: usize) -> String {
     let mut result = String::with_capacity(content.len());
     let mut in_code_block = false;
@@ -217,7 +621,7 @@ fn is_separator_row(cells: &[String]) -> bool {
     })
 }
 
-/// Process accumulated table lines: either pass through or self-render.
+/// Process accumulated table lines: always self-render with box-drawing characters.
 fn flush_table(table_lines: &[&str], width: usize, result: &mut String) {
     // Parse all rows
     let rows: Vec<Vec<String>> = table_lines.iter().map(|l| parse_row(l)).collect();
@@ -239,24 +643,7 @@ fn flush_table(table_lines: &[&str], width: usize, result: &mut String) {
         return;
     }
 
-    // Check if columns would be too narrow with termimad
-    // termimad uses: (width - num_cols - 1) / num_cols for each column
-    let effective_col_width = if num_cols > 0 {
-        width.saturating_sub(num_cols + 1) / num_cols
-    } else {
-        width
-    };
-
-    if effective_col_width >= MIN_COL_WIDTH {
-        // Table fits fine, leave as markdown for termimad
-        for line in table_lines {
-            result.push_str(line);
-            result.push('\n');
-        }
-        return;
-    }
-
-    // Self-render the table
+    // Always self-render the table
     let (headers, data_rows) = if let Some(si) = sep_idx {
         let headers: Vec<Vec<String>> = rows[..si].to_vec();
         let data: Vec<Vec<String>> = rows[si + 1..].to_vec();
@@ -518,10 +905,116 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_skin() {
-        let skin = create_skin();
-        // Just verify it creates without panic
-        let _ = skin.text("# Hello\n\nThis is **bold**.", Some(80));
+    fn test_render_to_text_basic() {
+        let text = render_to_text("Hello world");
+        assert!(!text.lines.is_empty());
+        // Should contain the text
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_render_bold_style() {
+        let text = render_to_text("This is **bold** text");
+        let bold_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .collect();
+        assert!(!bold_spans.is_empty());
+        assert!(bold_spans.iter().any(|s| s.content.contains("bold")));
+    }
+
+    #[test]
+    fn test_render_heading_styles() {
+        let text = render_to_text("# Heading 1\n\n## Heading 2\n\n### Heading 3");
+        // Should have green and cyan colored spans
+        let green_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.fg == Some(Color::Green))
+            .collect();
+        assert!(!green_spans.is_empty());
+
+        let cyan_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.fg == Some(Color::Cyan))
+            .collect();
+        assert!(!cyan_spans.is_empty());
+    }
+
+    #[test]
+    fn test_render_inline_code() {
+        let text = render_to_text("Use `code` here");
+        let code_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.fg == Some(Color::Yellow))
+            .collect();
+        assert!(!code_spans.is_empty());
+        assert!(code_spans.iter().any(|s| s.content.contains("code")));
+    }
+
+    #[test]
+    fn test_render_list_bullets() {
+        let text = render_to_text("- Item 1\n- Item 2\n- Item 3");
+        let cyan_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.fg == Some(Color::Cyan))
+            .collect();
+        // Should have bullet markers in cyan
+        assert!(!cyan_spans.is_empty());
+    }
+
+    #[test]
+    fn test_render_blockquote() {
+        let text = render_to_text("> This is a quote");
+        let gray_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.fg == Some(Color::DarkGray))
+            .collect();
+        assert!(!gray_spans.is_empty());
+    }
+
+    #[test]
+    fn test_render_nested_styles() {
+        let text = render_to_text("This is ***bold italic*** text");
+        let bold_italic_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| {
+                s.style.add_modifier.contains(Modifier::BOLD)
+                    || s.style.add_modifier.contains(Modifier::ITALIC)
+            })
+            .collect();
+        assert!(!bold_italic_spans.is_empty());
+    }
+
+    #[test]
+    fn test_text_to_ansi_basic() {
+        let text = render_to_text("**bold** and *italic*");
+        let ansi = text_to_ansi(&text);
+        // Should contain ANSI escape codes
+        assert!(ansi.contains("\x1b["));
+        // Should contain reset
+        assert!(ansi.contains("\x1b[0m"));
+        // Should contain the text
+        assert!(ansi.contains("bold"));
+        assert!(ansi.contains("italic"));
     }
 
     #[test]
@@ -531,12 +1024,14 @@ mod tests {
     }
 
     #[test]
-    fn test_table_that_fits() {
+    fn test_table_always_self_renders() {
         let table = "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |";
         let result = preprocess_tables(table, 80);
-        // Should be left as-is (still contains markdown pipe syntax)
-        assert!(result.contains('|'));
-        assert!(!result.contains('┌'));
+        // All tables now self-render with box-drawing characters
+        assert!(result.contains('┌'));
+        assert!(result.contains('│'));
+        assert!(result.contains('┘'));
+        assert!(result.contains("```"));
     }
 
     #[test]
