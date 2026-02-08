@@ -81,6 +81,16 @@ impl Default for WriterAgent {
     }
 }
 
+const COMPACT_PROMPT: &str = r#"Summarize this writing session so it can continue effectively with reduced context. Preserve:
+1. Documents created or edited (with full file paths)
+2. Content structure decisions (outline, sections, organization)
+3. Audience and tone choices made
+4. Key content already written (section summaries, not full text)
+5. Source material referenced and key facts incorporated
+6. Remaining sections or content still to be written
+
+Focus on file paths, structural decisions, and what content has been produced. Omit raw source material - keep only how it informed the writing."#;
+
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous agent for creating written content: documentation, README files, guides, and articles.\n\n",
     "Use when you need:\n",
@@ -138,6 +148,10 @@ impl InternalAgent for WriterAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 }
 

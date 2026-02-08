@@ -23,6 +23,18 @@ pub use coder::CoderAgent;
 pub use config::{AgentDefinition, AgentsConfig, BuiltinAgentOverride};
 pub use preamble::{generate_preamble, PreambleContext};
 pub use explore::ExploreAgent;
+
+/// Default compaction prompt for agent memory summarization.
+///
+/// Used when an agent doesn't provide a specialized prompt, or as a fallback.
+pub const DEFAULT_COMPACT_PROMPT: &str = r#"Summarize this agent session so it can continue effectively with reduced context. Preserve:
+1. Key decisions and conclusions reached
+2. Important facts, file paths, code snippets, or data discovered
+3. The original task goal and any sub-goals identified
+4. Tool results that would be expensive to re-obtain
+5. Any pending work or unresolved issues
+
+Be concise but comprehensive. Focus on what's needed to continue the task."#;
 pub use planner::PlannerAgent;
 pub use researcher::ResearcherAgent;
 pub use reviewer::ReviewerAgent;
@@ -67,6 +79,15 @@ pub trait InternalAgent: Send + Sync {
     /// Default: None (no limits).
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         None
+    }
+
+    /// Get the compaction prompt for summarizing this agent's conversation history.
+    ///
+    /// When an agent's memory exceeds budget, this prompt guides the LLM in
+    /// creating a summary that preserves the most important context for this
+    /// agent's specific role. Override to customize what gets preserved.
+    fn compact_prompt(&self) -> &str {
+        DEFAULT_COMPACT_PROMPT
     }
 }
 
@@ -213,6 +234,19 @@ mod tests {
             assert!(
                 !agent.tool_description().is_empty(),
                 "Agent {} should have a tool description",
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_compact_prompts() {
+        for t in InternalAgentType::all_with_chat() {
+            let agent = t.create();
+            let prompt = agent.compact_prompt();
+            assert!(
+                !prompt.is_empty(),
+                "Agent {} should have a non-empty compact_prompt",
                 agent.name()
             );
         }

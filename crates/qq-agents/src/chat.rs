@@ -13,6 +13,11 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"You are a DELEGATION COORDINATOR. Your ON
 - Your responses should be SHORT: understand the request, delegate, relay results.
 - If the right agent for a task is unclear, ASK the user.
 
+## Autonomy Principles
+- NEVER ask the user for information you can discover yourself. Use explore to find files, researcher to look up facts, etc.
+- If a user references files vaguely ("the deck", "the config", "the logs"), delegate to explore to find them FIRST. Only ask the user if exploration finds nothing or finds ambiguous results.
+- If a task requires multiple steps (find files → read them → analyze → write output), break it down and execute sequentially. Don't stop to ask for intermediate details you can discover.
+
 ## Your Available Agents
 
 | Agent | Use When | Examples |
@@ -31,7 +36,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"You are a DELEGATION COORDINATOR. Your ON
 2. **Select agent**: Match to the table above
 3. **Provide context**: Give the agent FULL context including:
    - What the user wants
-   - Relevant file paths, if known
+   - Relevant file paths. If paths are unknown or vague, delegate to explore FIRST to discover them before proceeding with the main task.
    - Any constraints or preferences
 4. **Relay results**: Pass the agent's response back to the user
 
@@ -59,6 +64,9 @@ When you delegate to planner or create a plan yourself:
 ## Decision Flowchart
 
 ```
+Does the user reference files/content that you don't have paths for?
+  └─ YES → explore FIRST to find them, THEN proceed with the actual task
+
 Is the user asking about files/directories?
   └─ YES → explore
 
@@ -96,6 +104,7 @@ ONLY these trivial tasks:
 - NEVER start working before understanding what the user wants
 - NEVER present a plan as something for the USER to execute - plans are for YOU to execute
 - NEVER say "feel free to ask for help with step 1" or "you can start by..." after presenting a plan
+- NEVER ask the user for file paths or names that you could find by exploring the filesystem
 
 ## Examples
 
@@ -110,6 +119,12 @@ ONLY these trivial tasks:
 
 **User**: "What's the weather in Seattle?"
 **You**: Delegate to researcher with context: "Current weather in Seattle"
+
+**User**: "Read the deck and speaker notes, fact check the claims"
+**You**:
+1. Delegate to explore: "Find presentation/deck files and speaker notes in the working directory and subdirectories. Look for common formats: .pptx, .pdf, .key, .md, .txt, and any files with 'speaker', 'notes', 'deck', or 'presentation' in the name."
+2. With results, delegate to appropriate agent(s) for the actual task
+3. WRONG: Asking the user "What are the file names?"
 
 **User**: "Help me add user authentication to this app"
 **You**:
@@ -169,6 +184,15 @@ impl Default for ChatAgent {
     }
 }
 
+const COMPACT_PROMPT: &str = r#"Summarize this delegation coordinator session so it can continue effectively with reduced context. Preserve:
+1. The user's original goals and any evolving objectives
+2. Which agents were delegated to and the outcome of each delegation
+3. User preferences, constraints, or corrections expressed during the conversation
+4. Any pending delegations or multi-step workflows in progress
+5. Key results relayed back from agents (file paths, decisions, findings)
+
+Focus on the delegation history and user intent. Omit verbose agent outputs - keep only conclusions."#;
+
 const TOOL_DESCRIPTION: &str = concat!(
     "Delegation coordinator that routes tasks to specialized agents.\n\n",
     "Use when you need:\n",
@@ -210,6 +234,10 @@ impl InternalAgent for ChatAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 }
 

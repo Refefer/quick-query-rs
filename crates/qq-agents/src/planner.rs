@@ -34,15 +34,17 @@ Quick-query does NOT have shell/bash access. Plans must use ONLY these available
 1. Note these as "manual steps for the user"
 2. Focus the automated steps on what agents CAN do (file creation/modification)
 
-Before you do any planning, use the available agents (as relevant) to gather context:
-- **Agent[explore]**: Explore the filesystem to understand directory structure, find files, search for content
-- **Agent[researcher]**: Research topics on the web when you need external information
-- **Agent[reviewer]**: Review existing code to understand current implementation
+## ALWAYS Gather Context First
+Before writing ANY plan, use Agent[explore] to understand the current state of the codebase. Do NOT plan based on assumptions about file structure, naming, or architecture — discover them.
 
-Use these agents when you need to understand the current state before creating a plan.
+- **Agent[explore]**: ALWAYS use this first. Explore directory structure, find relevant files, search for patterns, understand existing code organization. Even if the task seems straightforward, explore to confirm your assumptions.
+- **Agent[researcher]**: Research topics on the web when you need external information (libraries, best practices, APIs).
+- **Agent[reviewer]**: Review existing code to understand current implementation patterns and quality.
+
+A plan built on explored reality is far more useful than one built on guesses. If the user references files, modules, or features vaguely, use Agent[explore] to locate them — never ask the user for paths you can discover.
 
 ## How You Think
-1. **Gather context**: If planning involves existing systems, use Agent[explore] to understand current state
+1. **Gather context**: Use Agent[explore] to understand the current codebase state — this is NOT optional
 2. **Understand the goal**: What's the desired end state? What are the constraints?
 3. **Identify components**: What major pieces of work are involved?
 4. **Sequence logically**: What must happen before what?
@@ -60,7 +62,7 @@ You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete
 - **Dependency mapping**: Identify what blocks what
 - **Risk identification**: Call out unknowns, decisions, potential blockers
 - **Verification points**: Include checkpoints to confirm progress
-- **Context gathering**: Use explore/researcher agents to understand current state before planning
+- **Context gathering**: ALWAYS use Agent[explore] to understand current state before planning — never skip this
 
 ## Output Format
 ```
@@ -103,6 +105,8 @@ You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete
 - Don't forget verification/testing steps
 - Don't create plans that require re-planning every step
 - Don't assume context the executor won't have
+- Don't plan without exploring the codebase first — use Agent[explore] to ground your plan in reality
+- Don't ask for file paths or project details you can discover with Agent[explore]
 - **NEVER plan steps that require bash/shell commands** - quick-query cannot execute them
 - Don't assume agents can run `npm`, `cargo`, `pip`, `git`, or any CLI tools"#;
 
@@ -119,6 +123,16 @@ impl Default for PlannerAgent {
         Self::new()
     }
 }
+
+const COMPACT_PROMPT: &str = r#"Summarize this planning session so it can continue effectively with reduced context. Preserve:
+1. The original goal and any constraints or requirements gathered
+2. Context discovered through exploration (file structures, existing code patterns)
+3. The plan phases and steps (with dependencies between them)
+4. Key design decisions made and alternatives considered
+5. Open questions or decisions still needing resolution
+6. Which steps have been completed vs remaining
+
+Focus on the plan structure and decisions. Omit verbose exploration outputs - keep only the conclusions that informed the plan."#;
 
 const TOOL_DESCRIPTION: &str = concat!(
     "Agent that creates detailed, actionable implementation plans by breaking down complex goals into sequenced steps.\n\n",
@@ -171,6 +185,10 @@ impl InternalAgent for PlannerAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 }
 

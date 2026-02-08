@@ -23,6 +23,11 @@ pub struct BuiltinAgentOverride {
     /// Per-tool call limits (tool_name -> max_calls)
     #[serde(default)]
     pub tool_limits: HashMap<String, usize>,
+
+    /// Optional compaction prompt override for agent memory summarization.
+    /// When set, overrides the agent's built-in compact_prompt.
+    #[serde(default)]
+    pub compact_prompt: Option<String>,
 }
 
 /// External agent definition from agents.toml.
@@ -54,6 +59,11 @@ pub struct AgentDefinition {
     /// When a tool reaches its limit, the agent receives an error message instead
     #[serde(default)]
     pub tool_limits: HashMap<String, usize>,
+
+    /// Optional compaction prompt for agent memory summarization.
+    /// Falls back to DEFAULT_COMPACT_PROMPT if omitted.
+    #[serde(default)]
+    pub compact_prompt: Option<String>,
 }
 
 /// Agents configuration file (agents.toml).
@@ -125,6 +135,15 @@ impl AgentsConfig {
     /// Returns None if no override is configured.
     pub fn get_builtin_max_turns(&self, name: &str) -> Option<usize> {
         self.builtin.get(name).and_then(|o| o.max_turns)
+    }
+
+    /// Get compact_prompt for a built-in agent from config overrides.
+    ///
+    /// Returns None if no override is configured.
+    pub fn get_builtin_compact_prompt(&self, name: &str) -> Option<&str> {
+        self.builtin
+            .get(name)
+            .and_then(|o| o.compact_prompt.as_deref())
     }
 }
 
@@ -237,5 +256,52 @@ tool_limits = { read_file = 25 }
         assert!(config.get_builtin_max_turns("reviewer").is_none());
         let limits = config.get_builtin_tool_limits("reviewer").unwrap();
         assert_eq!(limits.get("read_file"), Some(&25));
+    }
+
+    #[test]
+    fn test_builtin_compact_prompt_override() {
+        let toml_content = r#"
+[builtin.coder]
+compact_prompt = "Custom coder compaction prompt"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert_eq!(
+            config.get_builtin_compact_prompt("coder"),
+            Some("Custom coder compaction prompt")
+        );
+        // Non-configured agent returns None
+        assert!(config.get_builtin_compact_prompt("explore").is_none());
+    }
+
+    #[test]
+    fn test_external_agent_compact_prompt() {
+        let toml_content = r#"
+[agents.my-agent]
+description = "Test agent"
+system_prompt = "You are a test agent"
+tools = ["read_file"]
+compact_prompt = "Preserve test-specific context"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("my-agent").unwrap();
+        assert_eq!(
+            agent.compact_prompt.as_deref(),
+            Some("Preserve test-specific context")
+        );
+    }
+
+    #[test]
+    fn test_compact_prompt_absent_is_none() {
+        let toml_content = r#"
+[agents.simple-agent]
+description = "Simple agent"
+system_prompt = "You are simple"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("simple-agent").unwrap();
+        assert!(agent.compact_prompt.is_none());
     }
 }

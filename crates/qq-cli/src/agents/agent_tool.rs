@@ -9,9 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use qq_core::{AgentConfig, AgentMemory, Error, PropertySchema, Provider, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
+use qq_core::{AgentConfig, AgentMemory, CompletionRequest, Error, Message, PropertySchema, Provider, Role, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
-use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType};
+use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType, DEFAULT_COMPACT_PROMPT};
 use crate::agents::continuation::{execute_with_continuation, AgentExecutionResult, ContinuationConfig};
 use crate::agents::InformUserTool;
 use crate::event_bus::AgentEventBus;
@@ -232,7 +232,7 @@ impl Tool for InternalAgentTool {
         )
         .await;
 
-        // Store results back to memory
+        // Store results back to memory, with LLM compaction
         match &result {
             AgentExecutionResult::Success { messages, .. }
             | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
@@ -241,8 +241,18 @@ impl Tool for InternalAgentTool {
                         .iter()
                         .map(|m| m.tool_calls.len() as u32)
                         .sum();
+
+                    // Resolve compaction prompt: config override > agent default
+                    let prompt = self
+                        .external_agents
+                        .get_builtin_compact_prompt(self.agent.name())
+                        .unwrap_or_else(|| self.agent.compact_prompt());
+
+                    let compacted =
+                        compact_agent_messages(&self.provider, messages.clone(), prompt).await;
+
                     memory
-                        .store_messages(&child_scope, messages.clone(), tool_calls)
+                        .store_messages(&child_scope, compacted, tool_calls)
                         .await;
                 }
             }
@@ -462,7 +472,7 @@ impl Tool for ExternalAgentTool {
         )
         .await;
 
-        // Store results back to memory
+        // Store results back to memory, with LLM compaction
         match &result {
             AgentExecutionResult::Success { messages, .. }
             | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
@@ -471,8 +481,19 @@ impl Tool for ExternalAgentTool {
                         .iter()
                         .map(|m| m.tool_calls.len() as u32)
                         .sum();
+
+                    // Resolve compaction prompt: definition > default
+                    let prompt = self
+                        .definition
+                        .compact_prompt
+                        .as_deref()
+                        .unwrap_or(DEFAULT_COMPACT_PROMPT);
+
+                    let compacted =
+                        compact_agent_messages(&self.provider, messages.clone(), prompt).await;
+
                     memory
-                        .store_messages(&child_scope, messages.clone(), tool_calls)
+                        .store_messages(&child_scope, compacted, tool_calls)
                         .await;
                 }
             }
@@ -582,4 +603,116 @@ pub fn create_agent_tools(
     }
 
     tools
+}
+
+/// Threshold in bytes at which agent memory compaction is triggered.
+/// Set below the 200KB trim_to_budget safety net to allow summarization before truncation.
+const AGENT_COMPACT_THRESHOLD_BYTES: usize = 150_000;
+
+/// Minimum number of messages required before compaction is attempted.
+/// Must have at least preserve_recent + 2 messages to have anything to compact.
+const AGENT_COMPACT_PRESERVE_RECENT: usize = 6;
+
+/// Find a safe point to split agent messages that doesn't break tool call sequences.
+///
+/// Walks backwards from `target` to find a position where splitting won't
+/// orphan tool results from their corresponding assistant tool call message.
+fn find_safe_compact_point(messages: &[Message], target: usize) -> usize {
+    let mut end = target;
+
+    while end > 0 {
+        let msg = &messages[end - 1];
+
+        // If the message is a tool result, we're inside a sequence - keep walking back
+        if msg.tool_call_id.is_some() {
+            end -= 1;
+            continue;
+        }
+
+        // If it's an assistant with tool_calls, the results come after - exclude this too
+        if msg.role == Role::Assistant && !msg.tool_calls.is_empty() {
+            end -= 1;
+            continue;
+        }
+
+        // Safe position found
+        break;
+    }
+
+    end
+}
+
+/// Attempt LLM-summarized compaction of agent messages.
+///
+/// If the total message bytes exceed `AGENT_COMPACT_THRESHOLD_BYTES`, older messages
+/// are summarized by the LLM using the provided `compact_prompt`, preserving recent
+/// messages. On failure, returns the original messages unchanged (the downstream
+/// `trim_to_budget` serves as safety net).
+async fn compact_agent_messages(
+    provider: &Arc<dyn Provider>,
+    messages: Vec<Message>,
+    compact_prompt: &str,
+) -> Vec<Message> {
+    let total_bytes: usize = messages.iter().map(|m| m.byte_count()).sum();
+
+    if total_bytes <= AGENT_COMPACT_THRESHOLD_BYTES {
+        return messages;
+    }
+
+    if messages.len() <= AGENT_COMPACT_PRESERVE_RECENT + 2 {
+        return messages;
+    }
+
+    let preserve_count = AGENT_COMPACT_PRESERVE_RECENT.min(messages.len());
+    let compact_end = messages.len() - preserve_count;
+
+    let safe_end = find_safe_compact_point(&messages, compact_end);
+    if safe_end <= 1 {
+        return messages;
+    }
+
+    tracing::info!(
+        total_bytes = total_bytes,
+        threshold = AGENT_COMPACT_THRESHOLD_BYTES,
+        messages_to_compact = safe_end,
+        messages_to_preserve = messages.len() - safe_end,
+        "Agent memory compaction triggered"
+    );
+
+    // Build summarization request from older messages
+    let mut summary_messages: Vec<Message> = messages[..safe_end].to_vec();
+    summary_messages.push(Message::user(compact_prompt));
+
+    let request = CompletionRequest::new(summary_messages);
+    match provider.complete(request).await {
+        Ok(response) => {
+            let summary = response.message.content.to_string_lossy();
+            if summary.is_empty() {
+                tracing::warn!("Agent compaction returned empty summary, keeping original messages");
+                return messages;
+            }
+
+            // Build compacted message list: summary + recent messages
+            let mut compacted = Vec::new();
+            let summary_text = format!("## Prior Session Summary\n\n{}", summary);
+            compacted.push(Message::system(summary_text.as_str()));
+            compacted.extend_from_slice(&messages[safe_end..]);
+
+            let new_bytes: usize = compacted.iter().map(|m| m.byte_count()).sum();
+            tracing::info!(
+                old_messages = messages.len(),
+                new_messages = compacted.len(),
+                old_bytes = total_bytes,
+                new_bytes = new_bytes,
+                bytes_freed = total_bytes.saturating_sub(new_bytes),
+                "Agent memory compaction complete"
+            );
+
+            compacted
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Agent memory compaction failed, falling back to trim_to_budget");
+            messages
+        }
+    }
 }

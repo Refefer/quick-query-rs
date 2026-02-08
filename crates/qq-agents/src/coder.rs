@@ -73,6 +73,16 @@ impl Default for CoderAgent {
     }
 }
 
+const COMPACT_PROMPT: &str = r#"Summarize this coding session so it can continue effectively with reduced context. Preserve:
+1. Files modified or created (with full paths) and what changes were made to each
+2. Code patterns and conventions discovered in the existing codebase
+3. The original coding goal and any sub-tasks identified
+4. Design decisions made and their rationale
+5. Errors encountered during implementation and how they were resolved
+6. Any remaining work or files still needing modification
+
+Focus on file paths, concrete changes, and architectural decisions. Include key code snippets only if they represent patterns to follow."#;
+
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous coding agent that implements features, fixes bugs, and modifies code by understanding context and following existing patterns.\n\n",
     "Use when you need:\n",
@@ -131,6 +141,10 @@ impl InternalAgent for CoderAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 }
 

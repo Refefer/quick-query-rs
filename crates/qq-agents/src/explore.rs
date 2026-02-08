@@ -63,6 +63,16 @@ impl Default for ExploreAgent {
     }
 }
 
+const COMPACT_PROMPT: &str = r#"Summarize this exploration session so it can continue effectively with reduced context. Preserve:
+1. Directory structures discovered (key paths and their organization)
+2. Important file paths found and their purposes
+3. Search results and content patterns discovered
+4. The original exploration goal and what was being looked for
+5. Areas already explored (to avoid redundant searches)
+6. Areas not yet explored or leads to follow up on
+
+Focus on file paths and directory layouts. Omit verbose file contents - keep only summaries of what was found."#;
+
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous filesystem exploration agent that finds and analyzes files and directories.\n\n",
     "Use when you need:\n",
@@ -114,6 +124,10 @@ impl InternalAgent for ExploreAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 }
 

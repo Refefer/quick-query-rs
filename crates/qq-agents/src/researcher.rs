@@ -71,6 +71,16 @@ impl Default for ResearcherAgent {
     }
 }
 
+const COMPACT_PROMPT: &str = r#"Summarize this research session so it can continue effectively with reduced context. Preserve:
+1. Research questions asked and answers found (with source URLs)
+2. Key facts and data points discovered
+3. Conflicting information and how it was resolved
+4. The original research goal and what aspects have been covered
+5. Areas needing more research or follow-up queries
+6. Authoritative sources identified for each topic
+
+Focus on facts with citations. Omit raw webpage content - keep only synthesized findings."#;
+
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous web research agent that answers questions by searching the internet and synthesizing information.\n\n",
     "Use when you need:\n",
@@ -118,6 +128,10 @@ impl InternalAgent for ResearcherAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {

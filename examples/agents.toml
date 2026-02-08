@@ -4,8 +4,9 @@
 # Built-in agents: chat, researcher, summarizer, coder, reviewer, explore, planner, writer
 #
 # Configuration options:
-#   max_turns - Maximum number of agentic loop turns per invocation
+#   max_turns      - Maximum number of agentic loop turns per invocation
 #   tool_limits    - Per-tool call limits (tool_name -> max_calls)
+#   compact_prompt - Custom prompt for summarizing agent memory when it exceeds budget
 #
 # When a limit is reached, the agent receives an error prompting it to complete.
 #
@@ -80,6 +81,15 @@ Guidelines:
 max_turns = 8
 tools = ["fetch_webpage", "web_search"]
 tool_limits = { web_search = 3, fetch_webpage = 5 }
+# Custom compaction prompt - preserves documentation-specific context when memory is summarized
+compact_prompt = """
+Summarize this documentation research session. Preserve:
+1. API endpoints, function signatures, and code examples found
+2. Source URLs for each piece of documentation referenced
+3. Version-specific information and compatibility notes
+4. Common pitfalls or gotchas discovered
+5. Areas not yet researched or needing follow-up
+"""
 
 # Code explanation agent
 # Note: inform_user is automatically available even to pure LLM agents

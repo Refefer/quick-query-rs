@@ -35,6 +35,8 @@ pub struct ChatSession {
     preserve_recent: usize,
     /// Whether compaction has occurred during this session
     pub compaction_count: u32,
+    /// Prompt used for LLM-powered context compaction
+    compact_prompt: String,
 }
 
 /// Default max context bytes (500KB)
@@ -63,12 +65,19 @@ impl ChatSession {
             max_context_bytes: DEFAULT_MAX_CONTEXT_BYTES,
             preserve_recent: DEFAULT_PRESERVE_RECENT,
             compaction_count: 0,
+            compact_prompt: COMPACTION_SUMMARY_PROMPT.to_string(),
         }
     }
 
     /// Create a new session with a provider for LLM-powered compaction.
     pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Set a custom compaction prompt for context summarization.
+    pub fn with_compact_prompt(mut self, prompt: String) -> Self {
+        self.compact_prompt = prompt;
         self
     }
 
@@ -204,7 +213,7 @@ impl ChatSession {
         messages_to_summarize: &[Message],
     ) -> Result<String> {
         let mut summary_messages: Vec<Message> = messages_to_summarize.to_vec();
-        summary_messages.push(Message::user(COMPACTION_SUMMARY_PROMPT));
+        summary_messages.push(Message::user(self.compact_prompt.as_str()));
 
         let request = CompletionRequest::new(summary_messages);
         let response = provider.complete(request).await?;

@@ -56,6 +56,16 @@ impl Default for ReviewerAgent {
     }
 }
 
+const COMPACT_PROMPT: &str = r#"Summarize this code review session so it can continue effectively with reduced context. Preserve:
+1. Files and code sections reviewed (with paths and line ranges)
+2. Issues found, grouped by severity (critical/high/medium/low)
+3. Specific recommendations made and their rationale
+4. Positive patterns noted worth preserving
+5. Areas not yet reviewed or needing deeper analysis
+6. The original review scope and focus areas requested
+
+Focus on file locations and concrete findings. Omit raw file contents - keep only the review observations."#;
+
 const TOOL_DESCRIPTION: &str = concat!(
     "Autonomous code review agent that analyzes code for bugs, security issues, and quality concerns.\n\n",
     "Use when you need:\n",
@@ -107,6 +117,10 @@ impl InternalAgent for ReviewerAgent {
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
+    }
+
+    fn compact_prompt(&self) -> &str {
+        COMPACT_PROMPT
     }
 }
 
