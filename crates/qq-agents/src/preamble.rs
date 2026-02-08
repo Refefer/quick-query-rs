@@ -11,6 +11,8 @@ pub struct PreambleContext {
     pub has_sub_agents: bool,
     /// Whether this agent has the inform_user tool.
     pub has_inform_user: bool,
+    /// Whether this agent has task tracking capabilities (update_my_task).
+    pub has_task_tracking: bool,
 }
 
 /// Generate the shared preamble that gets prepended to all agent system prompts.
@@ -86,6 +88,23 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
         );
     }
 
+    // Task tracking (conditional)
+    if ctx.has_task_tracking {
+        sections.push(
+            "### Task Tracking\n\
+             Your task may include a **Current Task Board** section showing the PM's tracked tasks.\n\
+             This gives you visibility into the overall plan and where your work fits.\n\
+             \n\
+             You have the `update_my_task` tool to report progress:\n\
+             - **Mark done**: `{\"id\": \"3\", \"status\": \"done\"}` when your task is complete.\n\
+             - **Add notes**: `{\"id\": \"3\", \"add_note\": \"Found 3 files to modify\"}` to log findings, progress, or blockers.\n\
+             - **Flag blockers**: `{\"id\": \"3\", \"status\": \"blocked\", \"add_note\": \"Waiting on auth module refactor\"}` if you're stuck.\n\
+             \n\
+             This helps the PM track progress across all agents. Update your task before returning your final result."
+                .to_string(),
+        );
+    }
+
     // Resourcefulness (conditional: has tools or sub-agents)
     if ctx.has_tools || ctx.has_sub_agents {
         sections.push(
@@ -112,6 +131,7 @@ mod tests {
             has_tools: false,
             has_sub_agents: false,
             has_inform_user: false,
+            has_task_tracking: false,
         });
 
         // Core sections always present
@@ -124,6 +144,7 @@ mod tests {
         assert!(!preamble.contains("Keeping the User Informed"));
         assert!(!preamble.contains("Tool Usage Efficiency"));
         assert!(!preamble.contains("Resourcefulness"));
+        assert!(!preamble.contains("Task Tracking"));
     }
 
     #[test]
@@ -132,6 +153,7 @@ mod tests {
             has_tools: true,
             has_sub_agents: false,
             has_inform_user: false,
+            has_task_tracking: false,
         });
 
         assert!(preamble.contains("Tool Usage Efficiency"));
@@ -146,6 +168,7 @@ mod tests {
             has_tools: false,
             has_sub_agents: true,
             has_inform_user: false,
+            has_task_tracking: false,
         });
 
         assert!(preamble.contains("Delegating to Sub-Agents"));
@@ -161,6 +184,7 @@ mod tests {
             has_tools: false,
             has_sub_agents: false,
             has_inform_user: true,
+            has_task_tracking: false,
         });
 
         assert!(preamble.contains("Keeping the User Informed"));
@@ -170,11 +194,26 @@ mod tests {
     }
 
     #[test]
+    fn test_preamble_with_task_tracking() {
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: false,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: true,
+        });
+
+        assert!(preamble.contains("Task Tracking"));
+        assert!(preamble.contains("update_my_task"));
+        assert!(preamble.contains("Current Task Board"));
+    }
+
+    #[test]
     fn test_full_preamble() {
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: true,
             has_inform_user: true,
+            has_task_tracking: true,
         });
 
         // All sections present
@@ -185,5 +224,6 @@ mod tests {
         assert!(preamble.contains("Keeping the User Informed"));
         assert!(preamble.contains("Tool Usage Efficiency"));
         assert!(preamble.contains("Resourcefulness"));
+        assert!(preamble.contains("Task Tracking"));
     }
 }

@@ -60,6 +60,10 @@ pub struct Task {
     pub assignee: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 // =============================================================================
@@ -87,6 +91,67 @@ impl TaskStore {
                 next_id: 1,
             }),
         }
+    }
+
+    /// Format a compact markdown task board summary.
+    ///
+    /// Returns `None` if no tasks exist. Shows status, id, title, assignee,
+    /// blocked_by, blocks (derived), description, and latest note.
+    pub fn format_board(&self) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+
+        if inner.tasks.is_empty() {
+            return None;
+        }
+
+        // Sort tasks by ID numerically
+        let mut tasks: Vec<&Task> = inner.tasks.values().collect();
+        tasks.sort_by_key(|t| t.id.parse::<u32>().unwrap_or(0));
+
+        // Build reverse blocks map: task_id -> list of tasks it blocks
+        let mut blocks_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        for task in &tasks {
+            for dep_id in &task.blocked_by {
+                blocks_map
+                    .entry(dep_id.as_str())
+                    .or_default()
+                    .push(&task.id);
+            }
+        }
+
+        let mut lines = vec!["## Current Task Board".to_string(), String::new()];
+
+        for task in &tasks {
+            let assignee_str = task
+                .assignee
+                .as_deref()
+                .map(|a| format!(" (assignee: {})", a))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- [{}] #{}: {}{}",
+                task.status, task.id, task.title, assignee_str
+            ));
+
+            if !task.blocked_by.is_empty() {
+                let deps: Vec<String> = task.blocked_by.iter().map(|id| format!("#{}", id)).collect();
+                lines.push(format!("  blocked by: {}", deps.join(", ")));
+            }
+
+            if let Some(blocks) = blocks_map.get(task.id.as_str()) {
+                let blocked: Vec<String> = blocks.iter().map(|id| format!("#{}", id)).collect();
+                lines.push(format!("  blocks: {}", blocked.join(", ")));
+            }
+
+            if let Some(desc) = &task.description {
+                lines.push(format!("  description: {}", desc));
+            }
+
+            if let Some(note) = task.notes.last() {
+                lines.push(format!("  latest note: {}", note));
+            }
+        }
+
+        Some(lines.join("\n"))
     }
 }
 
@@ -119,6 +184,8 @@ struct CreateTaskArgs {
     assignee: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    blocked_by: Vec<String>,
 }
 
 #[async_trait]
@@ -155,6 +222,14 @@ impl Tool for CreateTaskTool {
                         "Task status: todo, in_progress, done, or blocked (default: todo)",
                     ),
                     false,
+                )
+                .add_property(
+                    "blocked_by",
+                    PropertySchema::array(
+                        "IDs of prerequisite tasks that must complete before this one",
+                        PropertySchema::string("Task ID"),
+                    ),
+                    false,
                 ),
         )
     }
@@ -174,6 +249,17 @@ impl Tool for CreateTaskTool {
         };
 
         let mut inner = self.store.inner.lock().unwrap();
+
+        // Validate blocked_by references
+        for dep_id in &args.blocked_by {
+            if !inner.tasks.contains_key(dep_id) {
+                return Ok(ToolOutput::error(format!(
+                    "Dependency task '{}' not found",
+                    dep_id
+                )));
+            }
+        }
+
         let id = inner.next_id.to_string();
         inner.next_id += 1;
 
@@ -183,6 +269,8 @@ impl Tool for CreateTaskTool {
             status,
             assignee: args.assignee,
             description: args.description,
+            blocked_by: args.blocked_by,
+            notes: Vec::new(),
         };
 
         let output = serde_json::to_string_pretty(&task)
@@ -218,6 +306,10 @@ struct UpdateTaskArgs {
     assignee: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    blocked_by: Option<Vec<String>>,
+    #[serde(default)]
+    add_note: Option<String>,
 }
 
 #[async_trait]
@@ -259,6 +351,19 @@ impl Tool for UpdateTaskTool {
                     "description",
                     PropertySchema::string("New description for the task"),
                     false,
+                )
+                .add_property(
+                    "blocked_by",
+                    PropertySchema::array(
+                        "Replace dependency list (use empty array to clear)",
+                        PropertySchema::string("Task ID"),
+                    ),
+                    false,
+                )
+                .add_property(
+                    "add_note",
+                    PropertySchema::string("Append a progress note to the task"),
+                    false,
                 ),
         )
     }
@@ -272,6 +377,24 @@ impl Tool for UpdateTaskTool {
             .map_err(|e| Error::tool("update_task", format!("Invalid arguments: {}", e)))?;
 
         let mut inner = self.store.inner.lock().unwrap();
+
+        // Validate blocked_by references before mutating
+        if let Some(ref deps) = args.blocked_by {
+            for dep_id in deps {
+                if dep_id == &args.id {
+                    return Ok(ToolOutput::error(
+                        "A task cannot depend on itself".to_string(),
+                    ));
+                }
+                if !inner.tasks.contains_key(dep_id) {
+                    return Ok(ToolOutput::error(format!(
+                        "Dependency task '{}' not found",
+                        dep_id
+                    )));
+                }
+            }
+        }
+
         let task = match inner.tasks.get_mut(&args.id) {
             Some(t) => t,
             None => {
@@ -294,6 +417,12 @@ impl Tool for UpdateTaskTool {
         }
         if let Some(description) = args.description {
             task.description = Some(description);
+        }
+        if let Some(deps) = args.blocked_by {
+            task.blocked_by = deps;
+        }
+        if let Some(note) = args.add_note {
+            task.notes.push(note);
         }
 
         let output = serde_json::to_string_pretty(task)
@@ -405,7 +534,36 @@ impl Tool for ListTasksTool {
         // Sort by ID numerically
         tasks.sort_by_key(|t| t.id.parse::<u32>().unwrap_or(0));
 
-        let output = serde_json::to_string_pretty(&tasks)
+        // Build reverse blocks map
+        let all_tasks: Vec<&Task> = inner.tasks.values().collect();
+        let mut blocks_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        for t in &all_tasks {
+            for dep_id in &t.blocked_by {
+                blocks_map
+                    .entry(dep_id.as_str())
+                    .or_default()
+                    .push(&t.id);
+            }
+        }
+
+        // Serialize with derived "blocks" field
+        let output_values: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|task| {
+                let mut val = serde_json::to_value(task).unwrap();
+                if let Some(blocks) = blocks_map.get(task.id.as_str()) {
+                    val.as_object_mut().unwrap().insert(
+                        "blocks".to_string(),
+                        serde_json::Value::Array(
+                            blocks.iter().map(|id| serde_json::Value::String(id.to_string())).collect(),
+                        ),
+                    );
+                }
+                val
+            })
+            .collect();
+
+        let output = serde_json::to_string_pretty(&output_values)
             .unwrap_or_else(|_| "Error serializing tasks".to_string());
 
         Ok(ToolOutput::success(output))
@@ -475,6 +633,106 @@ impl Tool for DeleteTaskTool {
 }
 
 // =============================================================================
+// UpdateMyTaskTool
+// =============================================================================
+
+/// Scoped task update tool for sub-agents.
+///
+/// Deliberately limited: can only update status and add notes.
+/// Cannot change title, description, assignee, or dependencies.
+pub struct UpdateMyTaskTool {
+    store: Arc<TaskStore>,
+}
+
+impl UpdateMyTaskTool {
+    pub fn new(store: Arc<TaskStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateMyTaskArgs {
+    id: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    add_note: Option<String>,
+}
+
+#[async_trait]
+impl Tool for UpdateMyTaskTool {
+    fn name(&self) -> &str {
+        "update_my_task"
+    }
+
+    fn description(&self) -> &str {
+        "Update your assigned task's status or add a progress note. Use this to report progress, mark tasks done, or flag blockers."
+    }
+
+    fn tool_description(&self) -> &str {
+        "Update your assigned task's status or add a progress note."
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property("id", PropertySchema::string("ID of the task to update"), true)
+                .add_property(
+                    "status",
+                    PropertySchema::string(
+                        "New status: todo, in_progress, done, or blocked",
+                    ),
+                    false,
+                )
+                .add_property(
+                    "add_note",
+                    PropertySchema::string("Append a progress note (e.g., findings, blockers, completion summary)"),
+                    false,
+                ),
+        )
+    }
+
+    fn is_blocking(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        let args: UpdateMyTaskArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("update_my_task", format!("Invalid arguments: {}", e)))?;
+
+        if args.status.is_none() && args.add_note.is_none() {
+            return Ok(ToolOutput::error(
+                "At least one of 'status' or 'add_note' must be provided".to_string(),
+            ));
+        }
+
+        let mut inner = self.store.inner.lock().unwrap();
+        let task = match inner.tasks.get_mut(&args.id) {
+            Some(t) => t,
+            None => {
+                return Ok(ToolOutput::error(format!(
+                    "Task with id '{}' not found",
+                    args.id
+                )));
+            }
+        };
+
+        if let Some(status_str) = args.status {
+            task.status = TaskStatus::from_str(&status_str)
+                .map_err(|e| Error::tool("update_my_task", e))?;
+        }
+        if let Some(note) = args.add_note {
+            task.notes.push(note);
+        }
+
+        let output = serde_json::to_string_pretty(task)
+            .unwrap_or_else(|_| format!("Task '{}' updated", args.id));
+
+        Ok(ToolOutput::success(output))
+    }
+}
+
+// =============================================================================
 // Factory functions
 // =============================================================================
 
@@ -484,7 +742,8 @@ pub fn create_task_tools(store: Arc<TaskStore>) -> Vec<Box<dyn Tool>> {
         Box::new(CreateTaskTool::new(store.clone())),
         Box::new(UpdateTaskTool::new(store.clone())),
         Box::new(ListTasksTool::new(store.clone())),
-        Box::new(DeleteTaskTool::new(store)),
+        Box::new(DeleteTaskTool::new(store.clone())),
+        Box::new(UpdateMyTaskTool::new(store)),
     ]
 }
 
@@ -494,7 +753,8 @@ pub fn create_task_tools_arc(store: Arc<TaskStore>) -> Vec<Arc<dyn Tool>> {
         Arc::new(CreateTaskTool::new(store.clone())),
         Arc::new(UpdateTaskTool::new(store.clone())),
         Arc::new(ListTasksTool::new(store.clone())),
-        Arc::new(DeleteTaskTool::new(store)),
+        Arc::new(DeleteTaskTool::new(store.clone())),
+        Arc::new(UpdateMyTaskTool::new(store)),
     ]
 }
 
@@ -698,14 +958,293 @@ mod tests {
         let store = new_store();
 
         let boxed = create_task_tools(store.clone());
-        assert_eq!(boxed.len(), 4);
+        assert_eq!(boxed.len(), 5);
         assert_eq!(boxed[0].name(), "create_task");
         assert_eq!(boxed[1].name(), "update_task");
         assert_eq!(boxed[2].name(), "list_tasks");
         assert_eq!(boxed[3].name(), "delete_task");
+        assert_eq!(boxed[4].name(), "update_my_task");
 
         let arced = create_task_tools_arc(store);
-        assert_eq!(arced.len(), 4);
+        assert_eq!(arced.len(), 5);
         assert_eq!(arced[0].name(), "create_task");
+        assert_eq!(arced[4].name(), "update_my_task");
+    }
+
+    // --- Dependency tests ---
+
+    #[tokio::test]
+    async fn test_create_task_with_dependencies() {
+        let store = new_store();
+        let tool = CreateTaskTool::new(store.clone());
+
+        // Create task 1
+        tool.execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+
+        // Create task 2 blocked by task 1
+        let result = tool
+            .execute(serde_json::json!({"title": "Task 2", "blocked_by": ["1"]}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("blocked_by"));
+        assert!(result.content.contains("\"1\""));
+    }
+
+    #[tokio::test]
+    async fn test_create_task_invalid_dependency() {
+        let store = new_store();
+        let tool = CreateTaskTool::new(store.clone());
+
+        let result = tool
+            .execute(serde_json::json!({"title": "Task 1", "blocked_by": ["999"]}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_update_task_self_dependency() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update = UpdateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+
+        let result = update
+            .execute(serde_json::json!({"id": "1", "blocked_by": ["1"]}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("cannot depend on itself"));
+    }
+
+    #[tokio::test]
+    async fn test_update_task_invalid_dependency() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update = UpdateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+
+        let result = update
+            .execute(serde_json::json!({"id": "1", "blocked_by": ["999"]}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_update_task_set_and_clear_dependencies() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update = UpdateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+        create
+            .execute(serde_json::json!({"title": "Task 2"}))
+            .await
+            .unwrap();
+
+        // Set dependency
+        let result = update
+            .execute(serde_json::json!({"id": "2", "blocked_by": ["1"]}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("blocked_by"));
+
+        // Clear dependency
+        let result = update
+            .execute(serde_json::json!({"id": "2", "blocked_by": []}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(!result.content.contains("blocked_by"));
+    }
+
+    // --- Notes tests ---
+
+    #[tokio::test]
+    async fn test_update_task_add_note() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update = UpdateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+
+        let result = update
+            .execute(serde_json::json!({"id": "1", "add_note": "Found 3 files to modify"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("Found 3 files to modify"));
+    }
+
+    #[tokio::test]
+    async fn test_update_task_multiple_notes() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update = UpdateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+
+        update
+            .execute(serde_json::json!({"id": "1", "add_note": "Note 1"}))
+            .await
+            .unwrap();
+        let result = update
+            .execute(serde_json::json!({"id": "1", "add_note": "Note 2"}))
+            .await
+            .unwrap();
+        assert!(result.content.contains("Note 1"));
+        assert!(result.content.contains("Note 2"));
+    }
+
+    // --- List tasks with blocks ---
+
+    #[tokio::test]
+    async fn test_list_tasks_shows_blocks() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let list = ListTasksTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+        create
+            .execute(serde_json::json!({"title": "Task 2", "blocked_by": ["1"]}))
+            .await
+            .unwrap();
+
+        let result = list.execute(serde_json::json!({})).await.unwrap();
+        assert!(result.content.contains("blocks"));
+    }
+
+    // --- format_board tests ---
+
+    #[test]
+    fn test_format_board_empty() {
+        let store = TaskStore::new();
+        assert!(store.format_board().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_format_board_populated() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Explore auth module", "assignee": "explore"}))
+            .await
+            .unwrap();
+        create
+            .execute(serde_json::json!({
+                "title": "Refactor auth handler",
+                "assignee": "coder",
+                "status": "in_progress",
+                "blocked_by": ["1"]
+            }))
+            .await
+            .unwrap();
+
+        let board = store.format_board().unwrap();
+        assert!(board.contains("## Current Task Board"));
+        assert!(board.contains("[todo] #1: Explore auth module (assignee: explore)"));
+        assert!(board.contains("[in_progress] #2: Refactor auth handler (assignee: coder)"));
+        assert!(board.contains("blocked by: #1"));
+        assert!(board.contains("blocks: #2"));
+    }
+
+    // --- UpdateMyTaskTool tests ---
+
+    #[tokio::test]
+    async fn test_update_my_task_status() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update_my = UpdateMyTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "My task"}))
+            .await
+            .unwrap();
+
+        let result = update_my
+            .execute(serde_json::json!({"id": "1", "status": "done"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn test_update_my_task_add_note() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update_my = UpdateMyTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "My task"}))
+            .await
+            .unwrap();
+
+        let result = update_my
+            .execute(serde_json::json!({"id": "1", "add_note": "Found the issue"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("Found the issue"));
+    }
+
+    #[tokio::test]
+    async fn test_update_my_task_requires_field() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let update_my = UpdateMyTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "My task"}))
+            .await
+            .unwrap();
+
+        let result = update_my
+            .execute(serde_json::json!({"id": "1"}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("At least one"));
+    }
+
+    #[tokio::test]
+    async fn test_update_my_task_not_found() {
+        let store = new_store();
+        let update_my = UpdateMyTaskTool::new(store.clone());
+
+        let result = update_my
+            .execute(serde_json::json!({"id": "999", "status": "done"}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("not found"));
     }
 }

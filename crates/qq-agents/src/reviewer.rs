@@ -96,7 +96,7 @@ impl InternalAgent for ReviewerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "find_files", "search_files"]
+        &["read_file", "find_files", "search_files", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -132,6 +132,7 @@ mod tests {
         assert!(agent.tool_names().contains(&"read_file"));
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
+        assert!(agent.tool_names().contains(&"update_my_task"));
         // Reviewer doesn't write files
         assert!(!agent.tool_names().contains(&"write_file"));
     }

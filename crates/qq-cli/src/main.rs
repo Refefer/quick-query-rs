@@ -423,6 +423,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             has_tools: true, // PM has task tracking tools
             has_sub_agents: !disable_agents,
             has_inform_user: true,
+            has_task_tracking: false, // PM uses full task tools, not update_my_task
         });
         let combined = format!("{}\n\n---\n\n{}", preamble, base_prompt);
         match user_system_prompt {
@@ -445,12 +446,15 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Register task tracking tools (session-scoped, in-memory)
-    if !disable_tools {
-        let task_store = std::sync::Arc::new(qq_tools::TaskStore::new());
-        for tool in qq_tools::create_task_tools_arc(task_store) {
+    let task_store = if !disable_tools {
+        let store = std::sync::Arc::new(qq_tools::TaskStore::new());
+        for tool in qq_tools::create_task_tools_arc(store.clone()) {
             base_tools.register(tool);
         }
-    }
+        Some(store)
+    } else {
+        None
+    };
 
     // Load agents config
     let agents_config = AgentsConfig::load().unwrap_or_default();
@@ -505,6 +509,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             Some(event_bus.clone()),
             Some(agent_memory.clone()),
             "pm".to_string(),
+            task_store.clone(),
         )
     };
 

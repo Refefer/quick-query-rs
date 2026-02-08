@@ -78,6 +78,7 @@ async fn execute_agent(
     event_bus: &Option<AgentEventBus>,
     agent_memory: &Option<AgentMemory>,
     scope: &str,
+    task_store: &Option<Arc<qq_tools::TaskStore>>,
 ) -> Result<ToolOutput, Error> {
     let child_scope = format!("{}/{}", scope, config.agent_name);
 
@@ -112,6 +113,7 @@ async fn execute_agent(
             event_bus.clone(),
             agent_memory.clone(),
             child_scope.clone(),
+            task_store.clone(),
         );
         for tool in nested_agent_tools {
             agent_tools.register(tool);
@@ -131,13 +133,30 @@ async fn execute_agent(
     let has_sub_agents = next_depth < max_depth;
     let has_tools = !config.tool_names.is_empty();
     let has_inform_user = event_bus.is_some();
+    let has_task_tracking = config.tool_names.iter().any(|n| n == "update_my_task");
 
     let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
         has_tools,
         has_sub_agents,
         has_inform_user,
+        has_task_tracking,
     });
     let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
+
+    // Prepend task board for non-PM agents
+    let augmented_task = if config.agent_name != "pm" {
+        if let Some(ref store) = task_store {
+            if let Some(board) = store.format_board() {
+                format!("{}\n\n---\n\n{}", board, task)
+            } else {
+                task
+            }
+        } else {
+            task
+        }
+    } else {
+        task
+    };
 
     let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
         .with_system_prompt(&full_prompt)
@@ -156,7 +175,7 @@ async fn execute_agent(
         Arc::clone(provider),
         agent_tools,
         agent_cfg,
-        task,
+        augmented_task,
         progress,
         continuation_config,
         event_bus.as_ref(),
@@ -231,6 +250,8 @@ pub struct InternalAgentTool {
     agent_memory: Option<AgentMemory>,
     /// Scope path for this tool (e.g., "pm" at depth 0)
     scope: String,
+    /// Task store for task board injection into sub-agent context
+    task_store: Option<Arc<qq_tools::TaskStore>>,
 }
 
 impl InternalAgentTool {
@@ -247,6 +268,7 @@ impl InternalAgentTool {
         event_bus: Option<AgentEventBus>,
         agent_memory: Option<AgentMemory>,
         scope: String,
+        task_store: Option<Arc<qq_tools::TaskStore>>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -263,6 +285,7 @@ impl InternalAgentTool {
             event_bus,
             agent_memory,
             scope,
+            task_store,
         }
     }
 }
@@ -338,6 +361,7 @@ impl Tool for InternalAgentTool {
             &self.event_bus,
             &self.agent_memory,
             &self.scope,
+            &self.task_store,
         )
         .await;
 
@@ -382,6 +406,8 @@ pub struct ExternalAgentTool {
     agent_memory: Option<AgentMemory>,
     /// Scope path for this tool
     scope: String,
+    /// Task store for task board injection into sub-agent context
+    task_store: Option<Arc<qq_tools::TaskStore>>,
 }
 
 impl ExternalAgentTool {
@@ -399,6 +425,7 @@ impl ExternalAgentTool {
         event_bus: Option<AgentEventBus>,
         agent_memory: Option<AgentMemory>,
         scope: String,
+        task_store: Option<Arc<qq_tools::TaskStore>>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -416,6 +443,7 @@ impl ExternalAgentTool {
             event_bus,
             agent_memory,
             scope,
+            task_store,
         }
     }
 }
@@ -478,6 +506,7 @@ impl Tool for ExternalAgentTool {
             &self.event_bus,
             &self.agent_memory,
             &self.scope,
+            &self.task_store,
         )
         .await;
 
@@ -521,6 +550,7 @@ pub fn create_agent_tools(
     event_bus: Option<AgentEventBus>,
     agent_memory: Option<AgentMemory>,
     scope: String,
+    task_store: Option<Arc<qq_tools::TaskStore>>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -549,6 +579,7 @@ pub fn create_agent_tools(
                 event_bus.clone(),
                 agent_memory.clone(),
                 scope.clone(),
+                task_store.clone(),
             )));
         }
     }
@@ -569,6 +600,7 @@ pub fn create_agent_tools(
                 event_bus.clone(),
                 agent_memory.clone(),
                 scope.clone(),
+                task_store.clone(),
             )));
         }
     }

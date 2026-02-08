@@ -167,7 +167,7 @@ impl InternalAgent for PlannerAgent {
 
     fn tool_names(&self) -> &[&str] {
         // Planner is read-only - can check memory but not write to it
-        &["read_memory"]
+        &["read_memory", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -200,6 +200,7 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_memory"));
+        assert!(agent.tool_names().contains(&"update_my_task"));
         // Planner is read-only - no write tools
         assert!(!agent.tool_names().contains(&"add_memory"));
         assert!(!agent.tool_names().contains(&"write_file"));
