@@ -603,6 +603,7 @@ pub(crate) fn preprocess_tables(content: &str, width: usize) -> String {
 }
 
 /// Parse a markdown table row into cells by splitting on `|` and trimming.
+/// Converts HTML `<br>` tags to newlines so they render as line breaks within cells.
 fn parse_row(line: &str) -> Vec<String> {
     let trimmed = line.trim();
     // Strip leading and trailing `|`
@@ -611,7 +612,21 @@ fn parse_row(line: &str) -> Vec<String> {
         .unwrap_or(trimmed)
         .strip_suffix('|')
         .unwrap_or(trimmed);
-    inner.split('|').map(|c| c.trim().to_string()).collect()
+    inner
+        .split('|')
+        .map(|c| {
+            let cell = c.trim().to_string();
+            // Convert <br>, <br/>, <br /> to newlines
+            let cell = cell.replace("<br/>", "\n");
+            let cell = cell.replace("<br />", "\n");
+            let cell = cell.replace("<br>", "\n");
+            // Trim whitespace around newlines
+            cell.lines()
+                .map(|l| l.trim())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
 }
 
 /// Check if a row is a separator row (cells contain only `-`, `:`, spaces).
@@ -669,12 +684,18 @@ fn render_table(
     // Collect all rows for width calculation
     let all_rows: Vec<&Vec<String>> = headers.iter().chain(data_rows.iter()).collect();
 
-    // Calculate max content width per column
+    // Calculate max content width per column (widest line within each cell)
     let mut max_widths: Vec<usize> = vec![0; num_cols];
     for row in &all_rows {
         for (i, cell) in row.iter().enumerate() {
             if i < num_cols {
-                max_widths[i] = max_widths[i].max(cell.len());
+                // For cells with embedded newlines, measure the widest line
+                let widest_line = cell
+                    .lines()
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(cell.chars().count());
+                max_widths[i] = max_widths[i].max(widest_line);
             }
         }
     }
@@ -710,6 +731,8 @@ fn render_table(
 }
 
 /// Calculate column widths, respecting min width and available space.
+/// Uses a waterfall algorithm: narrow columns keep their natural width,
+/// only wide columns get shrunk to share remaining space.
 fn calculate_col_widths(
     max_widths: &[usize],
     num_cols: usize,
@@ -739,50 +762,56 @@ fn calculate_col_widths(
         return widths;
     }
 
-    // Need to shrink. Proportionally reduce but never below MIN_COL_WIDTH.
-    // First check if we can fit at all with min widths
+    // Can't even fit minimums: give equal share
     let min_total = num_cols * MIN_COL_WIDTH;
     if usable <= min_total {
-        // Can't even fit minimums, give equal share but at least 1
         let per_col = (usable / num_cols).max(1);
         return vec![per_col; num_cols];
     }
 
-    // Proportionally distribute usable space
-    let scale = usable as f64 / total as f64;
-    let mut result: Vec<usize> = widths
-        .iter()
-        .map(|&w| ((w as f64 * scale).floor() as usize).max(MIN_COL_WIDTH))
-        .collect();
+    // Waterfall algorithm: preserve narrow columns at natural width,
+    // only shrink columns wider than their fair share.
+    let mut result = widths.clone();
+    let mut fixed = vec![false; num_cols];
 
-    // Adjust to exactly fill usable space
-    let current_total: usize = result.iter().sum();
-    if current_total < usable {
-        // Distribute remaining space to largest columns first
-        let mut remaining = usable - current_total;
-        let mut indices: Vec<usize> = (0..num_cols).collect();
-        indices.sort_by(|&a, &b| result[b].cmp(&result[a]));
-        for &i in &indices {
-            if remaining == 0 {
-                break;
-            }
-            result[i] += 1;
-            remaining -= 1;
+    loop {
+        let unfixed_count = fixed.iter().filter(|&&f| !f).count();
+        if unfixed_count == 0 {
+            break;
         }
-    } else if current_total > usable {
-        // Take space from largest columns
-        let mut excess = current_total - usable;
-        let mut indices: Vec<usize> = (0..num_cols).collect();
-        indices.sort_by(|&a, &b| result[b].cmp(&result[a]));
-        for &i in &indices {
-            if excess == 0 {
-                break;
+
+        let fixed_total: usize = (0..num_cols).filter(|&i| fixed[i]).map(|i| result[i]).sum();
+        let remaining = usable.saturating_sub(fixed_total);
+        let fair_share = remaining / unfixed_count;
+
+        // Fix columns that already fit within their fair share
+        let mut newly_fixed = false;
+        for i in 0..num_cols {
+            if !fixed[i] && result[i] <= fair_share {
+                fixed[i] = true;
+                newly_fixed = true;
             }
-            if result[i] > MIN_COL_WIDTH {
-                let can_take = (result[i] - MIN_COL_WIDTH).min(excess);
-                result[i] -= can_take;
-                excess -= can_take;
+        }
+
+        if !newly_fixed {
+            // All unfixed columns exceed fair share; distribute remaining evenly
+            let fixed_total: usize =
+                (0..num_cols).filter(|&i| fixed[i]).map(|i| result[i]).sum();
+            let remaining = usable.saturating_sub(fixed_total);
+            let per_col = remaining / unfixed_count;
+            let mut extra = remaining % unfixed_count;
+            for i in 0..num_cols {
+                if !fixed[i] {
+                    result[i] = per_col
+                        + if extra > 0 {
+                            extra -= 1;
+                            1
+                        } else {
+                            0
+                        };
+                }
             }
+            break;
         }
     }
 
@@ -834,10 +863,11 @@ fn render_wrapped_row(
                 ""
             };
             let width = col_widths[col];
-            // Pad to column width
+            // Pad to column width (use char count for correct alignment)
             out.push(' ');
             out.push_str(text);
-            for _ in text.len()..width {
+            let text_width = text.chars().count();
+            for _ in text_width..width {
                 out.push(' ');
             }
             out.push(' ');
@@ -848,11 +878,30 @@ fn render_wrapped_row(
 }
 
 /// Word-wrap text to a given width. Tries to break at word boundaries.
+/// Handles embedded newlines by splitting on them first.
 /// Width is measured in characters (not bytes) so multi-byte UTF-8 is safe.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
     }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    // Handle embedded newlines: split first, then wrap each line
+    if text.contains('\n') {
+        let mut all_lines = Vec::new();
+        for line in text.split('\n') {
+            all_lines.extend(wrap_single_line(line, width));
+        }
+        return all_lines;
+    }
+
+    wrap_single_line(text, width)
+}
+
+/// Wrap a single line of text (no embedded newlines) to the given width.
+fn wrap_single_line(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
@@ -1135,5 +1184,40 @@ mod tests {
         let lines: Vec<&str> = result.lines().collect();
         // First line is code fence, second is top border
         assert!(lines[1].starts_with('┌'));
+    }
+
+    #[test]
+    fn test_waterfall_preserves_narrow_columns() {
+        // Narrow col 1, very wide col 2 — col 1 should keep its natural width
+        let widths = calculate_col_widths(&[15, 200], 2, 80);
+        // Col 1 should stay at 15 (its natural width), not be proportionally shrunk
+        assert_eq!(widths[0], 15);
+        // Col 2 gets the rest: 80 - overhead(7) - 15 = 58
+        assert_eq!(widths[0] + widths[1] + 7, 80);
+    }
+
+    #[test]
+    fn test_br_tags_become_newlines() {
+        let cells = parse_row("| Point A.<br>Point B.<br/>Point C. |");
+        assert_eq!(cells.len(), 1);
+        assert!(cells[0].contains('\n'));
+        let lines: Vec<&str> = cells[0].lines().collect();
+        assert_eq!(lines, vec!["Point A.", "Point B.", "Point C."]);
+    }
+
+    #[test]
+    fn test_wrap_text_with_newlines() {
+        let wrapped = wrap_text("Line one\nLine two\nLine three", 20);
+        assert_eq!(wrapped, vec!["Line one", "Line two", "Line three"]);
+    }
+
+    #[test]
+    fn test_table_with_br_tags() {
+        let table = "| Area | Details |\n|------|--------|\n| **Short** | First point.<br>Second point.<br>Third point. |";
+        let result = preprocess_tables(table, 80);
+        // <br> should not appear literally
+        assert!(!result.contains("<br>"));
+        // Box drawing should be present
+        assert!(result.contains('┌'));
     }
 }
