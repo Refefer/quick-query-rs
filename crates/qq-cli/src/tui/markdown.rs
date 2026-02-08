@@ -4,16 +4,11 @@
 
 use ratatui::text::Text;
 
-use crate::markdown::{preprocess_tables, render_to_text};
+use crate::markdown::render_to_text;
 
 /// Render markdown to ratatui Text.
 pub fn markdown_to_text(content: &str, width: Option<usize>) -> Text<'static> {
-    let processed = if let Some(w) = width {
-        preprocess_tables(content, w)
-    } else {
-        content.to_string()
-    };
-    render_to_text(&processed)
+    render_to_text(content, width.unwrap_or(80))
 }
 
 #[cfg(test)]

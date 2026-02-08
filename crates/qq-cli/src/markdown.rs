@@ -18,6 +18,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
 };
+use unicode_width::UnicodeWidthStr;
 
 /// Style definitions for markdown elements, matching the previous termimad color scheme.
 struct MarkdownStyle {
@@ -66,10 +67,40 @@ impl Default for MarkdownStyle {
     }
 }
 
+/// A styled cell: a sequence of logical lines, where each logical line
+/// is a list of styled spans. Supports `<br>`-induced line breaks within cells.
+type StyledCell = Vec<Vec<Span<'static>>>;
+
+/// Accumulated table data collected during the event-driven first pass.
+struct TableData {
+    alignments: Vec<pulldown_cmark::Alignment>,
+    header_rows: Vec<Vec<StyledCell>>,
+    data_rows: Vec<Vec<StyledCell>>,
+    current_row: Vec<StyledCell>,
+    current_cell: StyledCell,
+    current_cell_line: Vec<Span<'static>>,
+    in_header: bool,
+}
+
+impl TableData {
+    fn new(alignments: Vec<pulldown_cmark::Alignment>) -> Self {
+        Self {
+            alignments,
+            header_rows: Vec::new(),
+            data_rows: Vec::new(),
+            current_row: Vec::new(),
+            current_cell: Vec::new(),
+            current_cell_line: Vec::new(),
+            in_header: false,
+        }
+    }
+}
+
 /// Render markdown content to ratatui `Text`.
 ///
 /// This is the core rendering function used by both TUI and CLI paths.
-pub fn render_to_text(content: &str) -> Text<'static> {
+/// The `width` parameter controls table column layout.
+pub fn render_to_text(content: &str, width: usize) -> Text<'static> {
     let styles = MarkdownStyle::default();
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     let parser = Parser::new_ext(content, options);
@@ -87,6 +118,9 @@ pub fn render_to_text(content: &str) -> Text<'static> {
 
     // Link URL storage
     let mut link_url: Option<String> = None;
+
+    // Table accumulation state
+    let mut table_data: Option<TableData> = None;
 
     for event in parser {
         match event {
@@ -215,63 +249,89 @@ pub fn render_to_text(content: &str) -> Text<'static> {
                 style_stack.pop();
                 if let Some(url) = link_url.take() {
                     let effective = effective_style(&style_stack);
-                    current_spans.push(Span::styled(
-                        format!(" ({})", url),
-                        effective,
-                    ));
+                    let url_span = Span::styled(format!(" ({})", url), effective);
+                    if let Some(ref mut td) = table_data {
+                        td.current_cell_line.push(url_span);
+                    } else {
+                        current_spans.push(url_span);
+                    }
                 }
             }
 
             Event::Code(text) => {
-                // Prepend list item prefix if pending
-                if let Some(prefix) = pending_item_prefix.take() {
-                    current_spans.extend(prefix);
+                if let Some(ref mut td) = table_data {
+                    td.current_cell_line
+                        .push(Span::styled(text.to_string(), styles.inline_code));
+                } else {
+                    // Prepend list item prefix if pending
+                    if let Some(prefix) = pending_item_prefix.take() {
+                        current_spans.extend(prefix);
+                    }
+                    current_spans.push(Span::styled(text.to_string(), styles.inline_code));
                 }
-                current_spans.push(Span::styled(text.to_string(), styles.inline_code));
             }
 
             Event::Text(text) => {
-                // Prepend list item prefix if pending
-                if let Some(prefix) = pending_item_prefix.take() {
-                    current_spans.extend(prefix);
-                }
-
                 let style = effective_style(&style_stack);
 
-                if in_code_block {
-                    // Code blocks: emit each line separately
-                    for (i, line) in text.split('\n').enumerate() {
-                        if i > 0 {
-                            flush_line(&mut lines, &mut current_spans);
-                        }
-                        if !line.is_empty() {
-                            current_spans.push(Span::styled(line.to_string(), style));
-                        }
-                    }
-                } else if in_blockquote {
-                    // Blockquote: add "│ " prefix to each line
-                    for (i, line) in text.split('\n').enumerate() {
-                        if i > 0 {
-                            flush_line(&mut lines, &mut current_spans);
-                        }
-                        if i > 0 || current_spans.is_empty() {
-                            current_spans
-                                .push(Span::styled("│ ".to_string(), styles.blockquote));
-                        }
-                        if !line.is_empty() {
-                            current_spans.push(Span::styled(line.to_string(), style));
-                        }
-                    }
+                if let Some(ref mut td) = table_data {
+                    // Table mode: push styled span to current cell line
+                    td.current_cell_line
+                        .push(Span::styled(text.to_string(), style));
                 } else {
-                    current_spans.push(Span::styled(text.to_string(), style));
+                    // Prepend list item prefix if pending
+                    if let Some(prefix) = pending_item_prefix.take() {
+                        current_spans.extend(prefix);
+                    }
+
+                    if in_code_block {
+                        // Code blocks: emit each line separately
+                        for (i, line) in text.split('\n').enumerate() {
+                            if i > 0 {
+                                flush_line(&mut lines, &mut current_spans);
+                            }
+                            if !line.is_empty() {
+                                current_spans
+                                    .push(Span::styled(line.to_string(), style));
+                            }
+                        }
+                    } else if in_blockquote {
+                        // Blockquote: add "│ " prefix to each line
+                        for (i, line) in text.split('\n').enumerate() {
+                            if i > 0 {
+                                flush_line(&mut lines, &mut current_spans);
+                            }
+                            if i > 0 || current_spans.is_empty() {
+                                current_spans.push(Span::styled(
+                                    "│ ".to_string(),
+                                    styles.blockquote,
+                                ));
+                            }
+                            if !line.is_empty() {
+                                current_spans
+                                    .push(Span::styled(line.to_string(), style));
+                            }
+                        }
+                    } else {
+                        current_spans.push(Span::styled(text.to_string(), style));
+                    }
                 }
             }
 
             Event::SoftBreak => {
-                current_spans.push(Span::raw(" ".to_string()));
+                if let Some(ref mut td) = table_data {
+                    td.current_cell_line.push(Span::raw(" ".to_string()));
+                } else {
+                    current_spans.push(Span::raw(" ".to_string()));
+                }
             }
             Event::HardBreak => {
-                flush_line(&mut lines, &mut current_spans);
+                if let Some(ref mut td) = table_data {
+                    let line = std::mem::take(&mut td.current_cell_line);
+                    td.current_cell.push(line);
+                } else {
+                    flush_line(&mut lines, &mut current_spans);
+                }
             }
 
             Event::Rule => {
@@ -284,15 +344,76 @@ pub fn render_to_text(content: &str) -> Text<'static> {
                 lines.push(Line::default());
             }
 
-            // Table events - shouldn't occur after preprocess_tables, but handle gracefully
-            Event::Start(Tag::Table(_))
-            | Event::End(TagEnd::Table)
-            | Event::Start(Tag::TableHead)
-            | Event::End(TagEnd::TableHead)
-            | Event::Start(Tag::TableRow)
-            | Event::End(TagEnd::TableRow)
-            | Event::Start(Tag::TableCell)
-            | Event::End(TagEnd::TableCell) => {}
+            Event::Start(Tag::Table(alignments)) => {
+                flush_line(&mut lines, &mut current_spans);
+                table_data = Some(TableData::new(alignments));
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(td) = table_data.take() {
+                    let table_lines = render_styled_table(&td, width, &styles);
+                    lines.extend(table_lines);
+                    lines.push(Line::default());
+                    had_paragraph = true;
+                }
+            }
+
+            Event::Start(Tag::TableHead) => {
+                if let Some(ref mut td) = table_data {
+                    td.in_header = true;
+                    td.current_row = Vec::new();
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(ref mut td) = table_data {
+                    let row = std::mem::take(&mut td.current_row);
+                    td.header_rows.push(row);
+                    td.in_header = false;
+                }
+            }
+
+            Event::Start(Tag::TableRow) => {
+                if let Some(ref mut td) = table_data {
+                    td.current_row = Vec::new();
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(ref mut td) = table_data {
+                    let row = std::mem::take(&mut td.current_row);
+                    td.data_rows.push(row);
+                }
+            }
+
+            Event::Start(Tag::TableCell) => {
+                if let Some(ref mut td) = table_data {
+                    td.current_cell = Vec::new();
+                    td.current_cell_line = Vec::new();
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(ref mut td) = table_data {
+                    let line = std::mem::take(&mut td.current_cell_line);
+                    if !line.is_empty() {
+                        td.current_cell.push(line);
+                    }
+                    if td.current_cell.is_empty() {
+                        td.current_cell.push(Vec::new());
+                    }
+                    let cell = std::mem::take(&mut td.current_cell);
+                    td.current_row.push(cell);
+                }
+            }
+
+            Event::InlineHtml(html) => {
+                let tag = html.trim().to_lowercase();
+                if tag == "<br>" || tag == "<br/>" || tag == "<br />" {
+                    if let Some(ref mut td) = table_data {
+                        let line = std::mem::take(&mut td.current_cell_line);
+                        td.current_cell.push(line);
+                    } else {
+                        flush_line(&mut lines, &mut current_spans);
+                    }
+                }
+            }
 
             _ => {}
         }
@@ -326,6 +447,282 @@ fn effective_style(stack: &[Style]) -> Style {
         style = style.patch(*s);
     }
     style
+}
+
+/// Compute the visible display width of a sequence of spans.
+fn visible_width_of_spans(spans: &[Span]) -> usize {
+    spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
+/// Generate a styled horizontal border line for a table.
+fn styled_border_line(
+    left: char,
+    mid: char,
+    right: char,
+    fill: char,
+    widths: &[usize],
+    style: Style,
+) -> Line<'static> {
+    let mut s = String::new();
+    s.push(left);
+    for (i, &w) in widths.iter().enumerate() {
+        for _ in 0..w + 2 {
+            s.push(fill);
+        }
+        if i < widths.len() - 1 {
+            s.push(mid);
+        }
+    }
+    s.push(right);
+    Line::from(Span::styled(s, style))
+}
+
+/// Find a byte offset for breaking `text` at approximately `avail` display-width characters.
+/// Prefers breaking at a space; falls back to hard-breaking at the width limit.
+fn find_break_point(text: &str, avail: usize) -> usize {
+    let mut width_so_far = 0usize;
+    let mut last_space_byte = None;
+    let mut byte_at_avail = text.len();
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width_so_far + ch_width > avail {
+            byte_at_avail = byte_idx;
+            break;
+        }
+        if ch == ' ' {
+            last_space_byte = Some(byte_idx);
+        }
+        width_so_far += ch_width;
+    }
+
+    if let Some(pos) = last_space_byte {
+        pos
+    } else {
+        byte_at_avail
+    }
+}
+
+/// Wrap a sequence of styled spans to fit within `width` visible characters.
+/// Returns a Vec of lines, each line being a Vec<Span>.
+fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![vec![]];
+    }
+
+    // Fast path: if total width fits, return as-is
+    let total = visible_width_of_spans(spans);
+    if total <= width {
+        return vec![spans.to_vec()];
+    }
+
+    let mut result: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_line: Vec<Span<'static>> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in spans {
+        let span_text = span.content.as_ref();
+        let span_style = span.style;
+        let span_width = UnicodeWidthStr::width(span_text);
+
+        if current_width + span_width <= width {
+            current_line.push(span.clone());
+            current_width += span_width;
+            continue;
+        }
+
+        // Need to split this span across lines
+        let mut remaining = span_text;
+        while !remaining.is_empty() {
+            let avail = width.saturating_sub(current_width);
+            if avail == 0 {
+                result.push(std::mem::take(&mut current_line));
+                current_width = 0;
+                continue;
+            }
+
+            let rem_width = UnicodeWidthStr::width(remaining);
+            if rem_width <= avail {
+                current_line.push(Span::styled(remaining.to_string(), span_style));
+                current_width += rem_width;
+                break;
+            }
+
+            let break_pos = find_break_point(remaining, avail);
+            let (chunk, rest) = remaining.split_at(break_pos);
+
+            if !chunk.is_empty() {
+                current_line.push(Span::styled(chunk.to_string(), span_style));
+            }
+            result.push(std::mem::take(&mut current_line));
+            current_width = 0;
+            remaining = rest.trim_start();
+        }
+    }
+
+    if !current_line.is_empty() {
+        result.push(current_line);
+    }
+    if result.is_empty() {
+        result.push(Vec::new());
+    }
+
+    result
+}
+
+/// Render a single row of a styled table, with word-wrapping and padding.
+fn render_styled_row(
+    out: &mut Vec<Line<'static>>,
+    row: &[StyledCell],
+    col_widths: &[usize],
+    num_cols: usize,
+    border_style: Style,
+) {
+    let empty_cell: StyledCell = vec![vec![]];
+
+    // For each cell, produce wrapped lines
+    let mut wrapped_cells: Vec<Vec<Vec<Span<'static>>>> = Vec::with_capacity(num_cols);
+    for i in 0..num_cols {
+        let cell = if i < row.len() { &row[i] } else { &empty_cell };
+        let mut all_wrapped: Vec<Vec<Span<'static>>> = Vec::new();
+        for logical_line in cell {
+            let wrapped = wrap_spans(logical_line, col_widths[i]);
+            all_wrapped.extend(wrapped);
+        }
+        if all_wrapped.is_empty() {
+            all_wrapped.push(Vec::new());
+        }
+        wrapped_cells.push(all_wrapped);
+    }
+
+    // Find max physical lines across all cells
+    let max_lines = wrapped_cells.iter().map(|c| c.len()).max().unwrap_or(1);
+
+    let empty_spans: Vec<Span<'static>> = Vec::new();
+
+    // Render each physical line
+    for line_idx in 0..max_lines {
+        let mut line_spans: Vec<Span<'static>> = Vec::new();
+        line_spans.push(Span::styled("│".to_string(), border_style));
+        for (col, wrapped) in wrapped_cells.iter().enumerate() {
+            let cell_line = if line_idx < wrapped.len() {
+                &wrapped[line_idx]
+            } else {
+                &empty_spans
+            };
+            let w = col_widths[col];
+            let content_width = visible_width_of_spans(cell_line);
+
+            line_spans.push(Span::raw(" ".to_string())); // left pad
+            line_spans.extend(cell_line.iter().cloned());
+            // Right-pad to fill column width
+            let pad = w.saturating_sub(content_width);
+            if pad > 0 {
+                line_spans.push(Span::raw(" ".repeat(pad)));
+            }
+            line_spans.push(Span::raw(" ".to_string())); // right pad
+            line_spans.push(Span::styled("│".to_string(), border_style));
+        }
+        out.push(Line::from(line_spans));
+    }
+}
+
+/// Render a complete styled table from collected table data.
+fn render_styled_table(
+    td: &TableData,
+    available_width: usize,
+    _styles: &MarkdownStyle,
+) -> Vec<Line<'static>> {
+    let num_cols = td.alignments.len().max(
+        td.header_rows
+            .iter()
+            .chain(td.data_rows.iter())
+            .map(|r| r.len())
+            .max()
+            .unwrap_or(0),
+    );
+    if num_cols == 0 {
+        return Vec::new();
+    }
+
+    // 1. Measure visible width of each cell
+    let all_rows: Vec<&Vec<StyledCell>> =
+        td.header_rows.iter().chain(td.data_rows.iter()).collect();
+    let mut max_widths = vec![0usize; num_cols];
+    for row in &all_rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < num_cols {
+                let cell_width = cell
+                    .iter()
+                    .map(|line| visible_width_of_spans(line))
+                    .max()
+                    .unwrap_or(0);
+                max_widths[i] = max_widths[i].max(cell_width);
+            }
+        }
+    }
+
+    // 2. Calculate column widths
+    let col_widths = calculate_col_widths(&max_widths, num_cols, available_width);
+
+    // 3. Render border + data lines
+    let border_style = Style::default().fg(Color::DarkGray);
+    let mut out_lines: Vec<Line<'static>> = Vec::new();
+
+    // Top border
+    out_lines.push(styled_border_line(
+        '┌',
+        '┬',
+        '┐',
+        '─',
+        &col_widths,
+        border_style,
+    ));
+
+    // Header rows
+    for header in &td.header_rows {
+        render_styled_row(&mut out_lines, header, &col_widths, num_cols, border_style);
+    }
+
+    // Separator
+    out_lines.push(styled_border_line(
+        '├',
+        '┼',
+        '┤',
+        '─',
+        &col_widths,
+        border_style,
+    ));
+
+    // Data rows with separators
+    for (i, row) in td.data_rows.iter().enumerate() {
+        render_styled_row(&mut out_lines, row, &col_widths, num_cols, border_style);
+        if i < td.data_rows.len() - 1 {
+            out_lines.push(styled_border_line(
+                '├',
+                '┼',
+                '┤',
+                '─',
+                &col_widths,
+                border_style,
+            ));
+        }
+    }
+
+    // Bottom border
+    out_lines.push(styled_border_line(
+        '└',
+        '┴',
+        '┘',
+        '─',
+        &col_widths,
+        border_style,
+    ));
+
+    out_lines
 }
 
 /// Convert ratatui `Text` to an ANSI-escaped string for direct terminal output.
@@ -484,9 +881,7 @@ impl MarkdownRenderer {
             stdout.execute(MoveToColumn(0))?;
         }
 
-        // Preprocess tables that would be too narrow, then render markdown
-        let processed = preprocess_tables(&self.content, self.term_width);
-        let ratatui_text = render_to_text(&processed);
+        let ratatui_text = render_to_text(&self.content, self.term_width);
         let output = text_to_ansi(&ratatui_text);
 
         // Count lines for next clear
@@ -530,205 +925,13 @@ impl Default for MarkdownRenderer {
 pub fn render_markdown(content: &str) {
     let (width, _) = terminal_size().unwrap_or((80, 24));
     let term_width = (width as usize).saturating_sub(2).max(40);
-    let processed = preprocess_tables(content, term_width);
-    let ratatui_text = render_to_text(&processed);
+    let ratatui_text = render_to_text(content, term_width);
     let output = text_to_ansi(&ratatui_text);
     println!("{}", output);
 }
 
 /// Minimum characters per column before we self-render the table.
 const MIN_COL_WIDTH: usize = 10;
-
-/// Preprocess markdown content to self-render tables with box-drawing characters.
-/// All tables are self-rendered regardless of column width, ensuring consistent
-/// readable output.
-pub(crate) fn preprocess_tables(content: &str, width: usize) -> String {
-    let mut result = String::with_capacity(content.len());
-    let mut in_code_block = false;
-    let mut table_lines: Vec<&str> = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
-
-    for line in &lines {
-        // Track fenced code block state
-        if line.trim_start().starts_with("```") {
-            if in_code_block {
-                in_code_block = false;
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            } else {
-                // Flush any pending table before entering code block
-                if !table_lines.is_empty() {
-                    flush_table(&table_lines, width, &mut result);
-                    table_lines.clear();
-                }
-                in_code_block = true;
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            }
-        }
-
-        if in_code_block {
-            result.push_str(line);
-            result.push('\n');
-            continue;
-        }
-
-        // Detect table rows: lines starting with `|`
-        if line.trim_start().starts_with('|') {
-            table_lines.push(line);
-        } else {
-            // Non-table line: flush any accumulated table first
-            if !table_lines.is_empty() {
-                flush_table(&table_lines, width, &mut result);
-                table_lines.clear();
-            }
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // Flush any trailing table
-    if !table_lines.is_empty() {
-        flush_table(&table_lines, width, &mut result);
-    }
-
-    // Remove trailing newline if input didn't have one
-    if !content.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
-}
-
-/// Parse a markdown table row into cells by splitting on `|` and trimming.
-/// Converts HTML `<br>` tags to newlines so they render as line breaks within cells.
-fn parse_row(line: &str) -> Vec<String> {
-    let trimmed = line.trim();
-    // Strip leading and trailing `|`
-    let inner = trimmed
-        .strip_prefix('|')
-        .unwrap_or(trimmed)
-        .strip_suffix('|')
-        .unwrap_or(trimmed);
-    inner
-        .split('|')
-        .map(|c| {
-            let cell = c.trim().to_string();
-            // Convert <br>, <br/>, <br /> to newlines
-            let cell = cell.replace("<br/>", "\n");
-            let cell = cell.replace("<br />", "\n");
-            let cell = cell.replace("<br>", "\n");
-            // Trim whitespace around newlines
-            cell.lines()
-                .map(|l| l.trim())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .collect()
-}
-
-/// Check if a row is a separator row (cells contain only `-`, `:`, spaces).
-fn is_separator_row(cells: &[String]) -> bool {
-    cells.iter().all(|c| {
-        !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
-    })
-}
-
-/// Process accumulated table lines: always self-render with box-drawing characters.
-fn flush_table(table_lines: &[&str], width: usize, result: &mut String) {
-    // Parse all rows
-    let rows: Vec<Vec<String>> = table_lines.iter().map(|l| parse_row(l)).collect();
-
-    if rows.is_empty() {
-        return;
-    }
-
-    // Find separator row index and determine header vs data
-    let sep_idx = rows.iter().position(|r| is_separator_row(r));
-
-    let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    if num_cols == 0 {
-        // Not a real table, pass through
-        for line in table_lines {
-            result.push_str(line);
-            result.push('\n');
-        }
-        return;
-    }
-
-    // Always self-render the table
-    let (headers, data_rows) = if let Some(si) = sep_idx {
-        let headers: Vec<Vec<String>> = rows[..si].to_vec();
-        let data: Vec<Vec<String>> = rows[si + 1..].to_vec();
-        (headers, data)
-    } else {
-        // No separator found, treat first row as header
-        (vec![rows[0].clone()], rows[1..].to_vec())
-    };
-
-    let rendered = render_table(&headers, &data_rows, num_cols, width);
-    result.push_str("```\n");
-    result.push_str(&rendered);
-    result.push_str("```\n");
-}
-
-/// Render a table with box-drawing characters.
-fn render_table(
-    headers: &[Vec<String>],
-    data_rows: &[Vec<String>],
-    num_cols: usize,
-    available_width: usize,
-) -> String {
-    // Collect all rows for width calculation
-    let all_rows: Vec<&Vec<String>> = headers.iter().chain(data_rows.iter()).collect();
-
-    // Calculate max content width per column (widest line within each cell)
-    let mut max_widths: Vec<usize> = vec![0; num_cols];
-    for row in &all_rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < num_cols {
-                // For cells with embedded newlines, measure the widest line
-                let widest_line = cell
-                    .lines()
-                    .map(|l| l.chars().count())
-                    .max()
-                    .unwrap_or(cell.chars().count());
-                max_widths[i] = max_widths[i].max(widest_line);
-            }
-        }
-    }
-
-    // Calculate column widths
-    let col_widths = calculate_col_widths(&max_widths, num_cols, available_width);
-
-    let mut out = String::new();
-
-    // Top border: ┌──┬──┐
-    out.push_str(&border_line('┌', '┬', '┐', '─', &col_widths));
-
-    // Header rows
-    for header in headers {
-        render_wrapped_row(&mut out, header, &col_widths, num_cols);
-    }
-
-    // Separator: ├──┼──┤
-    out.push_str(&border_line('├', '┼', '┤', '─', &col_widths));
-
-    // Data rows with separators between them
-    for (i, row) in data_rows.iter().enumerate() {
-        render_wrapped_row(&mut out, row, &col_widths, num_cols);
-        if i < data_rows.len() - 1 {
-            out.push_str(&border_line('├', '┼', '┤', '─', &col_widths));
-        }
-    }
-
-    // Bottom border: └──┴──┘
-    out.push_str(&border_line('└', '┴', '┘', '─', &col_widths));
-
-    out
-}
 
 /// Calculate column widths, respecting min width and available space.
 /// Uses a waterfall algorithm: narrow columns keep their natural width,
@@ -818,146 +1021,14 @@ fn calculate_col_widths(
     result
 }
 
-/// Generate a horizontal border line.
-fn border_line(left: char, mid: char, right: char, fill: char, widths: &[usize]) -> String {
-    let mut line = String::new();
-    line.push(left);
-    for (i, &w) in widths.iter().enumerate() {
-        // +2 for padding on each side
-        for _ in 0..w + 2 {
-            line.push(fill);
-        }
-        if i < widths.len() - 1 {
-            line.push(mid);
-        }
-    }
-    line.push(right);
-    line.push('\n');
-    line
-}
-
-/// Render a row with word wrapping into multiple physical lines if needed.
-fn render_wrapped_row(
-    out: &mut String,
-    row: &[String],
-    col_widths: &[usize],
-    num_cols: usize,
-) {
-    // Wrap each cell's content to its column width
-    let mut wrapped_cells: Vec<Vec<String>> = Vec::with_capacity(num_cols);
-    for i in 0..num_cols {
-        let content = if i < row.len() { &row[i] } else { "" };
-        wrapped_cells.push(wrap_text(content, col_widths[i]));
-    }
-
-    // Find max number of lines across all cells
-    let max_lines = wrapped_cells.iter().map(|c| c.len()).max().unwrap_or(1);
-
-    // Render each physical line
-    for line_idx in 0..max_lines {
-        out.push('│');
-        for (col, wrapped) in wrapped_cells.iter().enumerate() {
-            let text = if line_idx < wrapped.len() {
-                &wrapped[line_idx]
-            } else {
-                ""
-            };
-            let width = col_widths[col];
-            // Pad to column width (use char count for correct alignment)
-            out.push(' ');
-            out.push_str(text);
-            let text_width = text.chars().count();
-            for _ in text_width..width {
-                out.push(' ');
-            }
-            out.push(' ');
-            out.push('│');
-        }
-        out.push('\n');
-    }
-}
-
-/// Word-wrap text to a given width. Tries to break at word boundaries.
-/// Handles embedded newlines by splitting on them first.
-/// Width is measured in characters (not bytes) so multi-byte UTF-8 is safe.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    // Handle embedded newlines: split first, then wrap each line
-    if text.contains('\n') {
-        let mut all_lines = Vec::new();
-        for line in text.split('\n') {
-            all_lines.extend(wrap_single_line(line, width));
-        }
-        return all_lines;
-    }
-
-    wrap_single_line(text, width)
-}
-
-/// Wrap a single line of text (no embedded newlines) to the given width.
-fn wrap_single_line(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    if text.chars().count() <= width {
-        return vec![text.to_string()];
-    }
-
-    let mut lines = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        let char_count = remaining.chars().count();
-        if char_count <= width {
-            lines.push(remaining.to_string());
-            break;
-        }
-
-        // Find the byte offset of the `width`-th character
-        let byte_at_width = remaining
-            .char_indices()
-            .nth(width)
-            .map(|(i, _)| i)
-            .unwrap_or(remaining.len());
-
-        // Try to find a word break point (space) within the first `width` chars
-        let slice = &remaining[..byte_at_width];
-        let break_byte = if let Some(pos) = slice.rfind(' ') {
-            pos
-        } else {
-            // No space found, hard break at width
-            byte_at_width
-        };
-
-        let (chunk, rest) = remaining.split_at(break_byte);
-        lines.push(chunk.to_string());
-
-        // Skip the space at the break point
-        remaining = rest.trim_start();
-    }
-
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_render_to_text_basic() {
-        let text = render_to_text("Hello world");
+        let text = render_to_text("Hello world", 80);
         assert!(!text.lines.is_empty());
-        // Should contain the text
         let content: String = text
             .lines
             .iter()
@@ -968,7 +1039,7 @@ mod tests {
 
     #[test]
     fn test_render_bold_style() {
-        let text = render_to_text("This is **bold** text");
+        let text = render_to_text("This is **bold** text", 80);
         let bold_spans: Vec<_> = text
             .lines
             .iter()
@@ -981,8 +1052,7 @@ mod tests {
 
     #[test]
     fn test_render_heading_styles() {
-        let text = render_to_text("# Heading 1\n\n## Heading 2\n\n### Heading 3");
-        // Should have green and cyan colored spans
+        let text = render_to_text("# Heading 1\n\n## Heading 2\n\n### Heading 3", 80);
         let green_spans: Vec<_> = text
             .lines
             .iter()
@@ -1002,7 +1072,7 @@ mod tests {
 
     #[test]
     fn test_render_inline_code() {
-        let text = render_to_text("Use `code` here");
+        let text = render_to_text("Use `code` here", 80);
         let code_spans: Vec<_> = text
             .lines
             .iter()
@@ -1015,20 +1085,19 @@ mod tests {
 
     #[test]
     fn test_render_list_bullets() {
-        let text = render_to_text("- Item 1\n- Item 2\n- Item 3");
+        let text = render_to_text("- Item 1\n- Item 2\n- Item 3", 80);
         let cyan_spans: Vec<_> = text
             .lines
             .iter()
             .flat_map(|l| l.spans.iter())
             .filter(|s| s.style.fg == Some(Color::Cyan))
             .collect();
-        // Should have bullet markers in cyan
         assert!(!cyan_spans.is_empty());
     }
 
     #[test]
     fn test_render_blockquote() {
-        let text = render_to_text("> This is a quote");
+        let text = render_to_text("> This is a quote", 80);
         let gray_spans: Vec<_> = text
             .lines
             .iter()
@@ -1040,7 +1109,7 @@ mod tests {
 
     #[test]
     fn test_render_nested_styles() {
-        let text = render_to_text("This is ***bold italic*** text");
+        let text = render_to_text("This is ***bold italic*** text", 80);
         let bold_italic_spans: Vec<_> = text
             .lines
             .iter()
@@ -1055,13 +1124,10 @@ mod tests {
 
     #[test]
     fn test_text_to_ansi_basic() {
-        let text = render_to_text("**bold** and *italic*");
+        let text = render_to_text("**bold** and *italic*", 80);
         let ansi = text_to_ansi(&text);
-        // Should contain ANSI escape codes
         assert!(ansi.contains("\x1b["));
-        // Should contain reset
         assert!(ansi.contains("\x1b[0m"));
-        // Should contain the text
         assert!(ansi.contains("bold"));
         assert!(ansi.contains("italic"));
     }
@@ -1073,151 +1139,143 @@ mod tests {
     }
 
     #[test]
-    fn test_table_always_self_renders() {
-        let table = "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |";
-        let result = preprocess_tables(table, 80);
-        // All tables now self-render with box-drawing characters
-        assert!(result.contains('┌'));
-        assert!(result.contains('│'));
-        assert!(result.contains('┘'));
-        assert!(result.contains("```"));
+    fn test_waterfall_preserves_narrow_columns() {
+        let widths = calculate_col_widths(&[15, 200], 2, 80);
+        assert_eq!(widths[0], 15);
+        assert_eq!(widths[0] + widths[1] + 7, 80);
+    }
+
+    // --- Table styling tests ---
+
+    #[test]
+    fn test_table_bold_in_cell() {
+        let table =
+            "| Header |\n|--------|\n| **bold** |";
+        let text = render_to_text(table, 80);
+        let bold_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .collect();
+        assert!(!bold_spans.is_empty());
+        assert!(bold_spans.iter().any(|s| s.content.contains("bold")));
     }
 
     #[test]
-    fn test_table_too_narrow() {
-        let table = "| Col A | Col B | Col C | Col D | Col E |\n|-------|-------|-------|-------|-------|\n| data1 | data2 | data3 | data4 | data5 |";
-        // 5 columns in 50 chars: effective = (50 - 6) / 5 = 8, which is < MIN_COL_WIDTH
-        let result = preprocess_tables(table, 50);
-        // Should be self-rendered with box-drawing chars inside a code fence
-        assert!(result.contains('┌'));
-        assert!(result.contains('│'));
-        assert!(result.contains('┘'));
-        assert!(result.contains("```"));
+    fn test_table_italic_in_cell() {
+        let table =
+            "| Header |\n|--------|\n| *italic* |";
+        let text = render_to_text(table, 80);
+        let italic_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::ITALIC))
+            .collect();
+        assert!(!italic_spans.is_empty());
+        assert!(italic_spans.iter().any(|s| s.content.contains("italic")));
+    }
+
+    #[test]
+    fn test_table_inline_code_in_cell() {
+        let table =
+            "| Header |\n|--------|\n| `code` |";
+        let text = render_to_text(table, 80);
+        let code_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.fg == Some(Color::Yellow))
+            .collect();
+        assert!(!code_spans.is_empty());
+        assert!(code_spans.iter().any(|s| s.content.contains("code")));
+    }
+
+    #[test]
+    fn test_table_br_in_cell() {
+        let table =
+            "| Header |\n|--------|\n| Line 1<br>Line 2 |";
+        let text = render_to_text(table, 80);
+        let ansi = text_to_ansi(&text);
+        // Both lines should appear
+        assert!(ansi.contains("Line 1"));
+        assert!(ansi.contains("Line 2"));
+        // <br> should not appear literally
+        assert!(!ansi.contains("<br>"));
+    }
+
+    #[test]
+    fn test_table_structure_box_drawing() {
+        let table = "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |";
+        let text = render_to_text(table, 80);
+        let ansi = text_to_ansi(&text);
+        assert!(ansi.contains('┌'));
+        assert!(ansi.contains('┬'));
+        assert!(ansi.contains('┐'));
+        assert!(ansi.contains('├'));
+        assert!(ansi.contains('┼'));
+        assert!(ansi.contains('┤'));
+        assert!(ansi.contains('└'));
+        assert!(ansi.contains('┴'));
+        assert!(ansi.contains('┘'));
+        assert!(ansi.contains('│'));
+    }
+
+    #[test]
+    fn test_table_border_style_dark_gray() {
+        let table = "| H1 | H2 |\n|----|----|\n| a  | b  |";
+        let text = render_to_text(table, 80);
+        // Border lines should have DarkGray color
+        let border_spans: Vec<_> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| {
+                s.style.fg == Some(Color::DarkGray)
+                    && (s.content.contains('┌') || s.content.contains('│'))
+            })
+            .collect();
+        assert!(!border_spans.is_empty());
     }
 
     #[test]
     fn test_table_in_code_block() {
         let content = "```\n| Not | A | Table |\n|-----|---|-------|\n| x   | y | z     |\n```";
-        let result = preprocess_tables(content, 40);
-        // Should NOT be processed - table is inside a code block
-        assert!(!result.contains('┌'));
-        assert!(result.contains("| Not | A | Table |"));
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        // Should NOT be rendered as a table - it's inside a code block
+        assert!(!ansi.contains('┌'));
+        assert!(ansi.contains("| Not | A | Table |"));
     }
 
     #[test]
-    fn test_mixed_content() {
+    fn test_mixed_content_with_table() {
         let content = "Some text before\n\n| Col 1 | Col 2 |\n|-------|-------|\n| a     | b     |\n\nSome text after";
-        let result = preprocess_tables(content, 80);
-        assert!(result.contains("Some text before"));
-        assert!(result.contains("Some text after"));
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        assert!(ansi.contains("Some text before"));
+        assert!(ansi.contains("Some text after"));
+        assert!(ansi.contains('┌'));
     }
 
     #[test]
-    fn test_word_wrapping() {
-        let wrapped = wrap_text("hello world this is a long sentence", 12);
-        // Should break at word boundaries
-        for line in &wrapped {
-            assert!(line.chars().count() <= 12);
-        }
-        // Verify content is preserved
-        let joined = wrapped.join(" ");
-        assert_eq!(joined, "hello world this is a long sentence");
-    }
-
-    #[test]
-    fn test_wrap_text_empty() {
-        let wrapped = wrap_text("", 10);
-        assert_eq!(wrapped, vec![""]);
-    }
-
-    #[test]
-    fn test_wrap_text_fits() {
-        let wrapped = wrap_text("short", 10);
-        assert_eq!(wrapped, vec!["short"]);
-    }
-
-    #[test]
-    fn test_wrap_text_multibyte_chars() {
-        // Non-breaking hyphen U+2011 is 3 bytes in UTF-8
-        let text = "**Ad\u{2011}hoc / Low\u{2011}value** (<$50 K)";
-        // Should not panic on multi-byte characters
-        let wrapped = wrap_text(text, 20);
-        for line in &wrapped {
-            assert!(line.chars().count() <= 20);
-        }
-        // All content preserved
-        let joined = wrapped.join(" ");
-        assert_eq!(joined, text);
-    }
-
-    #[test]
-    fn test_parse_row() {
-        let cells = parse_row("| Header 1 | Header 2 | Header 3 |");
-        assert_eq!(cells, vec!["Header 1", "Header 2", "Header 3"]);
-    }
-
-    #[test]
-    fn test_is_separator_row() {
-        assert!(is_separator_row(&[
-            "---".to_string(),
-            "---".to_string(),
-        ]));
-        assert!(is_separator_row(&[
-            ":---:".to_string(),
-            "---:".to_string(),
-        ]));
-        assert!(!is_separator_row(&[
-            "data".to_string(),
-            "more".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn test_self_rendered_table_structure() {
+    fn test_table_many_columns_narrow_width() {
         let table = "| A | B | C | D | E | F |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |";
-        let result = preprocess_tables(table, 50);
-        // With 6 columns in 50 chars, columns would be ~6 chars each - too narrow
-        assert!(result.contains('┌'));
-        assert!(result.contains('├'));
-        assert!(result.contains('└'));
-        // Should have proper structure
-        let lines: Vec<&str> = result.lines().collect();
-        // First line is code fence, second is top border
-        assert!(lines[1].starts_with('┌'));
+        let text = render_to_text(table, 50);
+        let ansi = text_to_ansi(&text);
+        assert!(ansi.contains('┌'));
+        assert!(ansi.contains('├'));
+        assert!(ansi.contains('└'));
     }
 
     #[test]
-    fn test_waterfall_preserves_narrow_columns() {
-        // Narrow col 1, very wide col 2 — col 1 should keep its natural width
-        let widths = calculate_col_widths(&[15, 200], 2, 80);
-        // Col 1 should stay at 15 (its natural width), not be proportionally shrunk
-        assert_eq!(widths[0], 15);
-        // Col 2 gets the rest: 80 - overhead(7) - 15 = 58
-        assert_eq!(widths[0] + widths[1] + 7, 80);
-    }
-
-    #[test]
-    fn test_br_tags_become_newlines() {
-        let cells = parse_row("| Point A.<br>Point B.<br/>Point C. |");
-        assert_eq!(cells.len(), 1);
-        assert!(cells[0].contains('\n'));
-        let lines: Vec<&str> = cells[0].lines().collect();
-        assert_eq!(lines, vec!["Point A.", "Point B.", "Point C."]);
-    }
-
-    #[test]
-    fn test_wrap_text_with_newlines() {
-        let wrapped = wrap_text("Line one\nLine two\nLine three", 20);
-        assert_eq!(wrapped, vec!["Line one", "Line two", "Line three"]);
-    }
-
-    #[test]
-    fn test_table_with_br_tags() {
-        let table = "| Area | Details |\n|------|--------|\n| **Short** | First point.<br>Second point.<br>Third point. |";
-        let result = preprocess_tables(table, 80);
-        // <br> should not appear literally
-        assert!(!result.contains("<br>"));
-        // Box drawing should be present
-        assert!(result.contains('┌'));
+    fn test_table_with_word_wrapping() {
+        let table = "| Header |\n|--------|\n| This is a very long cell content that should wrap |";
+        let text = render_to_text(table, 30);
+        let ansi = text_to_ansi(&text);
+        // Content should be present (possibly wrapped)
+        assert!(ansi.contains("This"));
+        assert!(ansi.contains("wrap"));
     }
 }
