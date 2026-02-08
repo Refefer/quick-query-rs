@@ -97,8 +97,24 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
                instead of separate searches for each pattern.\n\
              - Consolidate file discovery: use arrays (e.g., `extensions=[\"rs\", \"toml\"]`)\n\
                instead of one call per file type.\n\
+             - Consolidate edits: batch multiple edit operations into one edit_file call.\n\
+             - When you know the target file, use read_file(grep=...) instead of search_files.\n\
+             - For small files, just read the whole file instead of grepping repeatedly.\n\
              - Never re-read a file you already read in this session.\n\
              - One broad search is better than many narrow ones."
+                .to_string(),
+        );
+    }
+
+    // Resourcefulness (conditional: has tools or sub-agents)
+    if ctx.has_tools || ctx.has_sub_agents {
+        sections.push(
+            "### Resourcefulness\n\
+             When your task references files, data, or information without giving exact paths or details,\n\
+             use your tools and sub-agents to discover what you need. Explore the filesystem, search for\n\
+             patterns, research topics — exhaust your available resources before concluding that you need\n\
+             to ask for clarification. Only ask when discovery genuinely fails or yields ambiguous results\n\
+             that require human judgment to resolve."
                 .to_string(),
         );
     }
@@ -127,6 +143,7 @@ mod tests {
         assert!(!preamble.contains("Delegating to Sub-Agents"));
         assert!(!preamble.contains("Keeping the User Informed"));
         assert!(!preamble.contains("Tool Usage Efficiency"));
+        assert!(!preamble.contains("Resourcefulness"));
     }
 
     #[test]
@@ -138,6 +155,7 @@ mod tests {
         });
 
         assert!(preamble.contains("Tool Usage Efficiency"));
+        assert!(preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Delegating to Sub-Agents"));
         assert!(!preamble.contains("Keeping the User Informed"));
     }
@@ -152,6 +170,7 @@ mod tests {
 
         assert!(preamble.contains("Delegating to Sub-Agents"));
         assert!(preamble.contains("new_instance"));
+        assert!(preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Tool Usage Efficiency"));
         assert!(!preamble.contains("Keeping the User Informed"));
     }
@@ -185,5 +204,6 @@ mod tests {
         assert!(preamble.contains("Delegating to Sub-Agents"));
         assert!(preamble.contains("Keeping the User Informed"));
         assert!(preamble.contains("Tool Usage Efficiency"));
+        assert!(preamble.contains("Resourcefulness"));
     }
 }

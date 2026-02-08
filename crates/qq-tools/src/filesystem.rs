@@ -172,7 +172,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file with optional line ranges, grep filtering, and head/tail shortcuts."
+        "Read file contents with optional line ranges, grep filtering, and head/tail. The grep param accepts regex — use alternation to filter for multiple patterns at once: grep=\"(TODO|FIXME|HACK)\" instead of calling read_file multiple times. For small files, just read the whole file."
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -351,7 +351,7 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files in a directory. Can filter by glob pattern."
+        "List files in a directory (non-recursive). Supports glob filtering. For recursive search, use find_files."
     }
 
     fn is_blocking(&self) -> bool {
@@ -473,7 +473,7 @@ impl Tool for FindFilesTool {
     }
 
     fn description(&self) -> &str {
-        "Enhanced file discovery with recursive search, gitignore support, and filtering. Returns matching file paths."
+        "Recursive file discovery with gitignore support. Returns matching paths. Use extensions array to find multiple types in one call: extensions=[\"rs\",\"toml\"] instead of separate calls. Combine with pattern glob for further filtering."
     }
 
     fn is_blocking(&self) -> bool {
@@ -709,7 +709,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a regex pattern in files. Returns matching lines with file paths and line numbers."
+        "Search for a regex pattern across files. Returns matching lines with paths and line numbers. Use alternation to search for multiple terms in one call: pattern=\"(foo|bar|baz)\" instead of separate calls per term. For a single known file, prefer read_file with grep instead."
     }
 
     fn is_blocking(&self) -> bool {
@@ -839,7 +839,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates the file if it doesn't exist, overwrites if it does."
+        "Write full content to a file (creates or overwrites). For targeted changes to an existing file, prefer edit_file."
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -946,7 +946,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Precision file editing with search/replace and line-based operations. All edits are validated before applying."
+        "Precision file editing: search/replace, insert, delete, and replace_lines operations. The edits array accepts multiple operations in sequence — batch all edits to a file into one call instead of calling edit_file repeatedly for each change."
     }
 
     fn is_blocking(&self) -> bool {
