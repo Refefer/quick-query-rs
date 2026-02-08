@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -731,6 +731,7 @@ fn setup_panic_hook() {
             io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
+            DisableBracketedPaste,
             crossterm::cursor::Show
         );
         // Call original hook
@@ -765,6 +766,7 @@ pub async fn run_tui(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableBracketedPaste,
         crossterm::cursor::Hide
     )?;
     let backend = CrosstermBackend::new(stdout);
@@ -1078,6 +1080,22 @@ pub async fn run_tui(
                     // Terminal resized - next render will update dimensions
                     app.needs_redraw = true;
                 }
+                Event::Paste(text) => {
+                    app.needs_redraw = true;
+                    if !app.is_streaming {
+                        let cursor = app.input.visual_cursor();
+                        let value = app.input.value().to_string();
+                        let mut chars: Vec<char> = value.chars().collect();
+                        let paste_chars: Vec<char> = text.chars().collect();
+                        let paste_len = paste_chars.len();
+                        for (i, c) in paste_chars.into_iter().enumerate() {
+                            chars.insert(cursor + i, c);
+                        }
+                        let new_value: String = chars.into_iter().collect();
+                        app.input = Input::new(new_value).with_cursor(cursor + paste_len);
+                        app.input_history.reset();
+                    }
+                }
                 _ => {}
             }
         }
@@ -1096,6 +1114,7 @@ pub async fn run_tui(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
+        DisableBracketedPaste,
         crossterm::cursor::Show
     )?;
     terminal.show_cursor()?;
