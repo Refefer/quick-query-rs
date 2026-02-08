@@ -75,12 +75,6 @@ impl ChatSession {
         self
     }
 
-    /// Set a custom compaction prompt for context summarization.
-    pub fn with_compact_prompt(mut self, prompt: String) -> Self {
-        self.compact_prompt = prompt;
-        self
-    }
-
     pub fn add_user_message(&mut self, content: &str) {
         self.messages.push(Message::user(content));
     }
