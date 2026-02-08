@@ -2,12 +2,12 @@
 //!
 //! This crate provides:
 //! - `InternalAgent` trait for defining agent behavior
-//! - Built-in agent implementations (chat, coder, explore, etc.)
+//! - Built-in agent implementations (pm, coder, explore, etc.)
 //! - Configuration types for external agents
 
 use std::collections::HashMap;
 
-mod chat;
+mod project_manager;
 mod coder;
 mod config;
 mod explore;
@@ -18,7 +18,7 @@ mod reviewer;
 mod summarizer;
 mod writer;
 
-pub use chat::ChatAgent;
+pub use project_manager::ProjectManagerAgent;
 pub use coder::CoderAgent;
 pub use config::{AgentDefinition, AgentsConfig, BuiltinAgentOverride};
 pub use preamble::{generate_preamble, PreambleContext};
@@ -106,7 +106,7 @@ pub struct AgentInfo {
 
 /// All internal agent types.
 pub enum InternalAgentType {
-    Chat,
+    ProjectManager,
     Researcher,
     Summarizer,
     Coder,
@@ -117,7 +117,7 @@ pub enum InternalAgentType {
 }
 
 impl InternalAgentType {
-    /// Get all internal agent types (excluding chat, which is special).
+    /// Get all internal agent types (excluding pm, which is special).
     pub fn all() -> Vec<Self> {
         vec![
             Self::Researcher,
@@ -130,10 +130,10 @@ impl InternalAgentType {
         ]
     }
 
-    /// Get all internal agent types including chat.
-    pub fn all_with_chat() -> Vec<Self> {
+    /// Get all internal agent types including pm.
+    pub fn all_with_pm() -> Vec<Self> {
         vec![
-            Self::Chat,
+            Self::ProjectManager,
             Self::Researcher,
             Self::Summarizer,
             Self::Coder,
@@ -147,7 +147,7 @@ impl InternalAgentType {
     /// Get the agent name.
     pub fn name(&self) -> &str {
         match self {
-            Self::Chat => "chat",
+            Self::ProjectManager => "pm",
             Self::Researcher => "researcher",
             Self::Summarizer => "summarizer",
             Self::Coder => "coder",
@@ -161,7 +161,7 @@ impl InternalAgentType {
     /// Create the internal agent instance.
     pub fn create(&self) -> Box<dyn InternalAgent> {
         match self {
-            Self::Chat => Box::new(ChatAgent::new()),
+            Self::ProjectManager => Box::new(ProjectManagerAgent::new()),
             Self::Researcher => Box::new(ResearcherAgent::new()),
             Self::Summarizer => Box::new(SummarizerAgent::new()),
             Self::Coder => Box::new(CoderAgent::new()),
@@ -175,7 +175,7 @@ impl InternalAgentType {
     /// Parse a name into an agent type.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "chat" => Some(Self::Chat),
+            "pm" | "chat" => Some(Self::ProjectManager),
             "researcher" => Some(Self::Researcher),
             "summarizer" => Some(Self::Summarizer),
             "coder" => Some(Self::Coder),
@@ -206,17 +206,17 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_agent_types_with_chat() {
-        let types = InternalAgentType::all_with_chat();
+    fn test_internal_agent_types_with_pm() {
+        let types = InternalAgentType::all_with_pm();
         assert_eq!(types.len(), 8);
 
-        // Verify chat is included
-        assert!(types.iter().any(|t| t.name() == "chat"));
+        // Verify pm is included
+        assert!(types.iter().any(|t| t.name() == "pm"));
     }
 
     #[test]
     fn test_agent_type_from_name() {
-        assert!(InternalAgentType::from_name("chat").is_some());
+        assert!(InternalAgentType::from_name("pm").is_some());
         assert!(InternalAgentType::from_name("researcher").is_some());
         assert!(InternalAgentType::from_name("summarizer").is_some());
         assert!(InternalAgentType::from_name("coder").is_some());
@@ -228,8 +228,15 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_type_from_name_backward_compat() {
+        // "chat" should still resolve to ProjectManager
+        let t = InternalAgentType::from_name("chat").unwrap();
+        assert_eq!(t.name(), "pm");
+    }
+
+    #[test]
     fn test_agent_tool_descriptions() {
-        for t in InternalAgentType::all_with_chat() {
+        for t in InternalAgentType::all_with_pm() {
             let agent = t.create();
             assert!(
                 !agent.tool_description().is_empty(),
@@ -241,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_agent_compact_prompts() {
-        for t in InternalAgentType::all_with_chat() {
+        for t in InternalAgentType::all_with_pm() {
             let agent = t.create();
             let prompt = agent.compact_prompt();
             assert!(

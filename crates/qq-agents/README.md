@@ -16,7 +16,7 @@ Agents are LLM-powered assistants with specific system prompts and tool access. 
 
 | Agent | Purpose | Tools |
 |-------|---------|-------|
-| **chat** | Interactive conversations and delegation | (none — delegates via agent tools) |
+| **pm** | Project manager: coordinates agents, tracks tasks, ensures delivery | `create_task`, `update_task`, `list_tasks`, `delete_task` |
 | **explore** | Filesystem exploration and discovery | `read_file`, `find_files`, `search_files` |
 | **researcher** | Web research and synthesis | `web_search`, `fetch_webpage`, `read_memory` |
 | **coder** | Code generation and modification | `read_file`, `edit_file`, `write_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`, `find_files`, `search_files` |
@@ -27,21 +27,22 @@ Agents are LLM-powered assistants with specific system prompts and tool access. 
 
 ## Agent Details
 
-### ChatAgent
+### ProjectManagerAgent
 
-The default interactive agent. Coordinates conversations by delegating to specialized agents.
+The default interactive agent. Coordinates work by scoping requirements, planning, assembling agent teams, tracking tasks, and ensuring delivery quality.
 
 ```rust
-use qq_agents::ChatAgent;
+use qq_agents::ProjectManagerAgent;
 
-let agent = ChatAgent::new();
+let agent = ProjectManagerAgent::new();
 // Or with custom prompt
-let agent = ChatAgent::with_prompt("You are a coding mentor...".into());
+let agent = ProjectManagerAgent::with_prompt("You are a coding mentor...".into());
 ```
 
 **Key behaviors:**
-- Has no direct tools — works entirely through delegation to sub-agents
-- Responds to simple queries directly, delegates complex tasks to specialized agents
+- Tracks work via `create_task`, `update_task`, `list_tasks`, `delete_task` tools
+- Delegates substantive work to sub-agents, reviews results before reporting
+- Parallelizes independent agent calls for efficiency
 - Uses `inform_user` tool to send status messages to the user without ending its turn
 
 ### ExploreAgent
@@ -166,7 +167,7 @@ let agent = InternalAgentType::Coder.create();
 println!("Name: {}", agent.name());
 println!("Description: {}", agent.description());
 
-// Get all agents (excluding chat)
+// Get all agents (excluding pm)
 for agent_type in InternalAgentType::all() {
     let agent = agent_type.create();
     println!("{}: {}", agent.name(), agent.description());
@@ -293,16 +294,16 @@ impl InternalAgent for MyAgent {
 
 ## Agent-as-Tool Pattern
 
-In qq-cli, agents are exposed as tools to the chat agent:
+In qq-cli, agents are exposed as tools to the PM agent:
 
 ```
 User: Help me refactor the config module
-ChatAgent -> LLM: [tools: Agent[coder], Agent[explore], ...]
-LLM -> ChatAgent: Tool call: Agent[coder] with task
-ChatAgent -> CoderAgent: run_once(task)
+PM -> LLM: [tools: Agent[coder], Agent[explore], create_task, ...]
+LLM -> PM: Tool call: Agent[coder] with task
+PM -> CoderAgent: run_once(task)
 CoderAgent: (reads files, writes code, verifies)
-CoderAgent -> ChatAgent: Result
-ChatAgent -> User: Done! Here's what I changed...
+CoderAgent -> PM: Result
+PM -> User: Done! Here's what I changed...
 ```
 
 This enables:
@@ -314,8 +315,8 @@ This enables:
 
 Each agent invocation is identified by its call chain path, creating isolated memory scopes:
 
-- `"chat/explore"` — explore agent called by chat
-- `"chat/coder/explore"` — explore agent called by coder, which was called by chat
+- `"pm/explore"` — explore agent called by chat
+- `"pm/coder/explore"` — explore agent called by coder, which was called by chat
 
 The `new_instance` parameter (default: `false`) controls memory:
 - `false`: The agent continues with full context from prior calls in this scope.
@@ -349,7 +350,7 @@ Select agent at runtime:
 
 ```bash
 qq -A coder -p "Add input validation"
-qq chat --agent researcher
+qq manage --agent researcher
 ```
 
 ## Dependencies

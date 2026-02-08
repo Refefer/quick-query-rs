@@ -138,17 +138,17 @@ Scoped memory for agent instances across invocations:
 ```rust
 use qq_core::{AgentMemory, AgentInstanceState};
 
-// Central store keyed by scope path (e.g., "chat/explore", "chat/coder/explore")
+// Central store keyed by scope path (e.g., "pm/explore", "pm/coder/explore")
 let memory = AgentMemory::new();
 
 // Store messages for a scope
-memory.store_messages("chat/explore", messages).await;
+memory.store_messages("pm/explore", messages).await;
 
 // Retrieve prior history
-let history = memory.get_messages("chat/explore").await;
+let history = memory.get_messages("pm/explore").await;
 
 // Clear a scope (for new_instance: true)
-memory.clear_scope("chat/explore").await;
+memory.clear_scope("pm/explore").await;
 ```
 
 Each scope has a 200KB budget (`DEFAULT_MAX_INSTANCE_BYTES`). When exceeded, `AgentInstanceState::trim_to_budget()` removes oldest messages at safe boundaries, preserving tool call/result pairs.

@@ -39,8 +39,8 @@ cargo install --path .
 # One-shot completion
 qq -p "Explain async/await in Rust"
 
-# Interactive chat
-qq chat
+# Interactive project management mode
+qq manage
 
 # With specific profile
 qq -P coding -p "Review this function"
@@ -74,7 +74,7 @@ Options:
   -A, --agent <AGENT>        Primary agent to use
 
 Commands:
-  chat       Interactive chat mode
+  manage     Interactive project management mode
   profiles   List configured profiles
   config     Show current configuration
 ```
@@ -106,9 +106,9 @@ Rich terminal interface with:
 - Conversation history
 
 ```bash
-qq chat
-qq chat --system "You are a Rust expert"
-qq chat --agent coder
+qq manage
+qq manage --system "You are a Rust expert"
+qq manage --agent coder
 ```
 
 ### Legacy Readline Mode
@@ -116,7 +116,7 @@ qq chat --agent coder
 For environments without full terminal support:
 
 ```bash
-qq chat --no-tui
+qq manage --no-tui
 ```
 
 ## Chat Commands
@@ -311,7 +311,7 @@ qq profiles  # List all profiles with details
 Test basic chat loop without tools or agents:
 
 ```bash
-qq chat --minimal
+qq manage --minimal
 ```
 
 ## Dependencies

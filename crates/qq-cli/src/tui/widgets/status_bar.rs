@@ -14,7 +14,7 @@ use crate::tui::app::StreamingState;
 /// Status bar display state
 pub struct StatusBar<'a> {
     profile: &'a str,
-    /// Primary agent for this session (e.g., "chat", "explore")
+    /// Primary agent for this session (e.g., "pm", "explore")
     primary_agent: &'a str,
     prompt_tokens: u32,
     completion_tokens: u32,

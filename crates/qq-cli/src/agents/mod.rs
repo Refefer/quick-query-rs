@@ -214,17 +214,17 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_agent_types_with_chat() {
-        let types = InternalAgentType::all_with_chat();
+    fn test_internal_agent_types_with_pm() {
+        let types = InternalAgentType::all_with_pm();
         assert_eq!(types.len(), 8);
 
-        // Verify chat is included
-        assert!(types.iter().any(|t| t.name() == "chat"));
+        // Verify pm is included
+        assert!(types.iter().any(|t| t.name() == "pm"));
     }
 
     #[test]
     fn test_agent_type_from_name() {
-        assert!(InternalAgentType::from_name("chat").is_some());
+        assert!(InternalAgentType::from_name("pm").is_some());
         assert!(InternalAgentType::from_name("researcher").is_some());
         assert!(InternalAgentType::from_name("summarizer").is_some());
         assert!(InternalAgentType::from_name("coder").is_some());
@@ -233,5 +233,12 @@ mod tests {
         assert!(InternalAgentType::from_name("planner").is_some());
         assert!(InternalAgentType::from_name("writer").is_some());
         assert!(InternalAgentType::from_name("unknown").is_none());
+    }
+
+    #[test]
+    fn test_agent_type_from_name_backward_compat() {
+        // "chat" should still resolve to ProjectManager
+        let t = InternalAgentType::from_name("chat").unwrap();
+        assert_eq!(t.name(), "pm");
     }
 }
