@@ -128,9 +128,11 @@ impl Tool for FetchWebpageTool {
             // Truncate if too long
             let max_len = 50000;
             if cleaned.len() > max_len {
+                // Find a valid UTF-8 char boundary at or before max_len
+                let truncate_at = cleaned.floor_char_boundary(max_len);
                 Ok(ToolOutput::success(format!(
                     "{}\n\n... (truncated, {} total characters)",
-                    &cleaned[..max_len],
+                    &cleaned[..truncate_at],
                     cleaned.len()
                 )))
             } else {
