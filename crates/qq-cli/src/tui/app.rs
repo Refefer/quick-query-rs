@@ -884,10 +884,6 @@ pub async fn run_tui(
         if app.pending_approval.is_none() {
             if let Some(ref mut rx) = bash_approval_rx {
                 if let Ok(request) = rx.try_recv() {
-                    app.status_message = Some(format!(
-                        "Approve: {} ? [a]llow / [s]ession / [d]eny",
-                        request.full_command
-                    ));
                     app.pending_approval = Some(request);
                     app.needs_redraw = true;
                 }
@@ -924,7 +920,6 @@ pub async fn run_tui(
                             if let Some(request) = app.pending_approval.take() {
                                 let _ = request.response_tx.send(response);
                             }
-                            app.status_message = None;
                         }
                         continue;
                     }

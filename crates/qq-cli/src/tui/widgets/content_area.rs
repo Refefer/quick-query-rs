@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 
 use crate::tui::markdown::markdown_to_text;
@@ -88,7 +88,8 @@ impl Widget for ContentArea<'_> {
             markdown_to_text(self.content, Some(inner_width))
         };
 
-        // Calculate total lines for scroll calculations
+        // Lines are pre-wrapped by the markdown renderer to match the target width,
+        // so text.lines.len() accurately reflects the visual line count.
         let total_lines = text.lines.len() as u16;
 
         // Use the scroll offset from ScrollState, clamping to valid range.
@@ -97,7 +98,6 @@ impl Widget for ContentArea<'_> {
         let effective_scroll = self.scroll_offset.min(max_scroll);
 
         let paragraph = Paragraph::new(text)
-            .wrap(Wrap { trim: false })
             .scroll((effective_scroll, 0));
 
         paragraph.render(inner, buf);

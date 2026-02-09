@@ -100,6 +100,11 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
     if app.show_help {
         render_help_overlay(frame);
     }
+
+    // Show approval overlay if pending (renders on top of everything)
+    if let Some(ref request) = app.pending_approval {
+        render_approval_overlay(frame, request);
+    }
 }
 
 /// Calculate the number of wrapped lines for input text.
@@ -179,4 +184,79 @@ fn render_help_overlay(frame: &mut Frame) {
         .style(Style::default().bg(Color::Black));
 
     frame.render_widget(help, overlay_area);
+}
+
+/// Render approval overlay modal for bash command approval
+fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalRequest) {
+    let area = frame.area();
+
+    let overlay_width = 64u16.min(area.width.saturating_sub(4));
+    let overlay_height = 10u16.min(area.height.saturating_sub(4));
+
+    let x = (area.width.saturating_sub(overlay_width)) / 2;
+    let y = (area.height.saturating_sub(overlay_height)) / 2;
+
+    let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
+
+    // Clear the area behind the overlay
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        overlay_area,
+    );
+
+    // Truncate command if it's too long for the overlay
+    let max_cmd_len = (overlay_width as usize).saturating_sub(6);
+    let cmd_display = if request.full_command.len() > max_cmd_len {
+        format!("{}...", &request.full_command[..max_cmd_len.saturating_sub(3)])
+    } else {
+        request.full_command.clone()
+    };
+
+    let triggers = if request.trigger_commands.is_empty() {
+        String::new()
+    } else {
+        format!("Triggered by: {}", request.trigger_commands.join(", "))
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Bash Command Approval Required",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            cmd_display,
+            Style::default().fg(Color::White),
+        )),
+    ];
+
+    if !triggers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            triggers,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.extend([
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[a]", Style::default().fg(Color::Green)),
+            Span::raw("llow once  "),
+            Span::styled("[s]", Style::default().fg(Color::Cyan)),
+            Span::raw("ession allow  "),
+            Span::styled("[d]", Style::default().fg(Color::Red)),
+            Span::raw("eny"),
+        ]),
+    ]);
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Approve Command ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .style(Style::default().bg(Color::Black));
+
+    frame.render_widget(paragraph, overlay_area);
 }

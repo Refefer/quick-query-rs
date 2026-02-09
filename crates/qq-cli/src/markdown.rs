@@ -433,7 +433,21 @@ pub fn render_to_text(content: &str, width: usize) -> Text<'static> {
         lines.pop();
     }
 
-    Text::from(lines)
+    // Wrap lines that exceed the target width.
+    // This ensures text.lines.len() accurately reflects the visual line count,
+    // so scroll calculations match what's actually rendered on screen.
+    let mut wrapped_lines: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.spans.is_empty() {
+            wrapped_lines.push(line);
+        } else {
+            for spans in wrap_spans(&line.spans, width) {
+                wrapped_lines.push(Line::from(spans));
+            }
+        }
+    }
+
+    Text::from(wrapped_lines)
 }
 
 /// Check if text is a labeled horizontal rule (e.g., "─── You ───") and render it
