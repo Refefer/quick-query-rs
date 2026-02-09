@@ -1,6 +1,7 @@
 //! Sandbox execution backends: kernel (hakoniwa) and app-level fallback.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use super::mounts::SandboxMounts;
@@ -87,9 +88,27 @@ impl SandboxExecutor {
     }
 }
 
-/// Probe whether user namespaces are available.
+/// 0 = not probed, 1 = available, 2 = unavailable
 #[cfg(feature = "sandbox")]
-fn probe_user_namespaces() -> bool {
+static USERNS_CACHE: AtomicU8 = AtomicU8::new(0);
+
+/// Probe whether user namespaces are available (cached after first call).
+#[cfg(feature = "sandbox")]
+pub fn probe_user_namespaces() -> bool {
+    match USERNS_CACHE.load(Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+
+    let result = probe_user_namespaces_uncached();
+    USERNS_CACHE.store(if result { 1 } else { 2 }, Ordering::Relaxed);
+    result
+}
+
+/// Actual probe — spins up a throwaway container to test namespace support.
+#[cfg(feature = "sandbox")]
+fn probe_user_namespaces_uncached() -> bool {
     use hakoniwa::Container;
 
     let mut container = Container::new();
@@ -98,7 +117,6 @@ fn probe_user_namespaces() -> bool {
         .bindmount_ro("/usr", "/usr")
         .bindmount_ro("/lib", "/lib");
 
-    // Also mount lib64 if it exists (common on 64-bit systems)
     if std::path::Path::new("/lib64").exists() {
         container.bindmount_ro("/lib64", "/lib64");
     }
@@ -116,7 +134,7 @@ fn probe_user_namespaces() -> bool {
 
 /// Execute a command in a hakoniwa kernel sandbox.
 #[cfg(feature = "sandbox")]
-fn execute_kernel(
+pub fn execute_kernel(
     command: &str,
     mounts: &SandboxMounts,
     timeout_secs: u64,
