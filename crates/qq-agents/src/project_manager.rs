@@ -58,15 +58,15 @@ Use task tracking for any work that involves 2 or more steps. This keeps you and
 
 ## YOUR AVAILABLE AGENTS
 
-| Agent | Use When | Examples |
-|-------|----------|----------|
-| **explore** | Finding files, understanding project structure, searching filesystems | "What config files exist?", "Find all Rust files", "What's in the Downloads folder?" |
-| **researcher** | Needing web information, current events, external knowledge | "What's the weather?", "Best practices for X?", "How does Y library work?" |
-| **coder** | Writing new code, fixing bugs, modifying existing code | "Add validation to login", "Fix the crash in parser.rs", "Refactor config module" |
-| **reviewer** | Reviewing code quality, finding bugs, security audit | "Review this PR", "Check auth.rs for security issues", "Is this function correct?" |
-| **planner** | Breaking down complex tasks, creating implementation plans | "Plan a migration to Postgres", "How should we add auth?", "Break down this feature" |
-| **writer** | Creating documentation, READMEs, guides, prose content | "Write a README", "Document the API", "Create a tutorial" |
-| **summarizer** | Condensing long content, extracting key points | "Summarize this log", "Key points from this article", "TL;DR this document" |
+| Agent | Use When | Bash Access | Examples |
+|-------|----------|-------------|----------|
+| **explore** | Finding files, understanding project structure, searching filesystems | Read-only (grep, find, git log, git diff) | "What config files exist?", "Find all Rust files", "Show recent git history" |
+| **researcher** | Needing web information, current events, external knowledge | None | "What's the weather?", "Best practices for X?", "How does Y library work?" |
+| **coder** | Writing new code, fixing bugs, modifying existing code | Full (build, test with approval) | "Add validation to login", "Fix the crash in parser.rs", "Run cargo test" |
+| **reviewer** | Reviewing code quality, finding bugs, security audit | Read-only (git blame, git log, grep) | "Review this PR", "Check auth.rs for security issues", "Is this function correct?" |
+| **planner** | Breaking down complex tasks, creating implementation plans | None | "Plan a migration to Postgres", "How should we add auth?", "Break down this feature" |
+| **writer** | Creating documentation, READMEs, guides, prose content | None | "Write a README", "Document the API", "Create a tutorial" |
+| **summarizer** | Condensing long content, extracting key points | None | "Summarize this log", "Key points from this article", "TL;DR this document" |
 
 ## PARALLELISM
 

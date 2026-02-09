@@ -205,6 +205,9 @@ pub struct TuiApp {
 
     /// Whether the UI needs to be redrawn (set on any state change, cleared after draw)
     needs_redraw: bool,
+
+    /// Pending bash approval request (shown as overlay, user responds with a/s/d keys)
+    pub pending_approval: Option<qq_tools::ApprovalRequest>,
 }
 
 impl Default for TuiApp {
@@ -244,6 +247,7 @@ impl TuiApp {
             content_cache: None,
             content_dirty: true,
             needs_redraw: true,
+            pending_approval: None,
         }
     }
 
@@ -755,6 +759,9 @@ pub async fn run_tui(
     event_bus: Option<AgentEventBus>,
     debug_logger: Option<Arc<DebugLogger>>,
     agent_memory: AgentMemory,
+    bash_mounts: Option<Arc<qq_tools::SandboxMounts>>,
+    mut bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
+    _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -873,6 +880,20 @@ pub async fn run_tui(
             }
         }
 
+        // Poll for bash approval requests
+        if app.pending_approval.is_none() {
+            if let Some(ref mut rx) = bash_approval_rx {
+                if let Ok(request) = rx.try_recv() {
+                    app.status_message = Some(format!(
+                        "Approve: {} ? [a]llow / [s]ession / [d]eny",
+                        request.full_command
+                    ));
+                    app.pending_approval = Some(request);
+                    app.needs_redraw = true;
+                }
+            }
+        }
+
         // Poll for events (keyboard and mouse)
         if event::poll(timeout)? {
             match event::read()? {
@@ -881,6 +902,30 @@ pub async fn run_tui(
                     // Handle help overlay dismissal
                     if app.show_help {
                         app.show_help = false;
+                        continue;
+                    }
+
+                    // Handle pending bash approval
+                    if app.pending_approval.is_some() {
+                        use crossterm::event::KeyCode;
+                        let response = match key.code {
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                Some(qq_tools::ApprovalResponse::Allow)
+                            }
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                Some(qq_tools::ApprovalResponse::AllowForSession)
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
+                                Some(qq_tools::ApprovalResponse::Deny)
+                            }
+                            _ => None,
+                        };
+                        if let Some(response) = response {
+                            if let Some(request) = app.pending_approval.take() {
+                                let _ = request.response_tx.send(response);
+                            }
+                            app.status_message = None;
+                        }
                         continue;
                     }
 
@@ -994,6 +1039,42 @@ pub async fn run_tui(
                                                     }
                                                 }
 
+                                                app.content = info;
+                                                app.content_dirty = true;
+                                            }
+                                            TuiCommand::Mount(path_str) => {
+                                                if path_str.is_empty() {
+                                                    app.status_message = Some("Usage: /mount <path>".to_string());
+                                                } else if let Some(ref mounts) = bash_mounts {
+                                                    let expanded = crate::config::expand_path(&path_str);
+                                                    if !expanded.exists() {
+                                                        app.status_message = Some(format!("Path does not exist: {}", expanded.display()));
+                                                    } else if !expanded.is_dir() {
+                                                        app.status_message = Some(format!("Not a directory: {}", expanded.display()));
+                                                    } else {
+                                                        match expanded.canonicalize() {
+                                                            Ok(canonical) => {
+                                                                mounts.add_mount(qq_tools::MountPoint {
+                                                                    host_path: canonical.clone(),
+                                                                    label: None,
+                                                                });
+                                                                app.status_message = Some(format!("Mount added: {}", canonical.display()));
+                                                            }
+                                                            Err(e) => {
+                                                                app.status_message = Some(format!("Failed to resolve: {}", e));
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    app.status_message = Some("Bash tools are disabled".to_string());
+                                                }
+                                            }
+                                            TuiCommand::Mounts => {
+                                                let info = if let Some(ref mounts) = bash_mounts {
+                                                    format!("**Bash Sandbox Mounts**\n\n{}", mounts.format_mounts())
+                                                } else {
+                                                    "Bash tools are disabled.".to_string()
+                                                };
                                                 app.content = info;
                                                 app.content_dirty = true;
                                             }
@@ -1207,6 +1288,8 @@ enum TuiCommand {
     Agents,
     History,
     Memory,
+    Mount(String),
+    Mounts,
 }
 
 /// Parse TUI commands
@@ -1221,6 +1304,11 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
         "/agents" | "/a" => Some(TuiCommand::Agents),
         "/history" | "/h" => Some(TuiCommand::History),
         "/memory" | "/mem" => Some(TuiCommand::Memory),
+        "/mounts" => Some(TuiCommand::Mounts),
+        _ if trimmed.starts_with("/mount ") => {
+            let path = trimmed.strip_prefix("/mount ").unwrap_or("").trim().to_string();
+            Some(TuiCommand::Mount(path))
+        }
         _ => None,
     }
 }

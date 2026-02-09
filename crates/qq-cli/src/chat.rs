@@ -18,6 +18,7 @@ use qq_core::{
 };
 
 use crate::agents::AgentExecutor;
+use crate::config;
 use crate::config::Config as AppConfig;
 use crate::debug_log::DebugLogger;
 use crate::event_bus::{AgentEvent, AgentEventBus};
@@ -329,6 +330,8 @@ enum ChatCommand {
     Tools,
     Agents,
     Memory,
+    Mount(String),
+    Mounts,
     Delegate { agent: String, task: String },
     AgentCall { agent: String, task: String }, // @agent syntax
     System(String),
@@ -392,6 +395,8 @@ fn parse_command(input: &str) -> ChatCommand {
             }
         }
         "/memory" | "/mem" => ChatCommand::Memory,
+        "/mount" => ChatCommand::Mount(arg),
+        "/mounts" => ChatCommand::Mounts,
         "/system" | "/sys" => ChatCommand::System(arg),
         "/debug" => ChatCommand::Debug(arg),
         _ => {
@@ -414,6 +419,8 @@ Chat Commands:
   /tools, /t          List available tools
   /agents, /a         List available agents
   /delegate <a> <t>   Delegate task <t> to agent <a>
+  /mount <path>       Add read-only mount to bash sandbox
+  /mounts             List current bash sandbox mounts
   /system <msg>       Set a new system prompt
   /debug <subcmd>     Debug commands (messages, count, dump)
 
@@ -636,6 +643,9 @@ pub async fn run_chat(
     event_bus: AgentEventBus,
     debug_logger: Option<Arc<DebugLogger>>,
     agent_memory: AgentMemory,
+    bash_mounts: Option<Arc<qq_tools::SandboxMounts>>,
+    bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
+    _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -650,6 +660,37 @@ pub async fn run_chat(
             }
         }
     });
+
+    // Spawn approval handler for bash tool (handles per-call command approval)
+    if let Some(mut approval_rx) = bash_approval_rx {
+        tokio::spawn(async move {
+            while let Some(request) = approval_rx.recv().await {
+                eprintln!("\n--- Bash approval required ---");
+                eprintln!("  Command: {}", request.full_command);
+                eprintln!(
+                    "  Requires approval: {}",
+                    request.trigger_commands.join(", ")
+                );
+                eprintln!("  [a]llow once / allow for [s]ession / [d]eny (default: deny)");
+                eprint!("  > ");
+
+                let mut input = String::new();
+                match std::io::stdin().read_line(&mut input) {
+                    Ok(_) => {
+                        let response = match input.trim().to_lowercase().as_str() {
+                            "a" | "allow" => qq_tools::ApprovalResponse::Allow,
+                            "s" | "session" => qq_tools::ApprovalResponse::AllowForSession,
+                            _ => qq_tools::ApprovalResponse::Deny,
+                        };
+                        let _ = request.response_tx.send(response);
+                    }
+                    Err(_) => {
+                        let _ = request.response_tx.send(qq_tools::ApprovalResponse::Deny);
+                    }
+                }
+            }
+        });
+    }
 
     // Set up readline with history
     let config = Config::builder()
@@ -732,6 +773,40 @@ pub async fn run_chat(
                             }
                         }
                         println!();
+                    }
+                    ChatCommand::Mount(path_str) => {
+                        if path_str.is_empty() {
+                            println!("Usage: /mount <path>");
+                        } else if let Some(ref mounts) = bash_mounts {
+                            let expanded = config::expand_path(&path_str);
+                            if !expanded.exists() {
+                                println!("Path does not exist: {}", expanded.display());
+                            } else if !expanded.is_dir() {
+                                println!("Path is not a directory: {}", expanded.display());
+                            } else {
+                                match expanded.canonicalize() {
+                                    Ok(canonical) => {
+                                        mounts.add_mount(qq_tools::MountPoint {
+                                            host_path: canonical.clone(),
+                                            label: None,
+                                        });
+                                        println!("Mount added: {} (read-only)", canonical.display());
+                                    }
+                                    Err(e) => println!("Failed to resolve path: {}", e),
+                                }
+                            }
+                        } else {
+                            println!("Bash tools are disabled.");
+                        }
+                    }
+                    ChatCommand::Mounts => {
+                        if let Some(ref mounts) = bash_mounts {
+                            println!("\nBash sandbox mounts:");
+                            println!("{}", mounts.format_mounts());
+                            println!();
+                        } else {
+                            println!("Bash tools are disabled.");
+                        }
                     }
                     ChatCommand::Tools => {
                         println!("\nAvailable tools:");

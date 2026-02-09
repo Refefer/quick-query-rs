@@ -40,7 +40,7 @@ impl FileSystemConfig {
     }
 
     /// Resolve and validate a path is within the root
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, Error> {
+    pub fn resolve_path(&self, path: &str) -> Result<PathBuf, Error> {
         let requested = Path::new(path);
         let resolved = if requested.is_absolute() {
             requested.to_path_buf()

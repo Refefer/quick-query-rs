@@ -30,6 +30,14 @@ Your response should:
 - Note any positive patterns worth preserving
 - Be specific (file:line when possible)
 
+## Bash Access
+You have sandboxed bash access for code review. Use it for:
+- `git log --oneline -20` — recent commit history
+- `git diff HEAD~5` — recent changes
+- `git blame src/file.rs` — line-by-line authorship
+- `grep -rn 'pattern' src/` — search across codebase
+Read-only git commands run without approval.
+
 ## Anti-patterns to Avoid
 - Don't nitpick style when there are real bugs
 - Don't just say "this is bad" - explain why and how to fix
@@ -96,13 +104,14 @@ impl InternalAgent for ReviewerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "find_files", "search_files", "update_my_task"]
+        &["read_file", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
         limits.insert("read_file".to_string(), 50);
         limits.insert("find_files".to_string(), 15);
+        limits.insert("bash".to_string(), 15);
         Some(limits)
     }
 
@@ -133,6 +142,8 @@ mod tests {
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
         assert!(agent.tool_names().contains(&"update_my_task"));
+        assert!(agent.tool_names().contains(&"bash"));
+        assert!(agent.tool_names().contains(&"mount_external"));
         // Reviewer doesn't write files
         assert!(!agent.tool_names().contains(&"write_file"));
     }
@@ -143,5 +154,6 @@ mod tests {
         let limits = agent.tool_limits().expect("reviewer should have tool limits");
         assert_eq!(limits.get("read_file"), Some(&50));
         assert_eq!(limits.get("find_files"), Some(&15));
+        assert_eq!(limits.get("bash"), Some(&15));
     }
 }

@@ -117,6 +117,18 @@ pub struct ToolsConfigEntry {
     /// Web search configuration (Perplexica)
     #[serde(default)]
     pub web_search: Option<WebSearchConfigEntry>,
+
+    /// Enable sandboxed bash tool
+    #[serde(default = "default_true")]
+    pub enable_bash: bool,
+
+    /// Extra directories to mount read-only in the bash sandbox
+    #[serde(default)]
+    pub bash_mounts: Vec<String>,
+
+    /// Bash permission overrides
+    #[serde(default)]
+    pub bash_permissions: Option<BashPermissionOverrides>,
 }
 
 /// Web search (Perplexica) configuration
@@ -128,6 +140,20 @@ pub struct WebSearchConfigEntry {
     pub chat_model: String,
     /// Embedding model name (e.g., "text-embedding-3-large")
     pub embed_model: String,
+}
+
+/// Bash permission overrides for reclassifying commands.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BashPermissionOverrides {
+    /// Commands to promote to session tier (run without approval)
+    #[serde(default)]
+    pub session: Vec<String>,
+    /// Commands to classify as per-call (require approval)
+    #[serde(default)]
+    pub per_call: Vec<String>,
+    /// Commands to block entirely
+    #[serde(default)]
+    pub restricted: Vec<String>,
 }
 
 /// Chunker configuration for processing large tool outputs
@@ -206,6 +232,9 @@ impl Default for ToolsConfigEntry {
             enable_memory: true,
             chunker: ChunkerConfigEntry::default(),
             web_search: None,
+            enable_bash: true,
+            bash_mounts: Vec::new(),
+            bash_permissions: None,
         }
     }
 }

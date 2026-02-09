@@ -26,6 +26,7 @@ pub use execution_context::ExecutionContext;
 use agents::{create_agent_tools, AgentExecutor, InformUserTool, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
 use qq_core::AgentMemory;
+use qq_tools::bash::permissions::parse_config_overrides;
 
 /// Log level for tracing output
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -223,8 +224,15 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Resources created by bash tool setup, passed to TUI/CLI for approval handling.
+struct BashResources {
+    mounts: Arc<qq_tools::SandboxMounts>,
+    approval_rx: tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>,
+    permissions: Arc<qq_tools::PermissionStore>,
+}
+
 /// Build tools registry from config
-fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
+fn build_tools_registry(config: &Config) -> Result<(ToolRegistry, Option<BashResources>)> {
     // Resolve root directory: config > $PWD
     let root = config.tools.root.as_ref()
         .map(|s| expand_path(s))
@@ -267,7 +275,49 @@ fn build_tools_registry(config: &Config) -> Result<ToolRegistry> {
         }
     }
 
-    Ok(registry)
+    // Bash sandbox tools
+    let bash_resources = if config.tools.enable_bash {
+        let mounts = Arc::new(qq_tools::SandboxMounts::new(root.clone()));
+
+        // Add configured extra mounts
+        for mount_path in &config.tools.bash_mounts {
+            let expanded = expand_path(mount_path);
+            if expanded.exists() && expanded.is_dir() {
+                mounts.add_mount(qq_tools::MountPoint {
+                    host_path: expanded,
+                    label: None,
+                });
+            } else {
+                tracing::warn!(path = %mount_path, "Bash mount path does not exist or is not a directory");
+            }
+        }
+
+        // Build permission overrides from config
+        let overrides = config.tools.bash_permissions.as_ref()
+            .map(|p| parse_config_overrides(&p.session, &p.per_call, &p.restricted))
+            .unwrap_or_default();
+        let permissions = Arc::new(qq_tools::PermissionStore::new(overrides));
+
+        let (approval_tx, approval_rx) = qq_tools::create_approval_channel();
+
+        for tool in qq_tools::create_bash_tools(
+            Arc::clone(&mounts),
+            Arc::clone(&permissions),
+            approval_tx,
+        ) {
+            registry.register(tool);
+        }
+
+        Some(BashResources {
+            mounts,
+            approval_rx,
+            permissions,
+        })
+    } else {
+        None
+    };
+
+    Ok((registry, bash_resources))
 }
 
 async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()> {
@@ -276,7 +326,7 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let mut tools_registry = build_tools_registry(config)?;
+    let (mut tools_registry, _bash_resources) = build_tools_registry(config)?;
 
     // Set up chunk processor for large tool outputs
     let chunker_config = config.tools.chunker.to_chunker_config();
@@ -438,9 +488,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Set up base tools (conditionally)
-    let mut base_tools = if disable_tools {
+    let (mut base_tools, bash_resources) = if disable_tools {
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
-        ToolRegistry::new()
+        (ToolRegistry::new(), None)
     } else {
         build_tools_registry(config)?
     };
@@ -551,6 +601,12 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         Some(Arc::new(tokio::sync::RwLock::new(executor)))
     };
 
+    // Destructure bash resources for TUI/CLI
+    let (bash_mounts, bash_approval_rx, bash_permissions) = match bash_resources {
+        Some(br) => (Some(br.mounts), Some(br.approval_rx), Some(br.permissions)),
+        None => (None, None, None),
+    };
+
     if use_tui {
         tui::run_tui(
             cli,
@@ -567,6 +623,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             Some(event_bus),
             debug_logger,
             agent_memory.clone(),
+            bash_mounts.clone(),
+            bash_approval_rx,
+            bash_permissions.clone(),
         )
         .await
     } else {
@@ -583,6 +642,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             event_bus,
             debug_logger,
             agent_memory.clone(),
+            bash_mounts,
+            bash_approval_rx,
+            bash_permissions,
         )
         .await
     }
