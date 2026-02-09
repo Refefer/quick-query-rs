@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -134,11 +134,8 @@ fn render_help_overlay(frame: &mut Frame) {
 
     let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
 
-    // Clear the area
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        overlay_area,
-    );
+    // Clear the area (Clear replaces characters with spaces; Block alone only changes style)
+    frame.render_widget(Clear, overlay_area);
 
     let help_text = vec![
         Line::from(Span::styled(
@@ -198,11 +195,8 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
 
     let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
 
-    // Clear the area behind the overlay
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        overlay_area,
-    );
+    // Clear the area behind the overlay (Clear replaces characters with spaces)
+    frame.render_widget(Clear, overlay_area);
 
     // Truncate command if it's too long for the overlay
     let max_cmd_len = (overlay_width as usize).saturating_sub(6);
