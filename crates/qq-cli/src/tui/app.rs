@@ -179,6 +179,7 @@ pub struct TuiApp {
 
     // UI state
     pub show_help: bool,
+    pub mouse_captured: bool,
     pub should_quit: bool,
 
     // Execution context (for displaying call stack)
@@ -231,6 +232,7 @@ impl TuiApp {
             input: Input::default(),
             input_history: InputHistory::load(),
             show_help: false,
+            mouse_captured: true,
             should_quit: false,
             execution_context,
             agent_progress: None,
@@ -252,12 +254,9 @@ impl TuiApp {
         if !self.content.is_empty() {
             self.content.push('\n');
         }
-        // Wrap user input with visual separators so it stands out
-        self.content.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-        self.content.push_str("**You:** ");
+        self.content.push_str("─── You ───\n\n");
         self.content.push_str(user_input);
-        self.content.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
-        self.content.push_str("**Assistant:** ");
+        self.content.push_str("\n\n─── Assistant ───\n\n");
 
         // Invalidate content cache since content changed
         self.content_dirty = true;
@@ -1055,13 +1054,21 @@ pub async fn run_tui(
                                 }
                             }
                         }
+                        Some(InputAction::ToggleMouse) => {
+                            app.mouse_captured = !app.mouse_captured;
+                            if app.mouse_captured {
+                                execute!(io::stdout(), EnableMouseCapture)?;
+                            } else {
+                                execute!(io::stdout(), DisableMouseCapture)?;
+                            }
+                        }
                         Some(action) => {
                             app.handle_input_action(action);
                         }
                         None => {}
                     }
                 }
-                Event::Mouse(mouse) => {
+                Event::Mouse(mouse) if app.mouse_captured => {
                     // Handle mouse scroll events
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
@@ -1178,6 +1185,9 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
 
         // Hide/show thinking panel (Ctrl+H)
         (KeyCode::Char('h'), KeyModifiers::CONTROL) => Some(InputAction::HideThinking),
+
+        // Toggle mouse capture for text selection (Ctrl+Y)
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(InputAction::ToggleMouse),
 
         // Characters (only when not streaming)
         (KeyCode::Char(c), KeyModifiers::NONE) if !is_streaming => Some(InputAction::Char(c)),

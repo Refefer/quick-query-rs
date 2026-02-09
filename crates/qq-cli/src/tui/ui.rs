@@ -82,8 +82,10 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
         if input_rect.height > 0 {
             let input_hint = if app.is_streaming {
                 "Press Ctrl+C to cancel"
+            } else if !app.mouse_captured {
+                "SELECT MODE \u{2014} Ctrl+Y to resume mouse scroll"
             } else {
-                "/help | /quit | PgUp/PgDn scroll | Ctrl+T/H thinking"
+                "/help | /quit | PgUp/PgDn scroll | Ctrl+Y select mode"
             };
 
             let input = InputArea::new(&app.input)
@@ -120,7 +122,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     // Create centered overlay
     let overlay_width = 60u16.min(area.width.saturating_sub(4));
-    let overlay_height = 20u16.min(area.height.saturating_sub(4));
+    let overlay_height = 27u16.min(area.height.saturating_sub(4));
 
     let x = (area.width.saturating_sub(overlay_width)) / 2;
     let y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -146,7 +148,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  Ctrl+End     Scroll to bottom"),
         Line::from("  Ctrl+T       Expand/shrink thinking panel"),
         Line::from("  Ctrl+H       Hide/show thinking panel"),
-        Line::from("  Mouse wheel  Scroll content"),
+        Line::from("  Mouse wheel  Scroll content (when captured)"),
         Line::from(""),
         Line::from(Span::styled("Commands:", Style::default().fg(Color::Cyan))),
         Line::from("  /help        Show this help"),
@@ -157,6 +159,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  /agents      List available agents"),
         Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Cyan))),
+        Line::from("  Ctrl+Y       Toggle select mode (for copy)"),
         Line::from("  Ctrl+C       Cancel streaming"),
         Line::from("  Ctrl+D       Exit"),
         Line::from(""),

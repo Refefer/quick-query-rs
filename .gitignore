@@ -4,3 +4,4 @@ Cargo.lock
 *.pdb
 *.swp
 .env
+/.working

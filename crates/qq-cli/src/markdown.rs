@@ -312,6 +312,10 @@ pub fn render_to_text(content: &str, width: usize) -> Text<'static> {
                                     .push(Span::styled(line.to_string(), style));
                             }
                         }
+                    } else if let Some(rule_line) = try_render_labeled_rule(&text, width) {
+                        // Labeled horizontal rule (e.g., "─── You ───")
+                        flush_line(&mut lines, &mut current_spans);
+                        lines.push(rule_line);
                     } else {
                         current_spans.push(Span::styled(text.to_string(), style));
                     }
@@ -430,6 +434,39 @@ pub fn render_to_text(content: &str, width: usize) -> Text<'static> {
     }
 
     Text::from(lines)
+}
+
+/// Check if text is a labeled horizontal rule (e.g., "─── You ───") and render it
+/// to fill the given width with the label centered.
+fn try_render_labeled_rule(text: &str, width: usize) -> Option<Line<'static>> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('─') || !trimmed.ends_with('─') {
+        return None;
+    }
+    // Find label boundaries (first and last non-─ characters)
+    let start = trimmed.find(|c: char| c != '─')?;
+    let end = trimmed.rfind(|c: char| c != '─')? + 1;
+    let label = trimmed[start..end].trim();
+    if label.is_empty() {
+        return None;
+    }
+
+    let label_with_space = format!(" {} ", label);
+    let label_width = UnicodeWidthStr::width(label_with_space.as_str());
+    let remaining = width.saturating_sub(label_width);
+    let left_count = remaining / 2;
+    let right_count = remaining.saturating_sub(left_count);
+
+    let rule_style = Style::default().fg(Color::DarkGray);
+    let label_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    Some(Line::from(vec![
+        Span::styled("─".repeat(left_count), rule_style),
+        Span::styled(label_with_space, label_style),
+        Span::styled("─".repeat(right_count), rule_style),
+    ]))
 }
 
 /// Flush the current span accumulator into a completed line.

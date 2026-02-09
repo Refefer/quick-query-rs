@@ -92,4 +92,6 @@ pub enum InputAction {
     WordForward,
     /// Move cursor backward one word
     WordBackward,
+    /// Toggle mouse capture (for text selection)
+    ToggleMouse,
 }
