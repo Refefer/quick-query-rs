@@ -15,6 +15,9 @@ use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParam
 pub struct FileSystemConfig {
     pub root: PathBuf,
     pub allow_write: bool,
+    /// Whether to include search/find tools (list_files, find_files, search_files).
+    /// When a kernel sandbox is available, these are redundant with bash.
+    pub include_search_tools: bool,
 }
 
 impl Default for FileSystemConfig {
@@ -22,6 +25,7 @@ impl Default for FileSystemConfig {
         Self {
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             allow_write: false,
+            include_search_tools: true,
         }
     }
 }
@@ -31,11 +35,17 @@ impl FileSystemConfig {
         Self {
             root: root.into(),
             allow_write: false,
+            include_search_tools: true,
         }
     }
 
     pub fn with_write(mut self, allow: bool) -> Self {
         self.allow_write = allow;
+        self
+    }
+
+    pub fn with_search_tools(mut self, include: bool) -> Self {
+        self.include_search_tools = include;
         self
     }
 
@@ -1874,10 +1884,13 @@ use std::sync::Arc;
 pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadFileTool::new(config.clone())),
-        Box::new(ListFilesTool::new(config.clone())),
-        Box::new(FindFilesTool::new(config.clone())),
-        Box::new(SearchFilesTool::new(config.clone())),
     ];
+
+    if config.include_search_tools {
+        tools.push(Box::new(ListFilesTool::new(config.clone())));
+        tools.push(Box::new(FindFilesTool::new(config.clone())));
+        tools.push(Box::new(SearchFilesTool::new(config.clone())));
+    }
 
     if config.allow_write {
         tools.push(Box::new(WriteFileTool::new(config.clone())));
@@ -1895,10 +1908,13 @@ pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
 pub fn create_filesystem_tools_arc(config: FileSystemConfig) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFileTool::new(config.clone())),
-        Arc::new(ListFilesTool::new(config.clone())),
-        Arc::new(FindFilesTool::new(config.clone())),
-        Arc::new(SearchFilesTool::new(config.clone())),
     ];
+
+    if config.include_search_tools {
+        tools.push(Arc::new(ListFilesTool::new(config.clone())));
+        tools.push(Arc::new(FindFilesTool::new(config.clone())));
+        tools.push(Arc::new(SearchFilesTool::new(config.clone())));
+    }
 
     if config.allow_write {
         tools.push(Arc::new(WriteFileTool::new(config.clone())));

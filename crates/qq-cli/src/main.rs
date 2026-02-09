@@ -131,6 +131,14 @@ pub struct Cli {
     #[arg(long)]
     pub no_tui: bool,
 
+    /// Use built-in filesystem tools for search instead of bash (no bash tools)
+    #[arg(long, conflicts_with = "insecure")]
+    pub classic: bool,
+
+    /// Allow bash tools without kernel sandbox isolation
+    #[arg(long, conflicts_with = "classic")]
+    pub insecure: bool,
+
     /// Primary agent to use for interactive sessions (overrides profile)
     /// Can be any internal agent: pm, explore, researcher, coder, reviewer, summarizer, planner, writer
     #[arg(short = 'A', long)]
@@ -231,8 +239,13 @@ struct BashResources {
     permissions: Arc<qq_tools::PermissionStore>,
 }
 
-/// Build tools registry from config
-fn build_tools_registry(config: &Config) -> Result<(ToolRegistry, Option<BashResources>)> {
+/// Build tools registry from config.
+///
+/// Bash tool modes:
+/// - Default: requires kernel sandbox, exits if unavailable
+/// - `--classic`: no bash tools, built-in search tools instead
+/// - `--insecure`: bash tools without kernel sandbox
+fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Result<(ToolRegistry, Option<BashResources>)> {
     // Resolve root directory: config > $PWD
     let root = config.tools.root.as_ref()
         .map(|s| expand_path(s))
@@ -245,9 +258,38 @@ fn build_tools_registry(config: &Config) -> Result<(ToolRegistry, Option<BashRes
 
     let mut registry = ToolRegistry::new();
 
-    // Filesystem tools
+    // Determine whether bash tools will be available
+    // --classic disables bash entirely; otherwise respect config
+    let use_bash = !classic && config.tools.enable_bash;
+
+    // If bash is requested (not classic, config enabled), verify sandbox unless --insecure
+    if use_bash && !insecure {
+        let executor = qq_tools::SandboxExecutor::detect();
+        if !executor.supports_shell() {
+            if is_apparmor_restricting_userns() {
+                anyhow::bail!(
+                    "Kernel sandbox unavailable — AppArmor is restricting user namespaces.\n\n\
+                     To fix, run:  sudo ./scripts/setup-apparmor.sh\n\n\
+                     Alternatively:\n  \
+                     --classic   Use built-in search tools instead of bash\n  \
+                     --insecure  Allow bash without kernel sandbox isolation"
+                );
+            } else {
+                anyhow::bail!(
+                    "Kernel sandbox unavailable — user namespaces are not supported.\n\n\
+                     Alternatively:\n  \
+                     --classic   Use built-in search tools instead of bash\n  \
+                     --insecure  Allow bash without kernel sandbox isolation"
+                );
+            }
+        }
+    }
+
+    // Filesystem tools — include search tools only when bash is not available
     if config.tools.enable_filesystem {
-        let fs_config = qq_tools::FileSystemConfig::new(&root).with_write(config.tools.allow_write);
+        let fs_config = qq_tools::FileSystemConfig::new(&root)
+            .with_write(config.tools.allow_write)
+            .with_search_tools(!use_bash);
         for tool in qq_tools::create_filesystem_tools_arc(fs_config) {
             registry.register(tool);
         }
@@ -275,8 +317,12 @@ fn build_tools_registry(config: &Config) -> Result<(ToolRegistry, Option<BashRes
         }
     }
 
-    // Bash sandbox tools
-    let bash_resources = if config.tools.enable_bash {
+    // Bash tools — only when not in classic mode and config enables bash
+    let bash_resources = if use_bash {
+        if insecure {
+            eprintln!("Warning: Running bash tools without kernel sandbox isolation (--insecure).");
+        }
+
         let mounts = Arc::new(qq_tools::SandboxMounts::new(root.clone()));
 
         // Add configured extra mounts
@@ -320,13 +366,19 @@ fn build_tools_registry(config: &Config) -> Result<(ToolRegistry, Option<BashRes
     Ok((registry, bash_resources))
 }
 
+fn is_apparmor_restricting_userns() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
 async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()> {
     // Resolve settings from profile, CLI, and config
     let settings = resolve_settings(cli, config)?;
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let (mut tools_registry, _bash_resources) = build_tools_registry(config)?;
+    let (mut tools_registry, _bash_resources) = build_tools_registry(config, cli.classic, cli.insecure)?;
 
     // Set up chunk processor for large tool outputs
     let chunker_config = config.tools.chunker.to_chunker_config();
@@ -492,7 +544,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
         (ToolRegistry::new(), None)
     } else {
-        build_tools_registry(config)?
+        build_tools_registry(config, cli.classic, cli.insecure)?
     };
 
     // Register task tracking tools (session-scoped, in-memory)
