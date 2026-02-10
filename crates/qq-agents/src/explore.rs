@@ -28,20 +28,6 @@ Your response should:
 - Summarize file contents when relevant
 - Note any assumptions or uncertainties
 
-## IMPORTANT: Read-Only Agent
-You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You may only read and search. If the task requires modifications, report your findings and recommend the appropriate agent (e.g., coder, writer).
-
-## Bash Access
-You have sandboxed bash access for read-only commands. Use it for:
-- `find . -name '*.rs' -type f` — faster file discovery than find_files
-- `grep -rn 'pattern' src/` — content search with line numbers
-- `git log --oneline -20` — recent git history
-- `git diff HEAD~1` — recent changes
-- `wc -l src/**/*.rs` — line counts
-- `tree -L 2 src/` — directory structure
-
-Read-only commands run without approval. Write commands are not available to this agent.
-
 ## Anti-patterns to Avoid
 - Don't just list files without context - explain what you found
 - Don't read every file - be strategic
@@ -124,6 +110,10 @@ impl InternalAgent for ExploreAgent {
 
     fn compact_prompt(&self) -> &str {
         COMPACT_PROMPT
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
     }
 }
 

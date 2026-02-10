@@ -29,15 +29,6 @@ Your response should:
 - List files created or modified
 - Highlight anything the caller should verify or test
 
-## Bash Access
-You have sandboxed bash access. Use it for:
-- `cargo build` / `cargo test` — build and test (requires user approval)
-- `cargo check` — type checking (requires user approval)
-- `git diff` — see changes you've made
-- `grep -rn 'pattern' src/` — content search
-Write commands (cargo, npm, git commit, etc.) require user approval each time.
-Network access is blocked (no curl, wget, etc.).
-
 ## Anti-patterns to Avoid
 - NEVER write code without first reading related existing code
 - Don't invent new patterns when the codebase has established ones

@@ -114,7 +114,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["web_search", "fetch_webpage", "read_memory", "update_my_task"]
+        &["web_search", "fetch_webpage", "read_memory", "bash", "mount_external", "update_my_task"]
     }
 
     fn max_turns(&self) -> usize {
@@ -135,6 +135,10 @@ impl InternalAgent for ResearcherAgent {
         limits.insert("fetch_webpage".to_string(), 10);
         Some(limits)
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +155,8 @@ mod tests {
         assert!(agent.tool_names().contains(&"fetch_webpage"));
         assert!(agent.tool_names().contains(&"read_memory"));
         assert!(agent.tool_names().contains(&"update_my_task"));
+        assert!(agent.tool_names().contains(&"bash"));
+        assert!(agent.tool_names().contains(&"mount_external"));
         // Researcher is read-only - no write tools
         assert!(!agent.tool_names().contains(&"add_memory"));
         assert!(!agent.tool_names().contains(&"write_file"));

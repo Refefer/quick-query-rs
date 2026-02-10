@@ -13,6 +13,10 @@ pub struct PreambleContext {
     pub has_inform_user: bool,
     /// Whether this agent has task tracking capabilities (update_my_task).
     pub has_task_tracking: bool,
+    /// Whether this agent has bash access.
+    pub has_bash: bool,
+    /// Whether this agent is read-only (must not modify files).
+    pub is_read_only: bool,
 }
 
 /// Generate the shared preamble that gets prepended to all agent system prompts.
@@ -105,6 +109,39 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
         );
     }
 
+    // Bash access (conditional)
+    if ctx.has_bash {
+        sections.push(
+            "### Bash Access\n\
+             You have sandboxed bash access. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
+             run without approval. Write commands (cargo build, git commit, npm, rm, etc.) require user approval.\n\
+             Network access is blocked.\n\
+             \n\
+             /tmp is a writable scratch space that persists across bash commands in this session. Use it for:\n\
+             - Intermediate results: `find . -name '*.rs' > /tmp/files.txt` then `wc -l < /tmp/files.txt`\n\
+             - Scripts: write to /tmp/check.sh then `sh /tmp/check.sh` (avoids inline escaping issues)\n\
+             - Working notes: save output to /tmp rather than inlining large results"
+                .to_string(),
+        );
+    }
+
+    // Read-only reinforcement (conditional)
+    if ctx.is_read_only {
+        sections.push(
+            "### CRITICAL: Read-Only Agent\n\
+             You are a READ-ONLY agent. You must NEVER:\n\
+             - Write, modify, create, move, or delete any files or directories\n\
+             - Run write commands via bash (no cargo build, git commit, npm install, rm, mv, tee, etc.)\n\
+             - Write to memory stores\n\
+             \n\
+             You may ONLY: read files, search content, and run read-only bash commands (grep, find, cat, \
+             git log, git diff, git blame, wc, tree, head, tail, ls, etc.).\n\
+             \n\
+             If your task requires modifications, report your findings and recommend the appropriate agent."
+                .to_string(),
+        );
+    }
+
     // Resourcefulness (conditional: has tools or sub-agents)
     if ctx.has_tools || ctx.has_sub_agents {
         sections.push(
@@ -132,6 +169,8 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_bash: false,
+            is_read_only: false,
         });
 
         // Core sections always present
@@ -145,6 +184,8 @@ mod tests {
         assert!(!preamble.contains("Tool Usage Efficiency"));
         assert!(!preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Task Tracking"));
+        assert!(!preamble.contains("Bash Access"));
+        assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
     }
 
     #[test]
@@ -154,6 +195,8 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_bash: false,
+            is_read_only: false,
         });
 
         assert!(preamble.contains("Tool Usage Efficiency"));
@@ -169,6 +212,8 @@ mod tests {
             has_sub_agents: true,
             has_inform_user: false,
             has_task_tracking: false,
+            has_bash: false,
+            is_read_only: false,
         });
 
         assert!(preamble.contains("Delegating to Sub-Agents"));
@@ -185,6 +230,8 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: true,
             has_task_tracking: false,
+            has_bash: false,
+            is_read_only: false,
         });
 
         assert!(preamble.contains("Keeping the User Informed"));
@@ -200,11 +247,63 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: true,
+            has_bash: false,
+            is_read_only: false,
         });
 
         assert!(preamble.contains("Task Tracking"));
         assert!(preamble.contains("update_my_task"));
         assert!(preamble.contains("Current Task Board"));
+    }
+
+    #[test]
+    fn test_preamble_with_bash() {
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: true,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_bash: true,
+            is_read_only: false,
+        });
+
+        assert!(preamble.contains("Bash Access"));
+        assert!(preamble.contains("sandboxed bash access"));
+        assert!(preamble.contains("/tmp"));
+        assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
+    }
+
+    #[test]
+    fn test_preamble_with_read_only() {
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: true,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_bash: false,
+            is_read_only: true,
+        });
+
+        assert!(preamble.contains("CRITICAL: Read-Only Agent"));
+        assert!(preamble.contains("READ-ONLY agent"));
+        assert!(preamble.contains("NEVER"));
+        assert!(!preamble.contains("Bash Access"));
+    }
+
+    #[test]
+    fn test_preamble_read_only_with_bash() {
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: true,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_bash: true,
+            is_read_only: true,
+        });
+
+        // Both sections should appear
+        assert!(preamble.contains("Bash Access"));
+        assert!(preamble.contains("CRITICAL: Read-Only Agent"));
     }
 
     #[test]
@@ -214,6 +313,8 @@ mod tests {
             has_sub_agents: true,
             has_inform_user: true,
             has_task_tracking: true,
+            has_bash: true,
+            is_read_only: false,
         });
 
         // All sections present
@@ -225,5 +326,6 @@ mod tests {
         assert!(preamble.contains("Tool Usage Efficiency"));
         assert!(preamble.contains("Resourcefulness"));
         assert!(preamble.contains("Task Tracking"));
+        assert!(preamble.contains("Bash Access"));
     }
 }

@@ -30,13 +30,9 @@ Your response should:
 - Note any positive patterns worth preserving
 - Be specific (file:line when possible)
 
-## Bash Access
-You have sandboxed bash access for code review. Use it for:
-- `git log --oneline -20` — recent commit history
-- `git diff HEAD~5` — recent changes
-- `git blame src/file.rs` — line-by-line authorship
-- `grep -rn 'pattern' src/` — search across codebase
-Read-only git commands run without approval.
+## IMPORTANT: Read-Only Agent
+You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories.
+You review and analyze only — if fixes are needed, report them for the coder agent to implement.
 
 ## Anti-patterns to Avoid
 - Don't nitpick style when there are real bugs
@@ -121,6 +117,10 @@ impl InternalAgent for ReviewerAgent {
 
     fn compact_prompt(&self) -> &str {
         COMPACT_PROMPT
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
     }
 }
 

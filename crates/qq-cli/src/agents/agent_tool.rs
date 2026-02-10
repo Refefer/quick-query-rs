@@ -34,6 +34,7 @@ struct AgentToolConfig {
     max_turns: usize,
     tool_limits: Option<HashMap<String, usize>>,
     compact_prompt: String,
+    is_read_only: bool,
 }
 
 /// Build the standard agent tool definition.
@@ -134,12 +135,15 @@ async fn execute_agent(
     let has_tools = !config.tool_names.is_empty();
     let has_inform_user = event_bus.is_some();
     let has_task_tracking = config.tool_names.iter().any(|n| n == "update_my_task");
+    let has_bash = config.tool_names.iter().any(|n| n == "bash");
 
     let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
         has_tools,
         has_sub_agents,
         has_inform_user,
         has_task_tracking,
+        has_bash,
+        is_read_only: config.is_read_only,
     });
     let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
 
@@ -338,13 +342,27 @@ impl Tool for InternalAgentTool {
             .unwrap_or_else(|| self.agent.compact_prompt())
             .to_string();
 
+        let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
+
+        // Auto-inject bash + mount_external unless disabled via config
+        let no_bash = self.external_agents.get_builtin_no_bash(self.agent.name());
+        if !no_bash && !tool_names.is_empty() {
+            if !tool_names.iter().any(|n| n == "bash") {
+                tool_names.push("bash".to_string());
+            }
+            if !tool_names.iter().any(|n| n == "mount_external") {
+                tool_names.push("mount_external".to_string());
+            }
+        }
+
         let config = AgentToolConfig {
             agent_name: self.agent.name().to_string(),
             system_prompt: self.agent.system_prompt().to_string(),
-            tool_names: self.agent.tool_names().iter().map(|s| s.to_string()).collect(),
+            tool_names,
             max_turns,
             tool_limits,
             compact_prompt,
+            is_read_only: self.agent.is_read_only(),
         };
 
         let output = execute_agent(
@@ -480,16 +498,29 @@ impl Tool for ExternalAgentTool {
             Some(self.agent_def.tool_limits.clone())
         };
 
+        let mut tool_names = self.agent_def.tools.clone();
+
+        // Auto-inject bash + mount_external unless disabled via config
+        if !self.agent_def.no_bash && !tool_names.is_empty() {
+            if !tool_names.iter().any(|n| n == "bash") {
+                tool_names.push("bash".to_string());
+            }
+            if !tool_names.iter().any(|n| n == "mount_external") {
+                tool_names.push("mount_external".to_string());
+            }
+        }
+
         let config = AgentToolConfig {
             agent_name: self.agent_name.clone(),
             system_prompt: self.agent_def.system_prompt.clone(),
-            tool_names: self.agent_def.tools.clone(),
+            tool_names,
             max_turns: self.agent_def.max_turns,
             tool_limits,
             compact_prompt: self.agent_def.compact_prompt
                 .as_deref()
                 .unwrap_or(DEFAULT_COMPACT_PROMPT)
                 .to_string(),
+            is_read_only: self.agent_def.read_only,
         };
 
         let output = execute_agent(

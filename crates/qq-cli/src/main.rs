@@ -323,7 +323,8 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
             eprintln!("Warning: Running bash tools without kernel sandbox isolation (--insecure).");
         }
 
-        let mounts = Arc::new(qq_tools::SandboxMounts::new(root.clone()));
+        let mounts = Arc::new(qq_tools::SandboxMounts::new(root.clone())
+            .context("Failed to create per-instance /tmp directory")?);
 
         // Add configured extra mounts
         for mount_path in &config.tools.bash_mounts {
@@ -526,6 +527,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             has_sub_agents: !disable_agents,
             has_inform_user: true,
             has_task_tracking: false, // PM uses full task tools, not update_my_task
+            has_bash: false,          // PM delegates bash to sub-agents
+            is_read_only: false,
         });
         let combined = format!("{}\n\n---\n\n{}", preamble, base_prompt);
         match user_system_prompt {

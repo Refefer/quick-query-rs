@@ -32,16 +32,19 @@ Quick-query has **sandboxed bash access**. Read-only commands run freely. Write 
 **Plan accordingly:** Build and test commands CAN be run via bash (with user approval). Include them in automated steps, not as manual steps.
 
 ## ALWAYS Gather Context First
-Before writing ANY plan, use Agent[explore] to understand the current state of the codebase. Do NOT plan based on assumptions about file structure, naming, or architecture — discover them.
+Before writing ANY plan, explore the codebase to understand its current state. Do NOT plan based on assumptions about file structure, naming, or architecture — discover them.
 
-- **Agent[explore]**: ALWAYS use this first. Explore directory structure, find relevant files, search for patterns, understand existing code organization. Even if the task seems straightforward, explore to confirm your assumptions.
-- **Agent[researcher]**: Research topics on the web when you need external information (libraries, best practices, APIs).
-- **Agent[reviewer]**: Review existing code to understand current implementation patterns and quality.
+You have direct read access via `read_file`, `find_files`, `search_files`, and read-only bash commands (`grep`, `find`, `tree`, `git log`, etc.). Use these for quick exploration. For deep dives into unfamiliar areas, delegate to Agent[explore].
 
-A plan built on explored reality is far more useful than one built on guesses. If the user references files, modules, or features vaguely, use Agent[explore] to locate them — never ask the user for paths you can discover.
+- **Direct exploration**: Use your own read tools and bash for quick lookups — file structure, grep for patterns, git history
+- **Agent[explore]**: Delegate deep exploration when you need thorough analysis of complex codebases
+- **Agent[researcher]**: Research topics on the web when you need external information (libraries, best practices, APIs)
+- **Agent[reviewer]**: Review existing code to understand current implementation patterns and quality
+
+A plan built on explored reality is far more useful than one built on guesses. If the user references files, modules, or features vaguely, discover them yourself — never ask the user for paths you can find.
 
 ## How You Think
-1. **Gather context**: Use Agent[explore] to understand the current codebase state — this is NOT optional
+1. **Gather context**: Explore the codebase (your own read tools + bash, or Agent[explore] for deep dives) — this is NOT optional
 2. **Understand the goal**: What's the desired end state? What are the constraints?
 3. **Identify components**: What major pieces of work are involved?
 4. **Sequence logically**: What must happen before what?
@@ -163,8 +166,8 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // Planner is read-only - can check memory but not write to it
-        &["read_memory", "update_my_task"]
+        // Planner is read-only - has direct read access for quick exploration
+        &["read_memory", "read_file", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -182,6 +185,10 @@ impl InternalAgent for PlannerAgent {
     fn compact_prompt(&self) -> &str {
         COMPACT_PROMPT
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +202,11 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_memory"));
+        assert!(agent.tool_names().contains(&"read_file"));
+        assert!(agent.tool_names().contains(&"find_files"));
+        assert!(agent.tool_names().contains(&"search_files"));
+        assert!(agent.tool_names().contains(&"bash"));
+        assert!(agent.tool_names().contains(&"mount_external"));
         assert!(agent.tool_names().contains(&"update_my_task"));
         // Planner is read-only - no write tools
         assert!(!agent.tool_names().contains(&"add_memory"));

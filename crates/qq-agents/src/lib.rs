@@ -89,6 +89,14 @@ pub trait InternalAgent: Send + Sync {
     fn compact_prompt(&self) -> &str {
         DEFAULT_COMPACT_PROMPT
     }
+
+    /// Whether this agent is read-only (may not modify files or run write commands).
+    ///
+    /// Read-only agents receive strong reinforcement in the preamble to never
+    /// write, modify, create, move, or delete files. Default: false.
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 /// Information about an available agent.
@@ -243,6 +251,30 @@ mod tests {
                 "Agent {} should have a tool description",
                 agent.name()
             );
+        }
+    }
+
+    #[test]
+    fn test_agent_is_read_only() {
+        let read_only_agents = ["explore", "reviewer", "researcher", "planner"];
+        let write_agents = ["pm", "coder", "writer", "summarizer"];
+
+        for t in InternalAgentType::all_with_pm() {
+            let agent = t.create();
+            let name = agent.name();
+            if read_only_agents.contains(&name) {
+                assert!(
+                    agent.is_read_only(),
+                    "Agent {} should be read-only",
+                    name
+                );
+            } else if write_agents.contains(&name) {
+                assert!(
+                    !agent.is_read_only(),
+                    "Agent {} should NOT be read-only",
+                    name
+                );
+            }
         }
     }
 

@@ -28,6 +28,10 @@ pub struct BuiltinAgentOverride {
     /// When set, overrides the agent's built-in compact_prompt.
     #[serde(default)]
     pub compact_prompt: Option<String>,
+
+    /// Disable bash tool for this agent (default: false = bash enabled).
+    #[serde(default)]
+    pub no_bash: Option<bool>,
 }
 
 /// External agent definition from agents.toml.
@@ -69,6 +73,14 @@ pub struct AgentDefinition {
     /// Falls back to DEFAULT_COMPACT_PROMPT if omitted.
     #[serde(default)]
     pub compact_prompt: Option<String>,
+
+    /// Disable bash tool for this agent (default: false = bash is auto-injected).
+    #[serde(default)]
+    pub no_bash: bool,
+
+    /// Whether this agent is read-only (default: false).
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// Agents configuration file (agents.toml).
@@ -149,6 +161,14 @@ impl AgentsConfig {
         self.builtin
             .get(name)
             .and_then(|o| o.compact_prompt.as_deref())
+    }
+
+    /// Check if bash is disabled for a built-in agent via config overrides.
+    pub fn get_builtin_no_bash(&self, name: &str) -> bool {
+        self.builtin
+            .get(name)
+            .and_then(|o| o.no_bash)
+            .unwrap_or(false)
     }
 }
 
@@ -295,6 +315,53 @@ compact_prompt = "Preserve test-specific context"
             agent.compact_prompt.as_deref(),
             Some("Preserve test-specific context")
         );
+    }
+
+    #[test]
+    fn test_builtin_no_bash_override() {
+        let toml_content = r#"
+[builtin.researcher]
+no_bash = true
+
+[builtin.coder]
+# no_bash not set, defaults to false
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert!(config.get_builtin_no_bash("researcher"));
+        assert!(!config.get_builtin_no_bash("coder"));
+        assert!(!config.get_builtin_no_bash("nonexistent"));
+    }
+
+    #[test]
+    fn test_external_agent_no_bash_and_read_only() {
+        let toml_content = r#"
+[agents.my-agent]
+description = "Test agent"
+system_prompt = "You are a test agent"
+tools = ["read_file"]
+no_bash = true
+read_only = true
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("my-agent").unwrap();
+        assert!(agent.no_bash);
+        assert!(agent.read_only);
+    }
+
+    #[test]
+    fn test_external_agent_no_bash_default() {
+        let toml_content = r#"
+[agents.my-agent]
+description = "Test agent"
+system_prompt = "You are a test agent"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("my-agent").unwrap();
+        assert!(!agent.no_bash);
+        assert!(!agent.read_only);
     }
 
     #[test]
