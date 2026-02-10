@@ -29,22 +29,18 @@ tool_limits = { web_search = 2, fetch_webpage = 5 }
 [builtin.coder]
 # Default tools: read_file, edit_file, write_file, find_files, search_files + inform_user
 max_turns = 100
-tool_limits = { write_file = 20, read_file = 50, find_files = 20, search_files = 20 }
 
 [builtin.explore]
 # Default tools: read_file, find_files, search_files + inform_user
 max_turns = 50
-tool_limits = { read_file = 50, find_files = 30, search_files = 30 }
 
 [builtin.reviewer]
 # Default tools: read_file, find_files, search_files + inform_user
-max_turns = 20
-tool_limits = { read_file = 30, find_files = 15, search_files = 15 }
+max_turns = 50
 
 [builtin.writer]
 # Default tools: read_file, write_file, find_files, search_files + inform_user
 max_turns = 20
-tool_limits = { write_file = 10, read_file = 20, find_files = 10, search_files = 10 }
 
 [builtin.chat]
 # Default tools: Agent tools only + inform_user (delegates all work to other agents)
