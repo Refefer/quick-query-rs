@@ -67,6 +67,8 @@ Options:
       --log-level <LEVEL>    Log level (trace, debug, info, warn, error; default: warn)
   -d, --debug                Enable debug logging (shorthand for --log-level debug)
       --log-file <FILE>      Write debug log to file (JSON-lines format)
+      --classic              Use built-in search tools instead of bash (no bash tools)
+      --insecure             Allow bash tools without kernel sandbox isolation
       --no-tools             Disable all tools
       --no-agents            Disable all agents
       --minimal              Minimal mode (no tools, no agents)
@@ -287,6 +289,38 @@ qq-cli/
 │   ├── event_bus.rs     # Agent event bus
 │   ├── execution_context.rs  # Agent/tool stack tracking
 │   └── debug_log.rs     # Debug logging
+```
+
+## Bash Sandbox
+
+By default, agents have access to a sandboxed bash tool that runs commands inside
+a kernel-level container (Linux user/mount/PID namespaces via hakoniwa). The
+sandbox is required — if the probe fails at startup, `qq` exits with instructions.
+
+| Flag | Effect |
+|------|--------|
+| *(default)* | Requires kernel sandbox. Exits if unavailable. |
+| `--classic` | Disables bash tools. Restores built-in `list_files`, `find_files`, `search_files`. |
+| `--insecure` | Allows bash without kernel sandbox. Simple commands only (no pipes/redirects). |
+
+The two flags are mutually exclusive.
+
+### Platform Support
+
+| Platform | Sandbox | Notes |
+|----------|---------|-------|
+| Linux (native) | Full | Works on most distros. May need AppArmor setup on Ubuntu 24.04+. |
+| WSL2 | Full | Real Linux kernel, namespaces enabled by default. |
+| WSL1 | None | Syscall translation only. Use `--classic`. |
+| macOS | None | hakoniwa is Linux-only. Build with `--no-default-features`, use `--classic`. |
+
+### AppArmor Setup
+
+Ubuntu 24.04+ and containers with `apparmor_restrict_unprivileged_userns=1` block
+user namespace creation. Run the setup script to create an AppArmor profile:
+
+```bash
+sudo ./scripts/setup-apparmor.sh
 ```
 
 ## Debugging

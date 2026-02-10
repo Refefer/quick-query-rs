@@ -255,6 +255,89 @@ let tools = create_web_tools_with_search(Some(search_config));
 }
 ```
 
+### Bash Tools (Linux)
+
+Sandboxed shell execution via [hakoniwa](https://crates.io/crates/hakoniwa) kernel containers.
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Execute a shell command inside the sandbox |
+| `mount_external` | Mount an external directory read-only |
+
+```rust
+use qq_tools::{create_bash_tools, SandboxMounts, PermissionStore, create_approval_channel};
+use std::sync::Arc;
+
+let mounts = Arc::new(SandboxMounts::new("/home/user/project".into()));
+let permissions = Arc::new(PermissionStore::new(Default::default()));
+let (approval_tx, approval_rx) = create_approval_channel();
+
+let tools = create_bash_tools(mounts, permissions, approval_tx);
+```
+
+#### Sandbox Architecture
+
+Commands run inside a Linux container with isolated user/mount/PID namespaces:
+
+- **Project root** is mounted read-write
+- **System directories** (`/bin`, `/usr`, `/lib`, `/etc`, `/sbin`) are mounted read-only
+- **External mounts** added via `mount_external` are read-only
+- `/tmp` is a private tmpfs, `/proc` and `/dev` are virtual filesystems
+- No network namespace isolation (commands can access the network)
+
+#### Permission Model
+
+Commands are classified into three tiers before execution:
+
+| Tier | Behavior | Examples |
+|------|----------|---------|
+| **Session** | Auto-approved, runs without prompting | `ls`, `cat`, `grep`, `find`, `git status`, `git log`, `git diff` |
+| **Per-call** | Requires user approval (allow once, allow for session, or deny) | `git commit`, `git push`, `rm`, `mv`, `chmod`, `curl` |
+| **Restricted** | Always blocked | `sudo`, `su`, `mkfs`, `dd`, `shutdown` |
+
+Pipeline commands (pipes, redirects) are parsed into individual commands, and each
+is checked independently. The highest-risk tier in a pipeline determines the overall
+classification.
+
+Permission overrides can be configured in `config.toml`:
+
+```toml
+[tools.bash_permissions]
+session = ["make", "npm test"]
+per_call = ["docker"]
+restricted = ["rm -rf /"]
+```
+
+#### Approval Channel
+
+Per-call commands surface an approval request to the user via a tokio mpsc/oneshot
+channel. The TUI renders this as a modal overlay; the CLI uses a stdin prompt. Three
+responses are available:
+
+- **Allow once** — run this command, ask again next time
+- **Allow for session** — promote to session tier for the rest of this session
+- **Deny** — block the command
+
+#### Platform Limitations
+
+The kernel sandbox requires Linux user namespaces. It is **not available** on:
+
+- **macOS** — hakoniwa depends on Linux namespaces, cgroups, and procfs. The
+  `sandbox` feature (default-on) will fail to compile. Build with
+  `cargo install --path crates/qq-cli --no-default-features` and use `--classic`.
+- **WSL1** — uses syscall translation without real namespace support. The sandbox
+  probe fails at runtime. Use `--classic`.
+- **Containers** — works if the container runtime allows user namespaces (common
+  with Docker's `--userns=host` or rootless mode). Containers based on Ubuntu 24.04+
+  may need the AppArmor setup script (`sudo ./scripts/setup-apparmor.sh`).
+
+**WSL2** works out of the box (real Linux kernel with namespaces enabled by default).
+
+When the sandbox is unavailable, the app-level fallback exists but is severely
+restricted: simple commands only (no pipes, redirects, or shell operators), and
+only session-tier commands are allowed. This is intentionally limited — `--classic`
+mode (built-in search tools) is the recommended fallback for full functionality.
+
 ### Process Data Tool
 
 Handles large tool outputs by chunking and summarizing.
@@ -416,3 +499,4 @@ registry.register(Arc::new(MyCustomTool::new()));
 - `scraper` - HTML parsing
 - `glob` - File pattern matching
 - `regex` - Content search
+- `hakoniwa` (optional, Linux only) - Kernel sandbox for bash tools

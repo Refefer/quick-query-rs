@@ -88,7 +88,7 @@ graph TD
 |-------|---------|-------------|
 | **qq-core** | Foundation types and traits | `Provider`, `Tool`, `Agent`, `Message`, `ToolRegistry`, `AgentMemory` |
 | **qq-providers** | LLM provider implementations | `OpenAIProvider`, `AnthropicProvider`, `GeminiProvider` |
-| **qq-tools** | Built-in tools for agents | `create_filesystem_tools`, `create_memory_tools`, `create_web_tools`, `create_task_tools`, `TaskStore` |
+| **qq-tools** | Built-in tools for agents | `create_filesystem_tools`, `create_memory_tools`, `create_web_tools`, `create_task_tools`, `create_bash_tools`, `TaskStore` |
 | **qq-agents** | Agent definitions | `ProjectManagerAgent`, `CoderAgent`, `ExploreAgent`, etc. |
 | **qq-cli** | User-facing CLI binary | `qq` binary, TUI, configuration loading, event bus |
 
@@ -531,6 +531,11 @@ graph TD
             DT[delete_task]
         end
 
+        subgraph "Bash (Linux, kernel sandbox)"
+            BASH[bash]
+            ME[mount_external]
+        end
+
         subgraph "Processing"
             PLD[process_large_data]
         end
@@ -550,6 +555,45 @@ flowchart TD
     CheckWrite -->|No| Execute
     Execute --> Return[Return Result]
 ```
+
+### Bash Sandbox Architecture
+
+```mermaid
+flowchart TD
+    subgraph "Bash Tool Execution"
+        CMD["bash tool call<br/>(command string)"] --> PARSE["Pipeline parser<br/>(tokenize, extract commands)"]
+        PARSE --> PERM["Permission check<br/>(per command in pipeline)"]
+        PERM -->|Session tier| EXEC["Execute in sandbox"]
+        PERM -->|Per-call tier| APPROVE["Approval channel<br/>(TUI modal / CLI prompt)"]
+        APPROVE -->|Allow| EXEC
+        APPROVE -->|Deny| REJECT["Return error"]
+        PERM -->|Restricted| BLOCK["Block immediately"]
+    end
+
+    subgraph "Kernel Sandbox (hakoniwa)"
+        EXEC --> CONTAINER["Linux container<br/>(user/mount/PID namespaces)"]
+        CONTAINER --> MOUNTS["Mount table"]
+        MOUNTS --> RW["Project root (RW)"]
+        MOUNTS --> RO_SYS["/bin, /usr, /lib,<br/>/etc, /sbin (RO)"]
+        MOUNTS --> RO_EXT["Extra mounts (RO)"]
+        MOUNTS --> VIRT["/proc, /dev, /tmp<br/>(virtual)"]
+    end
+
+    subgraph "App-Level Fallback"
+        EXEC_APP["Direct exec<br/>(tokio::process)"] --> RESTRICT["No pipes/redirects<br/>Session-tier only"]
+    end
+```
+
+**Platform support:** The kernel sandbox requires Linux user namespaces. It is not
+available on macOS (hakoniwa won't compile — depends on namespaces, cgroups, procfs),
+WSL1 (syscall translation only), or containers that block user namespaces. WSL2 works
+out of the box. On Ubuntu 24.04+ and containers with AppArmor restricting unprivileged
+user namespaces, run `sudo ./scripts/setup-apparmor.sh` to create a profile granting
+`qq` the `userns` permission.
+
+The app-level fallback (`--insecure`) is intentionally restricted: no shell operators,
+no pipes/redirects, and only session-tier commands. `--classic` mode (built-in search
+tools instead of bash) is the recommended fallback for platforms without sandbox support.
 
 ### Shared Store Pattern
 
@@ -623,6 +667,7 @@ classDiagram
 | **Memory** | `add_memory`, `read_memory`, `list_memories`, `delete_memory` | Persistent SQLite-backed key-value storage |
 | **Web** | `fetch_webpage`, `web_search` | Web content retrieval (optional Perplexica search) |
 | **Tasks** | `create_task`, `update_task`, `list_tasks`, `delete_task` | Session-scoped task tracking for the PM agent |
+| **Bash** | `bash`, `mount_external` | Sandboxed shell execution (Linux kernel sandbox via hakoniwa) |
 | **Processing** | `process_large_data` | Chunk and summarize large outputs |
 
 ### Tool Registry Construction
@@ -636,14 +681,26 @@ flowchart TD
     Check -->|enable_memory| MEM["Memory tools<br/>(SQLite path from config)"]
     Check -->|enable_web| WEB["Web tools<br/>(+ optional Perplexica search)"]
     Check -->|always if !no_tools| TASK["Task tools<br/>(fresh TaskStore per session)"]
+    Check -->|"enable_bash<br/>& !--classic"| BASH_CHECK{"--insecure?"}
+    BASH_CHECK -->|No| PROBE["Probe kernel sandbox"]
+    PROBE -->|Available| BASH["Bash tools<br/>(kernel sandbox)"]
+    PROBE -->|Unavailable| FAIL["Exit with<br/>setup instructions"]
+    BASH_CHECK -->|Yes| BASH_UNSAFE["Bash tools<br/>(app-level, restricted)"]
 
     FS --> REG[ToolRegistry]
     MEM --> REG
     WEB --> REG
     TASK --> REG
+    BASH --> REG
+    BASH_UNSAFE --> REG
 
     REG --> SUBSET["subset_from_strs()<br/>per agent"]
 ```
+
+When bash tools are available, the built-in search tools (`list_files`, `find_files`,
+`search_files`) are hidden from agents since bash provides equivalent functionality
+via `find`, `grep`, `ls`, etc. The `--classic` flag reverses this: bash tools are
+removed and the built-in search tools are restored.
 
 ---
 
@@ -1640,6 +1697,11 @@ graph TB
 | **Tool result truncation (50KB)** | Prevents context window exhaustion from large tool outputs |
 | **ThinkingBuffer ring (100 lines)** | Bounded memory for thinking content display |
 | **Content cache with dirty flag** | Avoids re-rendering markdown every TUI frame |
+| **Kernel sandbox required by default** | Silent fallback to unsandboxed execution is a security risk; fail-fast with instructions is safer |
+| **Three-tier permission model** | Session tier keeps agents fast on safe commands; per-call gives users control over risky ones; restricted blocks dangerous commands entirely |
+| **Pipeline parsing for permissions** | A pipeline is only as safe as its riskiest command; per-command checks prevent `safe | dangerous` from auto-approving |
+| **--classic over app-level fallback** | App-level sandbox is too restricted (no pipes) to be useful; built-in search tools provide better UX on unsupported platforms |
+| **Linux-only sandbox (hakoniwa)** | User/mount/PID namespaces provide real kernel isolation without root; no cross-platform sandbox offers equivalent guarantees |
 | **Pure Rust (no ncurses)** | Cross-platform, simpler build, better async integration |
 | **Bundled SQLite** | Eliminates runtime dependency, single binary deployment |
 | **Streaming by default** | Better UX with visible progress, lower perceived latency |

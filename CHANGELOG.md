@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Bash Tool
+- Sandboxed bash tool with kernel-level isolation via hakoniwa (Linux user/mount/PID namespaces)
+- Three-tier permission model (session/per-call/restricted) with git subcommand awareness
+- Pipeline parser for per-command permission checks across pipes and shell operators
+- Approval channel with TUI overlay modal and CLI stdin prompt (allow once / allow for session / deny)
+- Mount management: `mount_external` tool for LLM-requested read-only directory access, `/mount` and `/mounts` commands
+- `--classic` flag to disable bash and use built-in search tools (`list_files`, `find_files`, `search_files`)
+- `--insecure` flag to allow bash without kernel sandbox isolation
+- Kernel sandbox required by default; exits with setup instructions if unavailable
+- AppArmor setup script (`scripts/setup-apparmor.sh`) for Ubuntu 24.04+ and containers
+- Cached user namespace probe (AtomicU8) to avoid repeated ~2.5ms container spin-ups
+- Criterion benchmark for sandbox overhead vs native process spawning
+
 #### Tools
 - Filesystem tools: `find_files`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`
 - Enhanced `read_file` with grep filtering, line ranges (start_line/end_line), head/tail shortcuts
