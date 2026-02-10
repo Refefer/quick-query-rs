@@ -6,6 +6,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["sandbox"]
+sandbox = ["dep:hakoniwa"]
+
 [dependencies]
 qq-core = { workspace = true }
 
@@ -28,5 +32,14 @@ scraper = "0.25"
 # For memory tools
 rusqlite = { version = "0.38", features = ["bundled"] }
 
+# For bash sandbox tools (Linux only, optional)
+hakoniwa = { version = "1.3", optional = true }
+
 [dev-dependencies]
 tempfile = "3.19"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "sandbox_overhead"
+harness = false
+required-features = ["sandbox"]

@@ -100,6 +100,8 @@ Options:
       --log-file <FILE>      Write debug log to file (JSON-lines format)
       --no-stream            Disable streaming output
       --no-tui               Disable TUI, use readline
+      --classic              Use built-in search tools instead of bash (no bash tools)
+      --insecure             Allow bash tools without kernel sandbox isolation
       --no-tools             Disable all tools
       --no-agents            Disable all agents
       --minimal              No tools, no agents
@@ -168,6 +170,24 @@ enable_memory = true
 enable_web = true
 ```
 
+### Bash Sandbox (Linux)
+
+The bash tool requires kernel-level isolation via user namespaces. If the sandbox
+is unavailable, `qq` will exit with setup instructions.
+
+On Ubuntu 24.04+ and other distributions with AppArmor restricting unprivileged
+user namespaces, install an AppArmor profile:
+
+    sudo ./scripts/setup-apparmor.sh
+
+This creates an AppArmor profile that grants `qq` permission to create user
+namespaces.
+
+Alternatives when the kernel sandbox is unavailable:
+- `--classic` — disables bash tools entirely, uses built-in `list_files`,
+  `find_files`, and `search_files` tools instead
+- `--insecure` — runs bash tools without sandbox isolation (not recommended)
+
 ### Example Configurations
 
 See the [examples/](examples/) directory:
@@ -225,5 +245,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 | `401 Unauthorized` | Check API key in config or env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
 | Build fails with SQLite error | Ensure C compiler is installed |
 | Garbled TUI output | Use a terminal with ANSI support, or try `--no-tui` |
+| `Kernel sandbox unavailable` at startup | Run `sudo ./scripts/setup-apparmor.sh`, or use `--classic` / `--insecure` |
+| AppArmor restricting user namespaces | Ubuntu 24.04+ restricts unprivileged user namespaces by default. The setup script creates an AppArmor profile for `qq` |
 
 For more issues, see [GitHub Issues](https://github.com/andrew/quick-query-rs/issues).

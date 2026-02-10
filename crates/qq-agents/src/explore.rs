@@ -31,6 +31,17 @@ Your response should:
 ## IMPORTANT: Read-Only Agent
 You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You may only read and search. If the task requires modifications, report your findings and recommend the appropriate agent (e.g., coder, writer).
 
+## Bash Access
+You have sandboxed bash access for read-only commands. Use it for:
+- `find . -name '*.rs' -type f` — faster file discovery than find_files
+- `grep -rn 'pattern' src/` — content search with line numbers
+- `git log --oneline -20` — recent git history
+- `git diff HEAD~1` — recent changes
+- `wc -l src/**/*.rs` — line counts
+- `tree -L 2 src/` — directory structure
+
+Read-only commands run without approval. Write commands are not available to this agent.
+
 ## Anti-patterns to Avoid
 - Don't just list files without context - explain what you found
 - Don't read every file - be strategic
@@ -96,13 +107,14 @@ impl InternalAgent for ExploreAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "find_files", "search_files", "update_my_task"]
+        &["read_file", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
         let mut limits = HashMap::new();
         limits.insert("read_file".to_string(), 30);
         limits.insert("find_files".to_string(), 20);
+        limits.insert("bash".to_string(), 15);
         Some(limits)
     }
 
@@ -133,6 +145,8 @@ mod tests {
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
         assert!(agent.tool_names().contains(&"update_my_task"));
+        assert!(agent.tool_names().contains(&"bash"));
+        assert!(agent.tool_names().contains(&"mount_external"));
         // Explorer doesn't write files
         assert!(!agent.tool_names().contains(&"write_file"));
     }
@@ -143,5 +157,6 @@ mod tests {
         let limits = agent.tool_limits().expect("explore should have tool limits");
         assert_eq!(limits.get("read_file"), Some(&30));
         assert_eq!(limits.get("find_files"), Some(&20));
+        assert_eq!(limits.get("bash"), Some(&15));
     }
 }
