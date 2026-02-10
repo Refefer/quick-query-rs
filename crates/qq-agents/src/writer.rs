@@ -124,13 +124,7 @@ impl InternalAgent for WriterAgent {
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
-        let mut limits = HashMap::new();
-        limits.insert("write_file".to_string(), 10);
-        limits.insert("edit_file".to_string(), 10);
-        limits.insert("copy_file".to_string(), 10);
-        limits.insert("create_directory".to_string(), 5);
-        limits.insert("find_files".to_string(), 10);
-        Some(limits)
+        None
     }
 
     fn max_turns(&self) -> usize {
@@ -169,11 +163,6 @@ mod tests {
     #[test]
     fn test_writer_tool_limits() {
         let agent = WriterAgent::new();
-        let limits = agent.tool_limits().expect("writer should have tool limits");
-        assert_eq!(limits.get("write_file"), Some(&10));
-        assert_eq!(limits.get("edit_file"), Some(&10));
-        assert_eq!(limits.get("copy_file"), Some(&10));
-        assert_eq!(limits.get("create_directory"), Some(&5));
-        assert_eq!(limits.get("find_files"), Some(&10));
+        assert!(agent.tool_limits().is_none());
     }
 }

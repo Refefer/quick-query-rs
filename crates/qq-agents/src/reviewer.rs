@@ -108,11 +108,7 @@ impl InternalAgent for ReviewerAgent {
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
-        let mut limits = HashMap::new();
-        limits.insert("read_file".to_string(), 50);
-        limits.insert("find_files".to_string(), 15);
-        limits.insert("bash".to_string(), 15);
-        Some(limits)
+        None
     }
 
     fn max_turns(&self) -> usize {
@@ -151,9 +147,6 @@ mod tests {
     #[test]
     fn test_reviewer_tool_limits() {
         let agent = ReviewerAgent::new();
-        let limits = agent.tool_limits().expect("reviewer should have tool limits");
-        assert_eq!(limits.get("read_file"), Some(&50));
-        assert_eq!(limits.get("find_files"), Some(&15));
-        assert_eq!(limits.get("bash"), Some(&15));
+        assert!(agent.tool_limits().is_none());
     }
 }

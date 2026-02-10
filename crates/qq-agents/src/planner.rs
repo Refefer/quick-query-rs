@@ -168,9 +168,7 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
-        let mut limits = HashMap::new();
-        limits.insert("read_memory".to_string(), 3);
-        Some(limits)
+        None
     }
 
     fn max_turns(&self) -> usize {
@@ -206,7 +204,6 @@ mod tests {
     #[test]
     fn test_planner_tool_limits() {
         let agent = PlannerAgent::new();
-        let limits = agent.tool_limits().expect("planner should have tool limits");
-        assert_eq!(limits.get("read_memory"), Some(&3));
+        assert!(agent.tool_limits().is_none());
     }
 }

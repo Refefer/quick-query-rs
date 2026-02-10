@@ -109,17 +109,7 @@ impl InternalAgent for CoderAgent {
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
-        let mut limits = HashMap::new();
-        limits.insert("write_file".to_string(), 20);
-        limits.insert("edit_file".to_string(), 50);
-        limits.insert("move_file".to_string(), 20);
-        limits.insert("copy_file".to_string(), 20);
-        limits.insert("create_directory".to_string(), 10);
-        limits.insert("rm_file".to_string(), 20);
-        limits.insert("rm_directory".to_string(), 10);
-        limits.insert("find_files".to_string(), 10);
-        limits.insert("bash".to_string(), 20);
-        Some(limits)
+        None
     }
 
     fn max_turns(&self) -> usize {
@@ -163,15 +153,6 @@ mod tests {
     #[test]
     fn test_coder_tool_limits() {
         let agent = CoderAgent::new();
-        let limits = agent.tool_limits().expect("coder should have tool limits");
-        assert_eq!(limits.get("write_file"), Some(&20));
-        assert_eq!(limits.get("edit_file"), Some(&50));
-        assert_eq!(limits.get("move_file"), Some(&20));
-        assert_eq!(limits.get("copy_file"), Some(&20));
-        assert_eq!(limits.get("create_directory"), Some(&10));
-        assert_eq!(limits.get("rm_file"), Some(&20));
-        assert_eq!(limits.get("rm_directory"), Some(&10));
-        assert_eq!(limits.get("find_files"), Some(&10));
-        assert_eq!(limits.get("bash"), Some(&20));
+        assert!(agent.tool_limits().is_none());
     }
 }

@@ -111,11 +111,7 @@ impl InternalAgent for ExploreAgent {
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
-        let mut limits = HashMap::new();
-        limits.insert("read_file".to_string(), 30);
-        limits.insert("find_files".to_string(), 20);
-        limits.insert("bash".to_string(), 15);
-        Some(limits)
+        None
     }
 
     fn max_turns(&self) -> usize {
@@ -154,9 +150,6 @@ mod tests {
     #[test]
     fn test_explore_tool_limits() {
         let agent = ExploreAgent::new();
-        let limits = agent.tool_limits().expect("explore should have tool limits");
-        assert_eq!(limits.get("read_file"), Some(&30));
-        assert_eq!(limits.get("find_files"), Some(&20));
-        assert_eq!(limits.get("bash"), Some(&15));
+        assert!(agent.tool_limits().is_none());
     }
 }
