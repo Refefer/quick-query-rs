@@ -170,23 +170,48 @@ enable_memory = true
 enable_web = true
 ```
 
-### Bash Sandbox (Linux)
+### Bash Sandbox
 
-The bash tool requires kernel-level isolation via user namespaces. If the sandbox
-is unavailable, `qq` will exit with setup instructions.
+Agents have access to a sandboxed bash tool that runs commands inside a
+kernel-level container (Linux user/mount/PID namespaces via
+[hakoniwa](https://crates.io/crates/hakoniwa)). The project root is mounted
+read-write; everything else is read-only or blocked at the kernel level.
 
-On Ubuntu 24.04+ and other distributions with AppArmor restricting unprivileged
-user namespaces, install an AppArmor profile:
+If the sandbox probe fails at startup, `qq` exits with setup instructions
+rather than silently degrading.
+
+**Flags:**
+
+| Flag | Effect |
+|------|--------|
+| *(default)* | Requires a working kernel sandbox. Exits if unavailable. |
+| `--classic` | Disables bash tools entirely. Restores built-in `list_files`, `find_files`, and `search_files` tools. |
+| `--insecure` | Allows bash tools without kernel sandbox isolation. Simple commands only (no pipes or redirects). Not recommended for untrusted models. |
+
+The two flags are mutually exclusive.
+
+**AppArmor (Ubuntu 24.04+ / containers):**
+
+Distributions with `apparmor_restrict_unprivileged_userns=1` block unprivileged
+user namespace creation, which the sandbox requires. Run the setup script to
+create an AppArmor profile granting `qq` the `userns` permission:
 
     sudo ./scripts/setup-apparmor.sh
 
-This creates an AppArmor profile that grants `qq` permission to create user
-namespaces.
+This is common in Ubuntu 24.04+, Debian trixie, and container images based on
+these distros.
 
-Alternatives when the kernel sandbox is unavailable:
-- `--classic` — disables bash tools entirely, uses built-in `list_files`,
-  `find_files`, and `search_files` tools instead
-- `--insecure` — runs bash tools without sandbox isolation (not recommended)
+**Platform notes:**
+
+| Platform | Sandbox support | Notes |
+|----------|----------------|-------|
+| Linux (native) | Full | Works out of the box on most distros. May need AppArmor setup (see above). |
+| WSL2 | Full | Real Linux kernel — user namespaces typically enabled by default. |
+| WSL1 | None | Syscall translation only, no namespace support. Use `--classic`. |
+| macOS | None | hakoniwa is Linux-only. Build with `cargo install --path crates/qq-cli --no-default-features` and use `--classic`. |
+
+On platforms without sandbox support, `--classic` is the recommended fallback —
+agents use the built-in filesystem search tools instead of bash.
 
 ### Example Configurations
 
@@ -245,7 +270,8 @@ MIT License — see [LICENSE](LICENSE) for details.
 | `401 Unauthorized` | Check API key in config or env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
 | Build fails with SQLite error | Ensure C compiler is installed |
 | Garbled TUI output | Use a terminal with ANSI support, or try `--no-tui` |
-| `Kernel sandbox unavailable` at startup | Run `sudo ./scripts/setup-apparmor.sh`, or use `--classic` / `--insecure` |
-| AppArmor restricting user namespaces | Ubuntu 24.04+ restricts unprivileged user namespaces by default. The setup script creates an AppArmor profile for `qq` |
+| `Kernel sandbox unavailable` at startup | Run `sudo ./scripts/setup-apparmor.sh` (AppArmor), or use `--classic` / `--insecure` |
+| `Kernel sandbox unavailable` on macOS | Build with `--no-default-features` and run with `--classic` |
+| `Kernel sandbox unavailable` on WSL1 | Use `--classic` (WSL2 works out of the box) |
 
 For more issues, see [GitHub Issues](https://github.com/andrew/quick-query-rs/issues).
