@@ -258,8 +258,9 @@ Build a fully static binary with zero dynamic library dependencies using musl:
 rustup target add x86_64-unknown-linux-musl
 sudo apt install musl-tools   # provides musl-gcc
 
-# Build
-cargo build --release --target x86_64-unknown-linux-musl
+# Build (uses rustls instead of OpenSSL for pure-Rust TLS)
+cargo build --release --target x86_64-unknown-linux-musl \
+  -p qq-cli --no-default-features --features static-tls
 
 # Verify — should say "statically linked"
 file target/x86_64-unknown-linux-musl/release/qq
