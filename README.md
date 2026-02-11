@@ -208,7 +208,7 @@ these distros.
 | Linux (native) | Full | Works out of the box on most distros. May need AppArmor setup (see above). |
 | WSL2 | Full | Real Linux kernel — user namespaces typically enabled by default. |
 | WSL1 | None | Syscall translation only, no namespace support. Use `--classic`. |
-| macOS | None | hakoniwa is Linux-only. Build with `cargo install --path crates/qq-cli --no-default-features` and use `--classic`. |
+| macOS | None | hakoniwa is Linux-only. Build with `cargo install --path crates/qq-cli --no-default-features --features native-tls` and use `--classic`. |
 
 On platforms without sandbox support, `--classic` is the recommended fallback —
 agents use the built-in filesystem search tools instead of bash.
@@ -235,40 +235,65 @@ See the [examples/](examples/) directory:
 
 ### Build
 
+There are three ways to build `qq`, depending on how you plan to use it:
+
+#### Standard build (Linux / macOS)
+
+Uses the system TLS stack (OpenSSL on Linux, Security.framework on macOS) and
+the system CA certificate store. Requires OpenSSL dev headers on Linux.
+
 ```bash
-# Debug build
-cargo build
-
-# Release build
-cargo build --release
-
-# Run tests
-cargo test --workspace
-
-# Generate docs
-cargo doc --workspace --no-deps --open
+cargo install --path crates/qq-cli
 ```
 
-### Static Binary (Linux)
+#### macOS without sandbox
 
-Build a fully static binary with zero dynamic library dependencies using musl:
+The kernel sandbox is Linux-only. On macOS, disable it and use `--classic` at
+runtime for the built-in filesystem tools instead of bash.
+
+```bash
+cargo install --path crates/qq-cli --no-default-features --features native-tls
+# then run with: qq --classic ...
+```
+
+#### Static binary (Linux x86_64)
+
+Produces a single binary with **zero dynamic dependencies** — copy it to any
+Linux x86_64 machine and run it. Uses rustls (pure Rust TLS) with bundled
+Mozilla CA roots instead of OpenSSL.
 
 ```bash
 # One-time setup
 rustup target add x86_64-unknown-linux-musl
 sudo apt install musl-tools   # provides musl-gcc
 
-# Build (uses rustls instead of OpenSSL for pure-Rust TLS)
+# Build
 cargo build --release --target x86_64-unknown-linux-musl \
   -p qq-cli --no-default-features --features static-tls
 
+# Binary is at target/x86_64-unknown-linux-musl/release/qq
 # Verify — should say "statically linked"
 file target/x86_64-unknown-linux-musl/release/qq
 ```
 
-The resulting binary can be copied to any Linux x86_64 machine and run without
-installing anything. TLS is handled by rustls (pure Rust) with bundled Mozilla
-CA roots — no OpenSSL or system CA store required.
+#### Build comparison
+
+| Command | TLS | Certificates | Dynamic deps | Platforms |
+|---------|-----|--------------|--------------|-----------|
+| `cargo install --path crates/qq-cli` | native-tls (OpenSSL / Security.framework) | System CA store | Yes (libc, libssl) | Linux, macOS |
+| `cargo build --release --target x86_64-unknown-linux-musl -p qq-cli --no-default-features --features static-tls` | rustls (pure Rust) | Bundled Mozilla roots | None | Linux x86_64 |
+
+Standard builds use the OS certificate store, which supports corporate CAs and
+OS-managed certificates. The static build bundles its own CA roots — ideal for
+deployment to servers and containers but won't trust custom corporate CAs.
+
+#### Development
+
+```bash
+cargo build              # debug build
+cargo test --workspace   # run tests
+cargo doc --workspace --no-deps --open  # generate docs
+```
 
 ## Contributing
 
@@ -293,7 +318,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 | Build fails with SQLite error | Ensure C compiler is installed |
 | Garbled TUI output | Use a terminal with ANSI support, or try `--no-tui` |
 | `Kernel sandbox unavailable` at startup | Run `sudo ./scripts/setup-apparmor.sh` (AppArmor), or use `--classic` / `--insecure` |
-| `Kernel sandbox unavailable` on macOS | Build with `--no-default-features` and run with `--classic` |
+| `Kernel sandbox unavailable` on macOS | Build with `--no-default-features --features native-tls` and run with `--classic` |
 | `Kernel sandbox unavailable` on WSL1 | Use `--classic` (WSL2 works out of the box) |
 
 For more issues, see [GitHub Issues](https://github.com/andrew/quick-query-rs/issues).
