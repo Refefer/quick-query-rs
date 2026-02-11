@@ -166,8 +166,12 @@ pub fn execute_kernel(
     // Virtual filesystems
     container
         .procfsmount("/proc")
-        .devfsmount("/dev")
-        .tmpfsmount("/tmp");
+        .devfsmount("/dev");
+
+    // Bind-mount the per-instance /tmp directory (persists across commands)
+    let tmp_path = mounts.tmp_dir();
+    let tmp_str = tmp_path.to_str().ok_or("Instance /tmp path is not valid UTF-8")?;
+    container.bindmount_rw(tmp_str, "/tmp");
 
     // Project root: read-write
     container.bindmount_rw(root_str, root_str);
@@ -185,6 +189,7 @@ pub fn execute_kernel(
         .arg(command)
         .current_dir(root_str)
         .env("HOME", "/tmp")
+        .env("TMPDIR", "/tmp")
         .env("TERM", "dumb")
         .env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -240,7 +245,9 @@ async fn execute_app_level(
     let mut cmd = tokio::process::Command::new(&program_path);
     cmd.args(args);
     cmd.current_dir(mounts.project_root());
-    cmd.env("HOME", "/tmp");
+    let tmp_str = mounts.tmp_dir().to_str().unwrap_or("/tmp");
+    cmd.env("HOME", tmp_str);
+    cmd.env("TMPDIR", tmp_str);
     cmd.env("TERM", "dumb");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("LC_ALL", "C.UTF-8");
@@ -322,7 +329,7 @@ mod tests {
     async fn test_app_level_simple() {
         let mounts = Arc::new(SandboxMounts::new(
             std::env::current_dir().unwrap(),
-        ));
+        ).unwrap());
         let result = execute_app_level("echo hello", &mounts, 10).await.unwrap();
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.exit_code, 0);
@@ -332,7 +339,7 @@ mod tests {
     async fn test_app_level_rejects_pipes() {
         let mounts = Arc::new(SandboxMounts::new(
             std::env::current_dir().unwrap(),
-        ));
+        ).unwrap());
         let result = execute_app_level("echo hello | cat", &mounts, 10).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
@@ -348,7 +355,7 @@ mod tests {
                 eprintln!("Skipping: user namespaces not available");
                 return;
             }
-            let mounts = SandboxMounts::new(std::env::current_dir().unwrap());
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let result = execute_kernel("echo hello", &mounts, 10).unwrap();
             assert_eq!(result.stdout.trim(), "hello");
             assert_eq!(result.exit_code, 0);
@@ -360,7 +367,7 @@ mod tests {
                 eprintln!("Skipping: user namespaces not available");
                 return;
             }
-            let mounts = SandboxMounts::new(std::env::current_dir().unwrap());
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let result = execute_kernel("echo hello | cat", &mounts, 10).unwrap();
             assert_eq!(result.stdout.trim(), "hello");
         }
@@ -371,7 +378,7 @@ mod tests {
                 eprintln!("Skipping: user namespaces not available");
                 return;
             }
-            let mounts = SandboxMounts::new(std::env::current_dir().unwrap());
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let result = execute_kernel(
                 "echo test > /tmp/test.txt && cat /tmp/test.txt",
                 &mounts,
@@ -382,12 +389,27 @@ mod tests {
         }
 
         #[test]
+        fn test_kernel_tmp_persistence() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            // Write in first command
+            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10).unwrap();
+            assert_eq!(r1.exit_code, 0);
+            // Read in second, separate command
+            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10).unwrap();
+            assert_eq!(r2.stdout.trim(), "persist");
+        }
+
+        #[test]
         fn test_kernel_glob() {
             if !probe_user_namespaces() {
                 eprintln!("Skipping: user namespaces not available");
                 return;
             }
-            let mounts = SandboxMounts::new(std::env::current_dir().unwrap());
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10).unwrap();
             // Should either list toml files or say no-match
             assert!(!result.stdout.is_empty());

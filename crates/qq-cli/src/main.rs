@@ -18,6 +18,7 @@ mod debug_log;
 mod event_bus;
 mod execution_context;
 mod markdown;
+mod setup;
 mod tui;
 
 pub use event_bus::AgentEventBus;
@@ -160,6 +161,8 @@ enum Commands {
     Profiles,
     /// Show current configuration
     Config,
+    /// Initialize configuration files in ~/.config/qq
+    Setup,
 }
 
 #[tokio::main]
@@ -208,7 +211,12 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    // Load configuration
+    // Handle setup before config is required
+    if matches!(&cli.command, Some(Commands::Setup)) {
+        return setup::run();
+    }
+
+    // Load configuration (required for all other commands)
     let config = Config::load()?;
 
     match &cli.command {
@@ -221,6 +229,7 @@ async fn main() -> Result<()> {
         Some(Commands::Config) => {
             show_config(&config)
         }
+        Some(Commands::Setup) => unreachable!(),
         None => {
             if let Some(prompt) = &cli.prompt {
                 completion_mode(&cli, &config, prompt).await

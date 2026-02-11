@@ -263,7 +263,8 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
     let mut desc = format!(
         "Execute shell commands in a sandboxed environment.\n\n\
          Sandbox mode: {mode}\n\
-         Project root: {root} (read-write)\n"
+         Project root: {root} (read-write)\n\
+         /tmp: writable scratch space (persists across commands, session-scoped)\n"
     );
 
     let extra = mounts.list_extra();
@@ -288,7 +289,10 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
             - Simple commands only (e.g., 'ls -la', 'grep pattern file')\n");
     }
 
-    desc.push_str("\nPermission tiers:\n\
+    desc.push_str("\nScratch space (/tmp):\n\
+        Use /tmp for scripts, intermediate results, and working notes — it persists across commands.\n\
+        Prefer writing scripts to /tmp over inlining them: echo 'script' > /tmp/check.sh && sh /tmp/check.sh\n\n\
+        Permission tiers:\n\
         - Session (run immediately): ls, cat, grep, find, git log, git diff, git status, etc.\n\
         - Per-call (requires user approval): cargo, npm, git commit, rm, mv, python, etc.\n\
         - Restricted (always blocked): sudo, curl, wget, ssh, dd, kill, etc.\n\n\

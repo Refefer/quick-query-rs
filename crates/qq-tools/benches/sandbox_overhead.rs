@@ -72,7 +72,7 @@ fn bench_sandbox(c: &mut Criterion) {
     use qq_tools::bash::sandbox::execute_kernel;
 
     let project_root = std::env::current_dir().expect("failed to get cwd");
-    let mounts = SandboxMounts::new(project_root);
+    let mounts = SandboxMounts::new(project_root).expect("failed to create instance tmp dir");
 
     let mut group = c.benchmark_group("sandbox");
 

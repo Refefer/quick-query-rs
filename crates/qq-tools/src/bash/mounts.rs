@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use tempfile::TempDir;
 
 use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
 
@@ -22,18 +23,26 @@ pub struct MountPoint {
 pub struct SandboxMounts {
     project_root: PathBuf,
     extra: RwLock<Vec<MountPoint>>,
+    tmp_dir: TempDir,
 }
 
 impl SandboxMounts {
-    pub fn new(project_root: PathBuf) -> Self {
-        Self {
+    pub fn new(project_root: PathBuf) -> Result<Self, std::io::Error> {
+        let tmp_dir = TempDir::with_prefix("qq-")?;
+        Ok(Self {
             project_root,
             extra: RwLock::new(Vec::new()),
-        }
+            tmp_dir,
+        })
     }
 
     pub fn project_root(&self) -> &PathBuf {
         &self.project_root
+    }
+
+    /// Per-instance scratch directory that persists across bash commands.
+    pub fn tmp_dir(&self) -> &Path {
+        self.tmp_dir.path()
     }
 
     pub fn add_mount(&self, mount: MountPoint) {
@@ -64,6 +73,10 @@ impl SandboxMounts {
         lines.push(format!(
             "  {} (read-write, project root)",
             self.project_root.display()
+        ));
+        lines.push(format!(
+            "  /tmp -> {} (read-write, per-session scratch)",
+            self.tmp_dir.path().display()
         ));
         if let Ok(extra) = self.extra.read() {
             for mount in extra.iter() {

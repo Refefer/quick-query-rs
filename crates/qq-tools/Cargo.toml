@@ -35,8 +35,10 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 # For bash sandbox tools (Linux only, optional)
 hakoniwa = { version = "1.3", optional = true }
 
-[dev-dependencies]
+# For per-instance /tmp directory
 tempfile = "3.19"
+
+[dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
