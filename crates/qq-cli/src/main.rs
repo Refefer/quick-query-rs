@@ -704,6 +704,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             bash_mounts.clone(),
             bash_approval_rx,
             bash_permissions.clone(),
+            task_store.clone(),
         )
         .await
     } else {
@@ -723,6 +724,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             bash_mounts,
             bash_approval_rx,
             bash_permissions,
+            task_store,
         )
         .await
     }

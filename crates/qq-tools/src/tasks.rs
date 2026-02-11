@@ -153,6 +153,13 @@ impl TaskStore {
 
         Some(lines.join("\n"))
     }
+
+    /// Clear all tasks and reset the ID counter.
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.tasks.clear();
+        inner.next_id = 1;
+    }
 }
 
 impl Default for TaskStore {
@@ -1246,5 +1253,33 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_clear_store() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1"}))
+            .await
+            .unwrap();
+        create
+            .execute(serde_json::json!({"title": "Task 2"}))
+            .await
+            .unwrap();
+
+        assert!(store.format_board().is_some());
+
+        store.clear();
+
+        assert!(store.format_board().is_none());
+
+        // Next task should get id "1" again
+        let result = create
+            .execute(serde_json::json!({"title": "After clear"}))
+            .await
+            .unwrap();
+        assert!(result.content.contains("\"id\": \"1\""));
     }
 }

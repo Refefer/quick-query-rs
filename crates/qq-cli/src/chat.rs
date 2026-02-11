@@ -105,6 +105,7 @@ impl ChatSession {
 
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.compaction_count = 0;
     }
 
     pub fn message_count(&self) -> usize {
@@ -412,8 +413,8 @@ fn print_help() {
 Chat Commands:
   /help, /?           Show this help message
   /quit, /exit        Exit chat mode
-  /clear, /c          Clear conversation history
-  /reset              Clear conversation + all agent memory
+  /clear, /c          Clear conversation + reset counters
+  /reset              Full reset (clear + agent memory + tasks)
   /history, /h        Show message count
   /memory, /mem       Show memory usage diagnostics
   /tools, /t          List available tools
@@ -646,6 +647,7 @@ pub async fn run_chat(
     bash_mounts: Option<Arc<qq_tools::SandboxMounts>>,
     bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
     _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
+    task_store: Option<Arc<qq_tools::TaskStore>>,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -738,7 +740,10 @@ pub async fn run_chat(
                     ChatCommand::Reset => {
                         session.clear();
                         agent_memory.clear_all().await;
-                        println!("Session reset (conversation + agent memory cleared).\n");
+                        if let Some(ref ts) = task_store {
+                            ts.clear();
+                        }
+                        println!("Session reset (conversation + agent memory + tasks cleared).\n");
                     }
                     ChatCommand::History => {
                         println!(

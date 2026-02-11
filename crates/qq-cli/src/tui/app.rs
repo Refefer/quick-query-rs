@@ -762,6 +762,7 @@ pub async fn run_tui(
     bash_mounts: Option<Arc<qq_tools::SandboxMounts>>,
     mut bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
     _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
+    task_store: Option<Arc<qq_tools::TaskStore>>,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -957,11 +958,23 @@ pub async fn run_tui(
                                                 app.tool_notifications.clear();
                                                 app.content_dirty = true;
                                                 app.content_cache = None;
+                                                app.prompt_tokens = 0;
+                                                app.completion_tokens = 0;
+                                                app.tool_iteration = 0;
+                                                app.session_input_bytes = 0;
+                                                app.session_output_bytes = 0;
+                                                app.agent_progress = None;
+                                                app.agent_input_bytes = 0;
+                                                app.agent_output_bytes = 0;
+                                                app.scroll = ScrollState::default();
                                                 app.status_message = Some("Cleared".to_string());
                                             }
                                             TuiCommand::Reset => {
                                                 session.clear();
                                                 agent_memory.clear_all().await;
+                                                if let Some(ref ts) = task_store {
+                                                    ts.clear();
+                                                }
                                                 app.content.clear();
                                                 app.thinking_content.clear();
                                                 app.tool_notifications.clear();
@@ -969,6 +982,13 @@ pub async fn run_tui(
                                                 app.content_cache = None;
                                                 app.prompt_tokens = 0;
                                                 app.completion_tokens = 0;
+                                                app.tool_iteration = 0;
+                                                app.session_input_bytes = 0;
+                                                app.session_output_bytes = 0;
+                                                app.agent_progress = None;
+                                                app.agent_input_bytes = 0;
+                                                app.agent_output_bytes = 0;
+                                                app.scroll = ScrollState::default();
                                                 app.status_message = Some("Session reset".to_string());
                                             }
                                             TuiCommand::Help => {

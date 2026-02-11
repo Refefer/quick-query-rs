@@ -127,7 +127,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     // Create centered overlay
     let overlay_width = 60u16.min(area.width.saturating_sub(4));
-    let overlay_height = 27u16.min(area.height.saturating_sub(4));
+    let overlay_height = 31u16.min(area.height.saturating_sub(4));
 
     let x = (area.width.saturating_sub(overlay_width)) / 2;
     let y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -155,10 +155,14 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from(Span::styled("Commands:", Style::default().fg(Color::Cyan))),
         Line::from("  /help        Show this help"),
         Line::from("  /quit        Exit the application"),
-        Line::from("  /clear       Clear conversation"),
-        Line::from("  /reset       Reset session (clear + reset tokens)"),
+        Line::from("  /clear       Clear conversation + counters"),
+        Line::from("  /reset       Full reset (clear + agent memory + tasks)"),
+        Line::from("  /history     Show message count"),
+        Line::from("  /memory      Show memory diagnostics"),
         Line::from("  /tools       List available tools"),
         Line::from("  /agents      List available agents"),
+        Line::from("  /mount <p>   Add read-only bash sandbox mount"),
+        Line::from("  /mounts      List bash sandbox mounts"),
         Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Cyan))),
         Line::from("  Ctrl+Y       Toggle select mode (for copy)"),
