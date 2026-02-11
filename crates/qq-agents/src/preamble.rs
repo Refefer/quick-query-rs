@@ -117,10 +117,22 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
              run without approval. Write commands (cargo build, git commit, npm, rm, etc.) require user approval.\n\
              Network access is blocked.\n\
              \n\
-             /tmp is a writable scratch space that persists across bash commands in this session. Use it for:\n\
-             - Intermediate results: `find . -name '*.rs' > /tmp/files.txt` then `wc -l < /tmp/files.txt`\n\
-             - Scripts: write to /tmp/check.sh then `sh /tmp/check.sh` (avoids inline escaping issues)\n\
-             - Working notes: save output to /tmp rather than inlining large results"
+             ### /tmp Scratch Space\n\
+             /tmp is a writable scratch space shared across all your tools in this session. **Use it liberally\n\
+             for complex tasks** — your context window is finite and can lose details over long sessions,\n\
+             but files in /tmp persist reliably for the entire session.\n\
+             \n\
+             Recommended uses:\n\
+             - **Intermediate results**: `find . -name '*.rs' > /tmp/files.txt` then process the list\n\
+             - **Scripts**: Write multi-step logic to /tmp/script.sh and run it — avoids inline escaping\n\
+               issues and keeps complex operations reproducible\n\
+             - **Working notes**: Save command output, analysis results, or gathered data to /tmp files\n\
+               rather than trying to hold it all in context\n\
+             - **Staged changes**: Draft file contents in /tmp before writing to the project\n\
+             - **Diff/comparison**: Save snapshots to /tmp for before/after comparison\n\
+             \n\
+             Rule of thumb: if a task involves more than 2-3 intermediate steps, use /tmp files to track\n\
+             state between steps rather than relying on context alone."
                 .to_string(),
         );
     }
@@ -129,15 +141,18 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
     if ctx.is_read_only {
         sections.push(
             "### CRITICAL: Read-Only Agent\n\
-             You are a READ-ONLY agent. You must NEVER:\n\
-             - Write, modify, create, move, or delete any files or directories\n\
-             - Run write commands via bash (no cargo build, git commit, npm install, rm, mv, tee, etc.)\n\
-             - Write to memory stores\n\
+             You are a READ-ONLY agent. You must NEVER modify project files or directories.\n\
+             - No writing, creating, moving, or deleting project files\n\
+             - No write commands that affect the project (no cargo build, git commit, npm install, rm, mv, etc.)\n\
+             - No writing to memory stores\n\
              \n\
              You may ONLY: read files, search content, and run read-only bash commands (grep, find, cat, \
              git log, git diff, git blame, wc, tree, head, tail, ls, etc.).\n\
              \n\
-             If your task requires modifications, report your findings and recommend the appropriate agent."
+             **Exception: /tmp is allowed.** You CAN write to /tmp for scratch work — saving intermediate\n\
+             results, command output, or working notes. This does not modify the project.\n\
+             \n\
+             If your task requires project modifications, report your findings and recommend the appropriate agent."
                 .to_string(),
         );
     }

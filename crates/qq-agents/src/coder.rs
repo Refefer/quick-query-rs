@@ -21,6 +21,9 @@ You implement features like "Add input validation to the login form" or "Refacto
 - **Follow patterns**: Match existing style, naming, error handling approaches
 - **Minimal changes**: Do exactly what's needed, no more
 - **Incremental**: For complex tasks, build up in logical steps
+- **Use /tmp for complex work**: For multi-step tasks, save plans, intermediate results, and drafted
+  code to /tmp files. Context can degrade over long sessions — /tmp files persist reliably.
+  Example: gather info into /tmp/analysis.txt, draft code in /tmp/draft.rs, then write the final version.
 
 ## Output Expectations
 Your response should:
