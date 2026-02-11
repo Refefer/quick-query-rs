@@ -18,6 +18,9 @@ pub struct FileSystemConfig {
     /// Whether to include search/find tools (list_files, find_files, search_files).
     /// When a kernel sandbox is available, these are redundant with bash.
     pub include_search_tools: bool,
+    /// Per-instance sandbox /tmp directory. When set, `/tmp/*` paths are
+    /// remapped here, and file operations within it are permitted.
+    sandbox_tmp: Option<PathBuf>,
 }
 
 impl Default for FileSystemConfig {
@@ -26,6 +29,7 @@ impl Default for FileSystemConfig {
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             allow_write: false,
             include_search_tools: true,
+            sandbox_tmp: None,
         }
     }
 }
@@ -36,6 +40,7 @@ impl FileSystemConfig {
             root: root.into(),
             allow_write: false,
             include_search_tools: true,
+            sandbox_tmp: None,
         }
     }
 
@@ -49,11 +54,42 @@ impl FileSystemConfig {
         self
     }
 
-    /// Resolve and validate a path is within the root
+    pub fn with_sandbox_tmp(mut self, tmp: PathBuf) -> Self {
+        self.sandbox_tmp = Some(tmp);
+        self
+    }
+
+    /// Remap `/tmp/...` paths to the sandbox tmp dir when configured.
+    /// Returns the original path unchanged if no sandbox_tmp or path doesn't start with /tmp.
+    fn remap_tmp(&self, path: &Path) -> PathBuf {
+        if let Some(ref stmp) = self.sandbox_tmp {
+            if let Ok(rest) = path.strip_prefix("/tmp") {
+                return stmp.join(rest);
+            }
+        }
+        path.to_path_buf()
+    }
+
+    /// Check whether a canonicalized path falls within any allowed root.
+    fn is_within_allowed_roots(&self, canonical: &Path) -> bool {
+        let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        if canonical.starts_with(&canonical_root) {
+            return true;
+        }
+        if let Some(ref stmp) = self.sandbox_tmp {
+            let canonical_tmp = stmp.canonicalize().unwrap_or_else(|_| stmp.clone());
+            if canonical.starts_with(&canonical_tmp) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Resolve and validate a path is within the root (or sandbox tmp)
     pub fn resolve_path(&self, path: &str) -> Result<PathBuf, Error> {
         let requested = Path::new(path);
         let resolved = if requested.is_absolute() {
-            requested.to_path_buf()
+            self.remap_tmp(requested)
         } else {
             self.root.join(requested)
         };
@@ -71,9 +107,8 @@ impl FileSystemConfig {
             })
             .map_err(|e| Error::tool("filesystem", format!("Invalid path '{}': {}", path, e)))?;
 
-        // Security check: ensure path is within root
-        let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
-        if !canonical.starts_with(&canonical_root) {
+        // Security check: ensure path is within allowed roots
+        if !self.is_within_allowed_roots(&canonical) {
             return Err(Error::tool(
                 "filesystem",
                 format!("Path '{}' is outside allowed root", path),
@@ -95,7 +130,7 @@ impl FileSystemConfig {
     fn normalize_path_for_creation(&self, path: &str) -> Result<PathBuf, Error> {
         let requested = Path::new(path);
         let joined = if requested.is_absolute() {
-            requested.to_path_buf()
+            self.remap_tmp(requested)
         } else {
             self.root.join(requested)
         };
@@ -112,9 +147,14 @@ impl FileSystemConfig {
             }
         }
 
-        // Security check
+        // Security check: allow project root and sandbox tmp
         let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
-        if !normalized.starts_with(&canonical_root) {
+        let in_root = normalized.starts_with(&canonical_root);
+        let in_tmp = self.sandbox_tmp.as_ref().map_or(false, |stmp| {
+            let canonical_tmp = stmp.canonicalize().unwrap_or_else(|_| stmp.clone());
+            normalized.starts_with(&canonical_tmp)
+        });
+        if !in_root && !in_tmp {
             return Err(Error::tool(
                 "filesystem",
                 format!("Path '{}' is outside allowed root", path),
@@ -1059,18 +1099,17 @@ impl Tool for EditFileTool {
             // Allow non-existent files if create_if_missing is true
             let requested = Path::new(&args.path);
             let resolved = if requested.is_absolute() {
-                requested.to_path_buf()
+                self.config.remap_tmp(requested)
             } else {
                 self.config.root.join(requested)
             };
 
-            // Validate parent exists and is within root
+            // Validate parent exists and is within allowed roots
             if let Some(parent) = resolved.parent() {
                 let canonical_parent = parent.canonicalize().map_err(|e| {
                     Error::tool("edit_file", format!("Parent directory doesn't exist: {}", e))
                 })?;
-                let canonical_root = self.config.root.canonicalize().unwrap_or_else(|_| self.config.root.clone());
-                if !canonical_parent.starts_with(&canonical_root) {
+                if !self.config.is_within_allowed_roots(&canonical_parent) {
                     return Err(Error::tool(
                         "edit_file",
                         format!("Path '{}' is outside allowed root", args.path),
@@ -3245,5 +3284,157 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Sandbox Tmp Tests
+    // =========================================================================
+
+    #[test]
+    fn test_resolve_path_sandbox_tmp_remaps() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+        std::fs::write(sandbox_tmp.path().join("foo.txt"), "hello").unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        let resolved = config.resolve_path("/tmp/foo.txt").unwrap();
+        assert_eq!(resolved, sandbox_tmp.path().join("foo.txt").canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_path_sandbox_tmp_traversal_rejected() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        // /tmp/../etc/passwd remaps to <sandbox_tmp>/../etc/passwd which
+        // canonicalizes outside sandbox_tmp — must be rejected
+        let result = config.resolve_path("/tmp/../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_sandbox_tmp_tmpevil_rejected() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        // /tmpevil should NOT match /tmp prefix (strip_prefix checks components)
+        let result = config.resolve_path("/tmpevil");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_sandbox_tmp_project_root_still_works() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+        std::fs::write(root.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        let resolved = config.resolve_path("main.rs").unwrap();
+        assert_eq!(resolved, root.path().join("main.rs").canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_path_sandbox_tmp_outside_both_rejected() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        let result = config.resolve_path("/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_path_sandbox_tmp_remaps() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        let normalized = config.normalize_path_for_creation("/tmp/new_file.txt").unwrap();
+        let expected = sandbox_tmp.path().canonicalize().unwrap().join("new_file.txt");
+        assert_eq!(normalized, expected);
+    }
+
+    #[test]
+    fn test_normalize_path_sandbox_tmp_traversal_rejected() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+
+        let result = config.normalize_path_for_creation("/tmp/../../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_no_sandbox_tmp_rejects_tmp() {
+        let root = TempDir::new().unwrap();
+
+        // Without sandbox_tmp, /tmp paths should be rejected
+        let config = FileSystemConfig::new(root.path());
+
+        let result = config.resolve_path("/tmp/foo.txt");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_sandbox_tmp() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_write(true)
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+        let tool = WriteFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "/tmp/test.txt",
+                "content": "sandbox content"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(sandbox_tmp.path().join("test.txt")).unwrap();
+        assert_eq!(written, "sandbox content");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_create_in_sandbox_tmp() {
+        let root = TempDir::new().unwrap();
+        let sandbox_tmp = TempDir::new().unwrap();
+
+        let config = FileSystemConfig::new(root.path())
+            .with_write(true)
+            .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
+        let tool = EditFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "/tmp/new.txt",
+                "create_if_missing": true,
+                "edits": [{"type": "insert", "line": 0, "content": "hello sandbox"}]
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(sandbox_tmp.path().join("new.txt")).unwrap();
+        assert!(written.contains("hello sandbox"));
     }
 }

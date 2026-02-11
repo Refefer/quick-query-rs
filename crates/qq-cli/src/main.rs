@@ -294,11 +294,45 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
         }
     }
 
-    // Filesystem tools — include search tools only when bash is not available
+    // Create sandbox mounts early so we can share tmp_dir with filesystem tools.
+    // Mounts are only created when bash is enabled with kernel sandbox (not --insecure).
+    let mounts = if use_bash {
+        if insecure {
+            eprintln!("Warning: Running bash tools without kernel sandbox isolation (--insecure).");
+        }
+
+        let m = Arc::new(qq_tools::SandboxMounts::new(root.clone())
+            .context("Failed to create per-instance /tmp directory")?);
+
+        // Add configured extra mounts
+        for mount_path in &config.tools.bash_mounts {
+            let expanded = expand_path(mount_path);
+            if expanded.exists() && expanded.is_dir() {
+                m.add_mount(qq_tools::MountPoint {
+                    host_path: expanded,
+                    label: None,
+                });
+            } else {
+                tracing::warn!(path = %mount_path, "Bash mount path does not exist or is not a directory");
+            }
+        }
+
+        Some(m)
+    } else {
+        None
+    };
+
+    // Filesystem tools — include search tools only when bash is not available.
+    // When kernel sandbox is active (not --insecure), share its /tmp with file tools.
     if config.tools.enable_filesystem {
-        let fs_config = qq_tools::FileSystemConfig::new(&root)
+        let mut fs_config = qq_tools::FileSystemConfig::new(&root)
             .with_write(config.tools.allow_write)
             .with_search_tools(!use_bash);
+        if !insecure {
+            if let Some(ref m) = mounts {
+                fs_config = fs_config.with_sandbox_tmp(m.tmp_dir().to_path_buf());
+            }
+        }
         for tool in qq_tools::create_filesystem_tools_arc(fs_config) {
             registry.register(tool);
         }
@@ -327,27 +361,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
     }
 
     // Bash tools — only when not in classic mode and config enables bash
-    let bash_resources = if use_bash {
-        if insecure {
-            eprintln!("Warning: Running bash tools without kernel sandbox isolation (--insecure).");
-        }
-
-        let mounts = Arc::new(qq_tools::SandboxMounts::new(root.clone())
-            .context("Failed to create per-instance /tmp directory")?);
-
-        // Add configured extra mounts
-        for mount_path in &config.tools.bash_mounts {
-            let expanded = expand_path(mount_path);
-            if expanded.exists() && expanded.is_dir() {
-                mounts.add_mount(qq_tools::MountPoint {
-                    host_path: expanded,
-                    label: None,
-                });
-            } else {
-                tracing::warn!(path = %mount_path, "Bash mount path does not exist or is not a directory");
-            }
-        }
-
+    let bash_resources = if let Some(mounts) = mounts {
         // Build permission overrides from config
         let overrides = config.tools.bash_permissions.as_ref()
             .map(|p| parse_config_overrides(&p.session, &p.per_call, &p.restricted))

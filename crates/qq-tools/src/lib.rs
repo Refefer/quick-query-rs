@@ -41,6 +41,8 @@ pub struct ToolsConfig {
     pub enable_web: bool,
     /// Web search configuration (Perplexica)
     pub web_search: Option<WebSearchConfig>,
+    /// Per-instance sandbox /tmp directory for filesystem tools
+    pub sandbox_tmp: Option<PathBuf>,
 }
 
 impl Default for ToolsConfig {
@@ -51,6 +53,7 @@ impl Default for ToolsConfig {
             memory_db: None,
             enable_web: true,
             web_search: None,
+            sandbox_tmp: None,
         }
     }
 }
@@ -84,6 +87,11 @@ impl ToolsConfig {
         self.web_search = Some(config);
         self
     }
+
+    pub fn with_sandbox_tmp(mut self, tmp: PathBuf) -> Self {
+        self.sandbox_tmp = Some(tmp);
+        self
+    }
 }
 
 /// Create a registry with all default tools
@@ -91,7 +99,10 @@ pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_c
     let mut registry = ToolRegistry::new();
 
     // Filesystem tools
-    let fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    let mut fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    if let Some(ref tmp) = config.sandbox_tmp {
+        fs_config = fs_config.with_sandbox_tmp(tmp.clone());
+    }
     for tool in create_filesystem_tools_arc(fs_config) {
         registry.register(tool);
     }
@@ -121,7 +132,10 @@ pub fn create_all_tools(config: ToolsConfig) -> Result<Vec<Box<dyn Tool>>, qq_co
     let mut tools = Vec::new();
 
     // Filesystem tools
-    let fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    let mut fs_config = FileSystemConfig::new(&config.root).with_write(config.allow_write);
+    if let Some(ref tmp) = config.sandbox_tmp {
+        fs_config = fs_config.with_sandbox_tmp(tmp.clone());
+    }
     tools.extend(create_filesystem_tools(fs_config));
 
     // Memory tools
