@@ -249,6 +249,26 @@ cargo test --workspace
 cargo doc --workspace --no-deps --open
 ```
 
+### Static Binary (Linux)
+
+Build a fully static binary with zero dynamic library dependencies using musl:
+
+```bash
+# One-time setup
+rustup target add x86_64-unknown-linux-musl
+sudo apt install musl-tools   # provides musl-gcc
+
+# Build
+cargo build --release --target x86_64-unknown-linux-musl
+
+# Verify — should say "statically linked"
+file target/x86_64-unknown-linux-musl/release/qq
+```
+
+The resulting binary can be copied to any Linux x86_64 machine and run without
+installing anything. TLS is handled by rustls (pure Rust) with bundled Mozilla
+CA roots — no OpenSSL or system CA store required.
+
 ## Contributing
 
 1. Fork the repository
@@ -268,6 +288,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 |---------|----------|
 | `qq: command not found` | Add `~/.cargo/bin` to your PATH |
 | `401 Unauthorized` | Check API key in config or env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
+| musl build fails with linker errors | Install `musl-tools` (`sudo apt install musl-tools`) and add target (`rustup target add x86_64-unknown-linux-musl`) |
 | Build fails with SQLite error | Ensure C compiler is installed |
 | Garbled TUI output | Use a terminal with ANSI support, or try `--no-tui` |
 | `Kernel sandbox unavailable` at startup | Run `sudo ./scripts/setup-apparmor.sh` (AppArmor), or use `--classic` / `--insecure` |

@@ -16,7 +16,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 
 # HTTP & networking
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2", "macos-system-configuration"] }
 reqwest-eventsource = "0.6"
 
 # Serialization
@@ -56,3 +56,8 @@ qq-cli = { path = "crates/qq-cli" }
 qq-agents = { path = "crates/qq-agents" }
 qq-providers = { path = "crates/qq-providers" }
 qq-tools = { path = "crates/qq-tools" }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
