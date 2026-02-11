@@ -236,6 +236,14 @@ async fn execute_app_level(
         return Err("Empty command".to_string());
     }
 
+    // Rewrite /tmp references to the session temp dir so that app-level bash
+    // commands see the same files as filesystem tools (which use remap_tmp).
+    let tmp_str = mounts.tmp_dir().to_str().unwrap_or("/tmp");
+    let tokens: Vec<String> = tokens
+        .into_iter()
+        .map(|t| remap_tmp_in_token(&t, tmp_str))
+        .collect();
+
     let program = &tokens[0];
     let args = &tokens[1..];
 
@@ -245,7 +253,6 @@ async fn execute_app_level(
     let mut cmd = tokio::process::Command::new(&program_path);
     cmd.args(args);
     cmd.current_dir(mounts.project_root());
-    let tmp_str = mounts.tmp_dir().to_str().unwrap_or("/tmp");
     cmd.env("HOME", tmp_str);
     cmd.env("TMPDIR", tmp_str);
     cmd.env("TERM", "dumb");
@@ -277,6 +284,40 @@ async fn execute_app_level(
             timed_out: true,
         }),
     }
+}
+
+/// Rewrite `/tmp` references in a single command token to point at the session temp dir.
+///
+/// This mirrors the `remap_tmp()` behavior that filesystem tools use, so that bash commands
+/// in app-level sandbox mode can access the same files as `write_file("/tmp/foo", ...)`.
+///
+/// Handles:
+/// - Exact `/tmp` → session tmp path
+/// - `/tmp/...` prefix → session tmp path + suffix
+/// - Embedded `=/tmp` or `=/tmp/...` (e.g., `--output=/tmp/result.json`)
+fn remap_tmp_in_token(token: &str, session_tmp: &str) -> String {
+    // Exact match
+    if token == "/tmp" {
+        return session_tmp.to_string();
+    }
+
+    // Prefix match: /tmp/ followed by more path
+    if let Some(rest) = token.strip_prefix("/tmp/") {
+        return format!("{}/{}", session_tmp, rest);
+    }
+
+    // Embedded: something=/tmp or something=/tmp/...
+    if let Some(eq_pos) = token.find('=') {
+        let (prefix, value) = token.split_at(eq_pos + 1); // prefix includes '='
+        if value == "/tmp" {
+            return format!("{}{}", prefix, session_tmp);
+        }
+        if let Some(rest) = value.strip_prefix("/tmp/") {
+            return format!("{}{}/{}", prefix, session_tmp, rest);
+        }
+    }
+
+    token.to_string()
 }
 
 /// Resolve a program name to a path.
@@ -343,6 +384,78 @@ mod tests {
         let result = execute_app_level("echo hello | cat", &mounts, 10).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
+    }
+
+    #[test]
+    fn test_remap_tmp_exact() {
+        assert_eq!(remap_tmp_in_token("/tmp", "/sess/tmp"), "/sess/tmp");
+    }
+
+    #[test]
+    fn test_remap_tmp_subpath() {
+        assert_eq!(
+            remap_tmp_in_token("/tmp/foo.rs", "/sess/tmp"),
+            "/sess/tmp/foo.rs"
+        );
+    }
+
+    #[test]
+    fn test_remap_tmp_nested() {
+        assert_eq!(
+            remap_tmp_in_token("/tmp/a/b/c.txt", "/sess/tmp"),
+            "/sess/tmp/a/b/c.txt"
+        );
+    }
+
+    #[test]
+    fn test_remap_tmp_trailing_slash() {
+        assert_eq!(
+            remap_tmp_in_token("/tmp/", "/sess/tmp"),
+            "/sess/tmp/"
+        );
+    }
+
+    #[test]
+    fn test_remap_tmp_no_match() {
+        assert_eq!(remap_tmp_in_token("hello", "/sess/tmp"), "hello");
+        assert_eq!(remap_tmp_in_token("/var/tmp/foo", "/sess/tmp"), "/var/tmp/foo");
+        assert_eq!(remap_tmp_in_token("/tmpfoo", "/sess/tmp"), "/tmpfoo");
+        assert_eq!(remap_tmp_in_token("-la", "/sess/tmp"), "-la");
+    }
+
+    #[test]
+    fn test_remap_tmp_embedded_eq() {
+        assert_eq!(
+            remap_tmp_in_token("--output=/tmp/result.json", "/sess/tmp"),
+            "--output=/sess/tmp/result.json"
+        );
+        assert_eq!(
+            remap_tmp_in_token("--dir=/tmp", "/sess/tmp"),
+            "--dir=/sess/tmp"
+        );
+        // No /tmp in value — unchanged
+        assert_eq!(
+            remap_tmp_in_token("--output=/var/out.json", "/sess/tmp"),
+            "--output=/var/out.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_app_level_tmp_rewrite() {
+        let mounts = Arc::new(SandboxMounts::new(
+            std::env::current_dir().unwrap(),
+        ).unwrap());
+
+        // Write a file directly into the session tmp dir
+        let tmp_file = mounts.tmp_dir().join("remap_test.txt");
+        std::fs::write(&tmp_file, "remapped-content").unwrap();
+
+        // Run cat /tmp/remap_test.txt — should be rewritten to the session dir
+        let result = execute_app_level("cat /tmp/remap_test.txt", &mounts, 10)
+            .await
+            .unwrap();
+        assert_eq!(result.stdout.trim(), "remapped-content");
+        assert_eq!(result.exit_code, 0);
     }
 
     #[cfg(all(feature = "sandbox", target_os = "linux"))]
