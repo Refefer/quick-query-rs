@@ -291,13 +291,18 @@ Commands are classified into three tiers before execution:
 
 | Tier | Behavior | Examples |
 |------|----------|---------|
-| **Session** | Auto-approved, runs without prompting | `ls`, `cat`, `grep`, `find`, `git status`, `git log`, `git diff` |
-| **Per-call** | Requires user approval (allow once, allow for session, or deny) | `git commit`, `git push`, `rm`, `mv`, `chmod`, `curl` |
+| **Session** | Auto-approved, runs without prompting | `ls`, `cat`, `grep`, `find`, `git status`, `git log`, `cargo build`, `cargo test`, `npm test`, `pip list` |
+| **Per-call** | Requires user approval (allow once, allow for session, or deny) | `git commit`, `git push`, `cargo run`, `npm install`, `rm`, `mv`, `python` |
 | **Restricted** | Always blocked | `sudo`, `su`, `mkfs`, `dd`, `shutdown` |
 
 Pipeline commands (pipes, redirects) are parsed into individual commands, and each
 is checked independently. The highest-risk tier in a pipeline determines the overall
 classification.
+
+Tools like `cargo`, `git`, `npm`, `yarn`, `pnpm`, `pip`, `pip3`, and `poetry` support
+subcommand-level classification. For example, `cargo build` is session-tier (auto-approved)
+while `cargo run` is per-call (requires approval). Unrecognized subcommands or flag-only
+invocations (e.g., `cargo --version`) fall back to per-call.
 
 Permission overrides can be configured in `config.toml`:
 

@@ -293,16 +293,18 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
         Use /tmp for scripts, intermediate results, and working notes — it persists across commands.\n\
         Prefer writing scripts to /tmp over inlining them: echo 'script' > /tmp/check.sh && sh /tmp/check.sh\n\n\
         Permission tiers:\n\
-        - Session (run immediately): ls, cat, grep, find, git log, git diff, git status, etc.\n\
-        - Per-call (requires user approval): cargo, npm, git commit, rm, mv, python, etc.\n\
+        - Session (run immediately): ls, cat, grep, find, git log, git diff, cargo build, cargo test, npm test, etc.\n\
+        - Per-call (requires user approval): cargo run, npm install, git commit, rm, mv, python, etc.\n\
         - Restricted (always blocked): sudo, curl, wget, ssh, dd, kill, etc.\n\n\
         Network access is blocked. Commands execute with a 30-second default timeout.\n\n\
         Examples:\n\
         - List files: ls -la src/\n\
         - Search code: grep -rn 'TODO' src/ | sort\n\
         - Git history: git log --oneline -10\n\
-        - Build project: cargo build (requires approval)\n\
-        - Run tests: cargo test (requires approval)");
+        - Build project: cargo build\n\
+        - Run tests: cargo test && cargo clippy\n\
+        - Run binary: cargo run --bin myapp (requires approval)\n\
+        - Install deps: npm install (requires approval)");
 
     desc
 }

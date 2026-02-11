@@ -1,11 +1,19 @@
 //! Shell command parsing for pipeline extraction and tokenization.
 
+/// Tools that support subcommand-level permission classification.
+/// When a command starts with one of these, the first non-flag word after
+/// the tool name is extracted as `tool-subcmd` (e.g., `cargo build` → `cargo-build`).
+const SUBCOMMAND_TOOLS: &[&str] = &[
+    "cargo", "git", "npm", "npx", "yarn", "pnpm", "pip", "pip3", "poetry",
+];
+
 /// Extract command names from a shell command string.
 ///
 /// Splits on `|`, `&&`, `||`, `;` (outside of quotes) and returns
 /// the first word (command name) from each segment.
 ///
-/// Git subcommands are returned as `git-<subcommand>` for tier classification.
+/// Tools listed in [`SUBCOMMAND_TOOLS`] get subcommand extraction:
+/// `cargo build` → `cargo-build`, `git log` → `git-log`, etc.
 pub fn extract_commands(input: &str) -> Result<Vec<String>, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -222,7 +230,7 @@ fn split_pipeline(input: &str) -> Vec<String> {
 
 /// Extract the first command name from a command segment.
 /// Handles environment variable assignments (e.g., `FOO=bar cmd`).
-/// Returns `git-<subcommand>` for git commands.
+/// Returns `tool-<subcommand>` for tools in [`SUBCOMMAND_TOOLS`].
 fn extract_first_command(segment: &str) -> String {
     let trimmed = segment.trim();
 
@@ -260,20 +268,20 @@ fn extract_first_command(segment: &str) -> String {
     // Strip path prefix (e.g., /usr/bin/git -> git)
     let base_cmd = cmd.rsplit('/').next().unwrap_or(cmd);
 
-    // Handle git subcommands: "git log" -> "git-log"
-    if base_cmd == "git" {
-        let after_git = remaining[first_word_end..].trim_start();
-        if !after_git.is_empty() {
-            let subcmd_end = after_git
+    // Handle subcommand extraction for supported tools
+    if SUBCOMMAND_TOOLS.contains(&base_cmd) {
+        let after_cmd = remaining[first_word_end..].trim_start();
+        if !after_cmd.is_empty() {
+            let subcmd_end = after_cmd
                 .find(|c: char| c.is_whitespace())
-                .unwrap_or(after_git.len());
-            let subcmd = &after_git[..subcmd_end];
+                .unwrap_or(after_cmd.len());
+            let subcmd = &after_cmd[..subcmd_end];
             // Only treat as subcommand if it doesn't start with -
             if !subcmd.starts_with('-') {
-                return format!("git-{}", subcmd);
+                return format!("{}-{}", base_cmd, subcmd);
             }
         }
-        return "git".to_string();
+        return base_cmd.to_string();
     }
 
     base_cmd.to_string()
@@ -300,7 +308,7 @@ mod tests {
     fn test_and_chain() {
         assert_eq!(
             extract_commands("cargo build && cargo test").unwrap(),
-            vec!["cargo", "cargo"]
+            vec!["cargo-build", "cargo-test"]
         );
     }
 
@@ -362,7 +370,7 @@ mod tests {
     fn test_env_var_prefix() {
         assert_eq!(
             extract_commands("FOO=bar cargo build").unwrap(),
-            vec!["cargo"]
+            vec!["cargo-build"]
         );
     }
 
@@ -441,7 +449,105 @@ mod tests {
     fn test_mixed_operators() {
         assert_eq!(
             extract_commands("mkdir -p out && cargo build 2>&1 | head -50").unwrap(),
-            vec!["mkdir", "cargo", "head"]
+            vec!["mkdir", "cargo-build", "head"]
+        );
+    }
+
+    #[test]
+    fn test_cargo_subcommands() {
+        assert_eq!(
+            extract_commands("cargo build --release").unwrap(),
+            vec!["cargo-build"]
+        );
+        assert_eq!(
+            extract_commands("cargo test -- --nocapture").unwrap(),
+            vec!["cargo-test"]
+        );
+        assert_eq!(
+            extract_commands("cargo clippy -- -D warnings").unwrap(),
+            vec!["cargo-clippy"]
+        );
+        assert_eq!(
+            extract_commands("cargo run --bin myapp").unwrap(),
+            vec!["cargo-run"]
+        );
+        // Flag-only: no subcommand extracted
+        assert_eq!(
+            extract_commands("cargo --version").unwrap(),
+            vec!["cargo"]
+        );
+    }
+
+    #[test]
+    fn test_npm_subcommands() {
+        assert_eq!(
+            extract_commands("npm install express").unwrap(),
+            vec!["npm-install"]
+        );
+        assert_eq!(
+            extract_commands("npm test").unwrap(),
+            vec!["npm-test"]
+        );
+        assert_eq!(
+            extract_commands("npm run build").unwrap(),
+            vec!["npm-run"]
+        );
+    }
+
+    #[test]
+    fn test_pip_subcommands() {
+        assert_eq!(
+            extract_commands("pip install requests").unwrap(),
+            vec!["pip-install"]
+        );
+        assert_eq!(
+            extract_commands("pip3 list --outdated").unwrap(),
+            vec!["pip3-list"]
+        );
+        assert_eq!(
+            extract_commands("pip freeze").unwrap(),
+            vec!["pip-freeze"]
+        );
+    }
+
+    #[test]
+    fn test_yarn_pnpm_poetry_subcommands() {
+        assert_eq!(
+            extract_commands("yarn add lodash").unwrap(),
+            vec!["yarn-add"]
+        );
+        assert_eq!(
+            extract_commands("pnpm install").unwrap(),
+            vec!["pnpm-install"]
+        );
+        assert_eq!(
+            extract_commands("poetry show --tree").unwrap(),
+            vec!["poetry-show"]
+        );
+    }
+
+    #[test]
+    fn test_non_subcommand_tools_unchanged() {
+        // Tools NOT in SUBCOMMAND_TOOLS should stay as-is
+        assert_eq!(
+            extract_commands("make clean").unwrap(),
+            vec!["make"]
+        );
+        assert_eq!(
+            extract_commands("python script.py").unwrap(),
+            vec!["python"]
+        );
+        assert_eq!(
+            extract_commands("cmake --build .").unwrap(),
+            vec!["cmake"]
+        );
+    }
+
+    #[test]
+    fn test_npx_subcommand() {
+        assert_eq!(
+            extract_commands("npx prettier --write .").unwrap(),
+            vec!["npx-prettier"]
         );
     }
 }

@@ -142,6 +142,20 @@ const SESSION_COMMANDS: &[&str] = &[
     "git-tag", "git-rev-parse", "git-describe", "git-shortlog", "git-ls-files",
     "git-ls-tree", "git-cat-file", "git-rev-list", "git-name-rev",
     "git-merge-base", "git-remote", "git-stash-list",
+    // Cargo read-only operations
+    "cargo-build", "cargo-test", "cargo-check", "cargo-clippy", "cargo-bench",
+    "cargo-doc", "cargo-tree", "cargo-metadata",
+    // npm read-only operations
+    "npm-test", "npm-ls", "npm-list", "npm-outdated", "npm-view", "npm-audit",
+    // yarn read-only operations
+    "yarn-list", "yarn-outdated", "yarn-info", "yarn-audit",
+    // pnpm read-only operations
+    "pnpm-list", "pnpm-outdated", "pnpm-audit",
+    // pip/pip3 read-only operations
+    "pip-list", "pip-freeze", "pip-show", "pip-check",
+    "pip3-list", "pip3-freeze", "pip3-show", "pip3-check",
+    // poetry read-only operations
+    "poetry-show", "poetry-check", "poetry-version",
     // Misc
     "xargs", "id",
 ];
@@ -153,8 +167,28 @@ const PER_CALL_COMMANDS: &[&str] = &[
     "git-stash-apply", "git-stash-drop", "git-push", "git-pull", "git-fetch",
     "git-reset", "git-clean", "git-restore", "git-cherry-pick", "git-revert",
     "git-init", "git-clone",
-    // Build tools
-    "cargo", "npm", "npx", "yarn", "pnpm", "pip", "pip3", "poetry",
+    // Cargo write/mutate operations
+    "cargo-fmt", "cargo-fix", "cargo-add", "cargo-remove", "cargo-install",
+    "cargo-uninstall", "cargo-publish", "cargo-init", "cargo-new", "cargo-run",
+    "cargo-clean", "cargo-update",
+    // npm write/mutate operations
+    "npm-install", "npm-uninstall", "npm-update", "npm-publish", "npm-init",
+    "npm-link", "npm-run", "npm-start", "npm-build", "npm-exec",
+    // yarn write/mutate operations
+    "yarn-add", "yarn-remove", "yarn-install", "yarn-upgrade", "yarn-publish",
+    "yarn-run", "yarn-start", "yarn-build", "yarn-exec",
+    // pnpm write/mutate operations
+    "pnpm-add", "pnpm-remove", "pnpm-install", "pnpm-update", "pnpm-publish",
+    "pnpm-run", "pnpm-start", "pnpm-build", "pnpm-exec",
+    // pip/pip3 write/mutate operations
+    "pip-install", "pip-uninstall",
+    "pip3-install", "pip3-uninstall",
+    // poetry write/mutate operations
+    "poetry-add", "poetry-remove", "poetry-install", "poetry-update",
+    "poetry-build", "poetry-publish", "poetry-run", "poetry-init", "poetry-new",
+    // npx (subcommands are arbitrary executables)
+    "npx",
+    // Build tools (no subcommand extraction)
     "make", "cmake", "ninja", "meson",
     // Interpreters
     "python", "python3", "node", "ruby", "perl",
@@ -164,8 +198,8 @@ const PER_CALL_COMMANDS: &[&str] = &[
     "sed", "awk", "patch",
     // Shells (sub-shells)
     "sh", "bash", "zsh",
-    // Generic git (if subcommand not recognized)
-    "git",
+    // Generic fallbacks (unrecognized subcommands default here)
+    "git", "cargo", "npm", "yarn", "pnpm", "pip", "pip3", "poetry",
 ];
 
 const RESTRICTED_COMMANDS: &[&str] = &[
@@ -286,9 +320,11 @@ mod tests {
     fn test_per_call_commands() {
         let s = store();
         assert_eq!(s.check_tier("cargo"), Tier::PerCall);
+        assert_eq!(s.check_tier("cargo-run"), Tier::PerCall);
         assert_eq!(s.check_tier("rm"), Tier::PerCall);
         assert_eq!(s.check_tier("git-commit"), Tier::PerCall);
         assert_eq!(s.check_tier("python"), Tier::PerCall);
+        assert_eq!(s.check_tier("npm-install"), Tier::PerCall);
     }
 
     #[test]
@@ -369,5 +405,114 @@ mod tests {
         s.promote_to_session("cargo");
         // Config override wins
         assert_eq!(s.check_tier("cargo"), Tier::Restricted);
+    }
+
+    #[test]
+    fn test_cargo_subcommand_tiers() {
+        let s = store();
+        // Session-tier (read-only build/test)
+        assert_eq!(s.check_tier("cargo-build"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-test"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-check"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-clippy"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-bench"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-doc"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-tree"), Tier::Session);
+        assert_eq!(s.check_tier("cargo-metadata"), Tier::Session);
+        // Per-call (mutating)
+        assert_eq!(s.check_tier("cargo-run"), Tier::PerCall);
+        assert_eq!(s.check_tier("cargo-install"), Tier::PerCall);
+        assert_eq!(s.check_tier("cargo-publish"), Tier::PerCall);
+        assert_eq!(s.check_tier("cargo-fmt"), Tier::PerCall);
+        assert_eq!(s.check_tier("cargo-clean"), Tier::PerCall);
+        // Fallback for unrecognized subcommands
+        assert_eq!(s.check_tier("cargo"), Tier::PerCall);
+    }
+
+    #[test]
+    fn test_npm_subcommand_tiers() {
+        let s = store();
+        assert_eq!(s.check_tier("npm-test"), Tier::Session);
+        assert_eq!(s.check_tier("npm-ls"), Tier::Session);
+        assert_eq!(s.check_tier("npm-audit"), Tier::Session);
+        assert_eq!(s.check_tier("npm-install"), Tier::PerCall);
+        assert_eq!(s.check_tier("npm-publish"), Tier::PerCall);
+        assert_eq!(s.check_tier("npm-run"), Tier::PerCall);
+        assert_eq!(s.check_tier("npm"), Tier::PerCall);
+    }
+
+    #[test]
+    fn test_pip_subcommand_tiers() {
+        let s = store();
+        assert_eq!(s.check_tier("pip-list"), Tier::Session);
+        assert_eq!(s.check_tier("pip-freeze"), Tier::Session);
+        assert_eq!(s.check_tier("pip-show"), Tier::Session);
+        assert_eq!(s.check_tier("pip-install"), Tier::PerCall);
+        assert_eq!(s.check_tier("pip3-list"), Tier::Session);
+        assert_eq!(s.check_tier("pip3-install"), Tier::PerCall);
+        assert_eq!(s.check_tier("pip"), Tier::PerCall);
+        assert_eq!(s.check_tier("pip3"), Tier::PerCall);
+    }
+
+    #[test]
+    fn test_yarn_pnpm_poetry_subcommand_tiers() {
+        let s = store();
+        // yarn
+        assert_eq!(s.check_tier("yarn-list"), Tier::Session);
+        assert_eq!(s.check_tier("yarn-audit"), Tier::Session);
+        assert_eq!(s.check_tier("yarn-add"), Tier::PerCall);
+        assert_eq!(s.check_tier("yarn"), Tier::PerCall);
+        // pnpm
+        assert_eq!(s.check_tier("pnpm-list"), Tier::Session);
+        assert_eq!(s.check_tier("pnpm-install"), Tier::PerCall);
+        assert_eq!(s.check_tier("pnpm"), Tier::PerCall);
+        // poetry
+        assert_eq!(s.check_tier("poetry-show"), Tier::Session);
+        assert_eq!(s.check_tier("poetry-check"), Tier::Session);
+        assert_eq!(s.check_tier("poetry-install"), Tier::PerCall);
+        assert_eq!(s.check_tier("poetry"), Tier::PerCall);
+    }
+
+    #[test]
+    fn test_subcommand_session_promotion() {
+        let s = store();
+        // cargo-run starts as per-call
+        assert_eq!(s.check_tier("cargo-run"), Tier::PerCall);
+        // Promote it
+        s.promote_to_session("cargo-run");
+        assert_eq!(s.check_tier("cargo-run"), Tier::Session);
+        // Other cargo subcommands are unaffected
+        assert_eq!(s.check_tier("cargo-publish"), Tier::PerCall);
+    }
+
+    #[test]
+    fn test_config_override_at_subcommand_level() {
+        let overrides = parse_config_overrides(
+            &["cargo-run".to_string()],
+            &[],
+            &["npm-install".to_string()],
+        );
+        let s = PermissionStore::new(overrides);
+        assert_eq!(s.check_tier("cargo-run"), Tier::Session);
+        assert_eq!(s.check_tier("npm-install"), Tier::Restricted);
+        // Other subcommands use defaults
+        assert_eq!(s.check_tier("cargo-build"), Tier::Session);
+        assert_eq!(s.check_tier("npm-test"), Tier::Session);
+    }
+
+    #[test]
+    fn test_mixed_pipeline_with_subcommands() {
+        let s = store();
+        // All session: cargo-build + grep
+        let cmds = vec!["cargo-build".to_string(), "grep".to_string()];
+        assert!(matches!(s.check_pipeline(&cmds), PipelinePermission::Allowed));
+        // Mixed: cargo-build (session) + cargo-run (per-call)
+        let cmds = vec!["cargo-build".to_string(), "cargo-run".to_string()];
+        match s.check_pipeline(&cmds) {
+            PipelinePermission::NeedsApproval(trigger) => {
+                assert_eq!(trigger, vec!["cargo-run"]);
+            }
+            other => panic!("Expected NeedsApproval, got {:?}", std::mem::discriminant(&other)),
+        }
     }
 }
