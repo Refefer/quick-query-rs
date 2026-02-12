@@ -64,7 +64,7 @@ LLM provider implementations:
 Built-in tools for agentic workflows:
 - **Filesystem (read)**: `read_file`, `list_files`, `find_files`, `search_files`
 - **Filesystem (write)**: `write_file`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`
-- **Memory**: `add_memory`, `read_memory`, `list_memories`, `delete_memory` (SQLite-backed)
+- **Preferences**: `update_preference`, `read_preference`, `list_preferences`, `delete_preference` (SQLite-backed)
 - **Web**: `fetch_webpage`, `web_search` (with optional Perplexica integration)
 - **Processing**: `process_large_data` for chunking and summarization
 

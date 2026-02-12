@@ -3,7 +3,7 @@
 //! This crate provides the default tools available to LLM agents:
 //! - Filesystem: read, write, list, and search files
 //! - Web: fetch and parse webpages
-//! - Memory: persistent key-value storage
+//! - Memory: persistent user preferences
 //! - Process data: chunk and summarize large content
 
 pub mod bash;
@@ -19,7 +19,7 @@ pub use bash::{
     SandboxMounts,
 };
 pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig};
-pub use memory::{create_memory_tools, create_memory_tools_arc, MemoryStore};
+pub use memory::{create_preference_tools, create_preference_tools_arc, MemoryStore};
 pub use process_data::{create_process_data_tool, create_process_data_tool_arc, ProcessLargeDataTool};
 pub use tasks::{create_task_tools, create_task_tools_arc, TaskStore};
 pub use web::{create_web_tools, create_web_tools_arc, create_web_tools_with_search, WebSearchConfig};
@@ -113,7 +113,7 @@ pub fn create_default_registry(config: ToolsConfig) -> Result<ToolRegistry, qq_c
     } else {
         Arc::new(MemoryStore::in_memory()?)
     };
-    for tool in create_memory_tools_arc(store) {
+    for tool in create_preference_tools_arc(store) {
         registry.register(tool);
     }
 
@@ -144,7 +144,7 @@ pub fn create_all_tools(config: ToolsConfig) -> Result<Vec<Box<dyn Tool>>, qq_co
     } else {
         Arc::new(MemoryStore::in_memory()?)
     };
-    tools.extend(create_memory_tools(store));
+    tools.extend(create_preference_tools(store));
 
     // Web tools (boxed version doesn't support web_search for simplicity)
     if config.enable_web {
@@ -168,7 +168,7 @@ pub fn create_all_tools_arc(config: ToolsConfig) -> Result<Vec<Arc<dyn Tool>>, q
     } else {
         Arc::new(MemoryStore::in_memory()?)
     };
-    tools.extend(create_memory_tools_arc(store));
+    tools.extend(create_preference_tools_arc(store));
 
     // Web tools
     if config.enable_web {

@@ -94,8 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Filesystem**: `read_file`, `write_file`, `list_files`, `search_files`
   - Sandboxed to configurable root directory
   - Write access disabled by default
-- **Memory**: `add_memory`, `read_memory`, `list_memories`, `delete_memory`
-  - Persistent SQLite-backed key-value storage
+- **Preferences**: `update_preference`, `read_preference`, `list_preferences`, `delete_preference`
+  - Persistent SQLite-backed user preference storage
   - In-memory mode for testing
 - **Web**: `fetch_webpage`, `web_search`
   - HTML to markdown extraction

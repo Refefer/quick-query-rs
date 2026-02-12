@@ -22,7 +22,7 @@
 # These take precedence over the hardcoded defaults.
 
 [builtin.researcher]
-# Default tools: web_search, fetch_webpage, read_memory, add_memory + inform_user
+# Default tools: web_search, fetch_webpage, read_preference + inform_user
 max_turns = 10
 tool_limits = { web_search = 2, fetch_webpage = 5 }
 
@@ -47,7 +47,7 @@ max_turns = 20
 max_turns = 20
 
 [builtin.planner]
-# Default tools: read_memory, add_memory + inform_user (delegates exploration to other agents)
+# Default tools: read_preference + inform_user (delegates exploration to other agents)
 max_turns = 30
 
 [builtin.summarizer]

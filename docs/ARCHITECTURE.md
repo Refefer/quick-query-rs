@@ -88,7 +88,7 @@ graph TD
 |-------|---------|-------------|
 | **qq-core** | Foundation types and traits | `Provider`, `Tool`, `Agent`, `Message`, `ToolRegistry`, `AgentMemory` |
 | **qq-providers** | LLM provider implementations | `OpenAIProvider`, `AnthropicProvider`, `GeminiProvider` |
-| **qq-tools** | Built-in tools for agents | `create_filesystem_tools`, `create_memory_tools`, `create_web_tools`, `create_task_tools`, `create_bash_tools`, `TaskStore` |
+| **qq-tools** | Built-in tools for agents | `create_filesystem_tools`, `create_preference_tools`, `create_web_tools`, `create_task_tools`, `create_bash_tools`, `TaskStore` |
 | **qq-agents** | Agent definitions | `ProjectManagerAgent`, `CoderAgent`, `ExploreAgent`, etc. |
 | **qq-cli** | User-facing CLI binary | `qq` binary, TUI, configuration loading, event bus |
 
@@ -512,11 +512,11 @@ graph TD
             RMD[rm_directory]
         end
 
-        subgraph "Memory (SQLite)"
-            AM[add_memory]
-            RM[read_memory]
-            LM[list_memories]
-            DM[delete_memory]
+        subgraph "Preferences (SQLite)"
+            AM[update_preference]
+            RM[read_preference]
+            LM[list_preferences]
+            DM[delete_preference]
         end
 
         subgraph "Web"
@@ -601,12 +601,12 @@ Both `MemoryStore` and `TaskStore` use the same pattern: a shared inner state be
 
 ```mermaid
 graph TD
-    subgraph "Memory Tools"
+    subgraph "Preference Tools"
         MS["MemoryStore<br/>Arc&lt;Mutex&lt;Connection&gt;&gt;"]
-        AMT["AddMemoryTool"] --> MS
-        RMT["ReadMemoryTool"] --> MS
-        LMT["ListMemoriesTool"] --> MS
-        DMT["DeleteMemoryTool"] --> MS
+        AMT["UpdatePreferenceTool"] --> MS
+        RMT["ReadPreferenceTool"] --> MS
+        LMT["ListPreferencesTool"] --> MS
+        DMT["DeletePreferenceTool"] --> MS
     end
 
     subgraph "Task Tools"
@@ -664,7 +664,7 @@ classDiagram
 |----------|-------|-------------|
 | **Filesystem (read)** | `read_file`, `list_files`, `find_files`, `search_files` | Sandboxed read operations |
 | **Filesystem (write)** | `write_file`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory` | Write operations (require `allow_write`) |
-| **Memory** | `add_memory`, `read_memory`, `list_memories`, `delete_memory` | Persistent SQLite-backed key-value storage |
+| **Preferences** | `update_preference`, `read_preference`, `list_preferences`, `delete_preference` | Persistent SQLite-backed user preference storage |
 | **Web** | `fetch_webpage`, `web_search` | Web content retrieval (optional Perplexica search) |
 | **Tasks** | `create_task`, `update_task`, `list_tasks`, `delete_task` | Session-scoped task tracking for the PM agent |
 | **Bash** | `bash`, `mount_external` | Sandboxed shell execution (Linux kernel sandbox via hakoniwa) |
@@ -739,7 +739,7 @@ classDiagram
     class ResearcherAgent {
         +name() "researcher"
         +max_turns() 20
-        +tool_names() [web_search, fetch_webpage, read_memory]
+        +tool_names() [web_search, fetch_webpage, read_preference]
     }
 
     class CoderAgent {
@@ -763,7 +763,7 @@ classDiagram
     class PlannerAgent {
         +name() "planner"
         +max_turns() 20
-        +tool_names() [read_memory]
+        +tool_names() [read_preference]
     }
 
     class WriterAgent {
@@ -856,7 +856,7 @@ flowchart TD
     CTX["PreambleContext"] --> CHECK{Flags}
 
     CHECK -->|has_tools| SEC1["## Execution Model\nTool calling rules,\nparallel execution hints"]
-    CHECK -->|has_tools| SEC2["## Persistent Memory\nadd_memory, read_memory usage"]
+    CHECK -->|has_tools| SEC2["## Conversation Continuity\nContext from prior invocations"]
     CHECK -->|has_sub_agents| SEC3["## Sub-Agent Delegation\nnew_instance param,\nmemory scoping rules"]
     CHECK -->|has_inform_user| SEC4["## Communicating with User\ninform_user tool guidance"]
     CHECK -->|has_tools| SEC5["## Tool Efficiency\nMinimal calls, batch reads"]

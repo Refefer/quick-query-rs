@@ -52,7 +52,7 @@ A plan built on explored reality is far more useful than one built on guesses. I
 6. **Make it actionable**: Each step should be clear enough to execute
 
 ## IMPORTANT: Read-Only Agent
-You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You must not write to memory. Your output is your plan — return it in your response for the caller to handle.
+You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You must not write to preference stores. Your output is your plan — return it in your response for the caller to handle.
 
 ## Planning Strategies
 - **Top-down decomposition**: Break big goals into phases, phases into steps
@@ -167,7 +167,7 @@ impl InternalAgent for PlannerAgent {
 
     fn tool_names(&self) -> &[&str] {
         // Planner is read-only - has direct read access for quick exploration
-        &["read_memory", "read_file", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
+        &["read_preference", "read_file", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(agent.name(), "planner");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
-        assert!(agent.tool_names().contains(&"read_memory"));
+        assert!(agent.tool_names().contains(&"read_preference"));
         assert!(agent.tool_names().contains(&"read_file"));
         assert!(agent.tool_names().contains(&"find_files"));
         assert!(agent.tool_names().contains(&"search_files"));
@@ -209,7 +209,7 @@ mod tests {
         assert!(agent.tool_names().contains(&"mount_external"));
         assert!(agent.tool_names().contains(&"update_my_task"));
         // Planner is read-only - no write tools
-        assert!(!agent.tool_names().contains(&"add_memory"));
+        assert!(!agent.tool_names().contains(&"update_preference"));
         assert!(!agent.tool_names().contains(&"write_file"));
     }
 

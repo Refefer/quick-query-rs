@@ -13,6 +13,8 @@ pub struct PreambleContext {
     pub has_inform_user: bool,
     /// Whether this agent has task tracking capabilities (update_my_task).
     pub has_task_tracking: bool,
+    /// Whether this agent has preference tools (read_preference, update_preference).
+    pub has_preferences: bool,
     /// Whether this agent has bash access.
     pub has_bash: bool,
     /// Whether this agent is read-only (must not modify files).
@@ -22,7 +24,7 @@ pub struct PreambleContext {
 /// Generate the shared preamble that gets prepended to all agent system prompts.
 ///
 /// Sections are conditionally included based on the agent's capabilities:
-/// - Core sections (execution model, persistent memory) are always included
+/// - Core sections (execution model, conversation continuity) are always included
 /// - Sub-agent delegation section only if `has_sub_agents` is true
 /// - Inform user section only if `has_inform_user` is true
 /// - Tool efficiency section only if `has_tools` is true
@@ -46,7 +48,7 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
          hitting the limit.\n\
          - Do NOT stop and ask for confirmation mid-task. Execute your full task autonomously, then return results.\n\
          \n\
-         ### Persistent Memory\n\
+         ### Conversation Continuity\n\
          You may be called multiple times within the same session. If your conversation includes\n\
          messages from a previous invocation, build on that context — do not repeat work already\n\
          done. Focus on the new task while leveraging prior discoveries and results."
@@ -109,6 +111,31 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
         );
     }
 
+    // User Preferences (conditional)
+    if ctx.has_preferences {
+        sections.push(
+            "### User Preferences\n\
+             You have access to persistent preference tools (`read_preference`, `update_preference`, etc.)\n\
+             for storing **user preferences only** — long-lived facts about the user that persist across sessions.\n\
+             \n\
+             **Good uses** (preferences that persist):\n\
+             - User's name, role, or team\n\
+             - Coding style: indent style, naming conventions, preferred patterns\n\
+             - Preferred tools, frameworks, or libraries\n\
+             - Communication preferences (verbosity, format)\n\
+             \n\
+             **Bad uses** (task-specific data — use /tmp files instead):\n\
+             - Lists of files to modify for the current task\n\
+             - Intermediate analysis results or gathered data\n\
+             - Working notes, TODOs, or task progress\n\
+             - Code snippets or diffs being worked on\n\
+             \n\
+             For task-specific working data, write to /tmp files and pass file paths in context or\n\
+             return them to your caller."
+                .to_string(),
+        );
+    }
+
     // Bash access (conditional)
     if ctx.has_bash {
         sections.push(
@@ -130,9 +157,12 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
                rather than trying to hold it all in context\n\
              - **Staged changes**: Draft file contents in /tmp before writing to the project\n\
              - **Diff/comparison**: Save snapshots to /tmp for before/after comparison\n\
+             - **Cross-agent data**: Write data to /tmp and pass the file path when delegating to\n\
+               other agents or returning results to your caller\n\
              \n\
              Rule of thumb: if a task involves more than 2-3 intermediate steps, use /tmp files to track\n\
-             state between steps rather than relying on context alone."
+             state between steps rather than relying on context alone. Never store task-specific working\n\
+             data in the preference tools — those are reserved for user preferences."
                 .to_string(),
         );
     }
@@ -144,7 +174,7 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
              You are a READ-ONLY agent. You must NEVER modify project files or directories.\n\
              - No writing, creating, moving, or deleting project files\n\
              - No write commands that affect the project (no cargo build, git commit, npm install, rm, mv, etc.)\n\
-             - No writing to memory stores\n\
+             - No writing to preference stores\n\
              \n\
              You may ONLY: read files, search content, and run read-only bash commands (grep, find, cat, \
              git log, git diff, git blame, wc, tree, head, tail, ls, etc.).\n\
@@ -184,6 +214,7 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: false,
             is_read_only: false,
         });
@@ -191,7 +222,7 @@ mod tests {
         // Core sections always present
         assert!(preamble.contains("Quick-Query Agent Framework"));
         assert!(preamble.contains("Execution Model"));
-        assert!(preamble.contains("Persistent Memory"));
+        assert!(preamble.contains("Conversation Continuity"));
 
         // Conditional sections absent
         assert!(!preamble.contains("Delegating to Sub-Agents"));
@@ -199,6 +230,7 @@ mod tests {
         assert!(!preamble.contains("Tool Usage Efficiency"));
         assert!(!preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Task Tracking"));
+        assert!(!preamble.contains("User Preferences"));
         assert!(!preamble.contains("Bash Access"));
         assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
     }
@@ -210,6 +242,7 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: false,
             is_read_only: false,
         });
@@ -227,6 +260,7 @@ mod tests {
             has_sub_agents: true,
             has_inform_user: false,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: false,
             is_read_only: false,
         });
@@ -245,6 +279,7 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: true,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: false,
             is_read_only: false,
         });
@@ -262,6 +297,7 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: true,
+            has_preferences: false,
             has_bash: false,
             is_read_only: false,
         });
@@ -272,12 +308,33 @@ mod tests {
     }
 
     #[test]
+    fn test_preamble_with_preferences() {
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: false,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_preferences: true,
+            has_bash: false,
+            is_read_only: false,
+        });
+
+        assert!(preamble.contains("User Preferences"));
+        assert!(preamble.contains("read_preference"));
+        assert!(preamble.contains("update_preference"));
+        assert!(preamble.contains("Good uses"));
+        assert!(preamble.contains("Bad uses"));
+        assert!(preamble.contains("/tmp files"));
+    }
+
+    #[test]
     fn test_preamble_with_bash() {
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: true,
             is_read_only: false,
         });
@@ -285,6 +342,8 @@ mod tests {
         assert!(preamble.contains("Bash Access"));
         assert!(preamble.contains("sandboxed bash access"));
         assert!(preamble.contains("/tmp"));
+        assert!(preamble.contains("Cross-agent data"));
+        assert!(preamble.contains("preference tools"));
         assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
     }
 
@@ -295,6 +354,7 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: false,
             is_read_only: true,
         });
@@ -302,6 +362,7 @@ mod tests {
         assert!(preamble.contains("CRITICAL: Read-Only Agent"));
         assert!(preamble.contains("READ-ONLY agent"));
         assert!(preamble.contains("NEVER"));
+        assert!(preamble.contains("preference stores"));
         assert!(!preamble.contains("Bash Access"));
     }
 
@@ -312,6 +373,7 @@ mod tests {
             has_sub_agents: false,
             has_inform_user: false,
             has_task_tracking: false,
+            has_preferences: false,
             has_bash: true,
             is_read_only: true,
         });
@@ -328,6 +390,7 @@ mod tests {
             has_sub_agents: true,
             has_inform_user: true,
             has_task_tracking: true,
+            has_preferences: true,
             has_bash: true,
             is_read_only: false,
         });
@@ -335,12 +398,13 @@ mod tests {
         // All sections present
         assert!(preamble.contains("Quick-Query Agent Framework"));
         assert!(preamble.contains("Execution Model"));
-        assert!(preamble.contains("Persistent Memory"));
+        assert!(preamble.contains("Conversation Continuity"));
         assert!(preamble.contains("Delegating to Sub-Agents"));
         assert!(preamble.contains("Keeping the User Informed"));
         assert!(preamble.contains("Tool Usage Efficiency"));
         assert!(preamble.contains("Resourcefulness"));
         assert!(preamble.contains("Task Tracking"));
+        assert!(preamble.contains("User Preferences"));
         assert!(preamble.contains("Bash Access"));
     }
 }

@@ -136,12 +136,14 @@ async fn execute_agent(
     let has_inform_user = event_bus.is_some();
     let has_task_tracking = config.tool_names.iter().any(|n| n == "update_my_task");
     let has_bash = config.tool_names.iter().any(|n| n == "bash");
+    let has_preferences = config.tool_names.iter().any(|n| n == "read_preference" || n == "update_preference");
 
     let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
         has_tools,
         has_sub_agents,
         has_inform_user,
         has_task_tracking,
+        has_preferences,
         has_bash,
         is_read_only: config.is_read_only,
     });

@@ -2,7 +2,7 @@
 
 Built-in tools for Quick-Query agentic workflows.
 
-This crate provides the default tools available to LLM agents: filesystem operations, persistent memory, web fetching, and large data processing.
+This crate provides the default tools available to LLM agents: filesystem operations, persistent user preferences, web fetching, and large data processing.
 
 ## Overview
 
@@ -160,19 +160,19 @@ Supports `replace` (default), `insert`, `delete`, and `replace_lines` operations
 }
 ```
 
-### Memory Tools
+### User Preference Tools
 
-Persistent key-value storage backed by SQLite.
+Persistent user preference storage backed by SQLite.
 
 | Tool | Description |
 |------|-------------|
-| `add_memory` | Store a named memory (creates or overwrites) |
-| `read_memory` | Retrieve a memory by name |
-| `list_memories` | List all stored memory names |
-| `delete_memory` | Delete a memory by name |
+| `update_preference` | Store or update a user preference (creates or overwrites) |
+| `read_preference` | Retrieve a preference by name |
+| `list_preferences` | List all stored preference names |
+| `delete_preference` | Delete a preference by name |
 
 ```rust
-use qq_tools::{create_memory_tools_arc, MemoryStore};
+use qq_tools::{create_preference_tools_arc, MemoryStore};
 use std::sync::Arc;
 
 // Persistent storage
@@ -181,35 +181,35 @@ let store = Arc::new(MemoryStore::new("/path/to/memory.db")?);
 // Or in-memory for testing
 let store = Arc::new(MemoryStore::in_memory()?);
 
-let tools = create_memory_tools_arc(store);
+let tools = create_preference_tools_arc(store);
 ```
 
 #### Tool Parameters
 
-**add_memory**
+**update_preference**
 ```json
 {
-  "name": "project_notes",
-  "value": "Remember to update the documentation"
+  "name": "indent_style",
+  "value": "tabs"
 }
 ```
 
-**read_memory**
+**read_preference**
 ```json
 {
-  "name": "project_notes"
+  "name": "indent_style"
 }
 ```
 
-**list_memories**
+**list_preferences**
 ```json
 {}
 ```
 
-**delete_memory**
+**delete_preference**
 ```json
 {
-  "name": "project_notes"
+  "name": "indent_style"
 }
 ```
 

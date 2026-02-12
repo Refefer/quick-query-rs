@@ -345,7 +345,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
         } else {
             std::sync::Arc::new(qq_tools::MemoryStore::in_memory()?)
         };
-        for tool in qq_tools::create_memory_tools_arc(store) {
+        for tool in qq_tools::create_preference_tools_arc(store) {
             registry.register(tool);
         }
     }
@@ -550,6 +550,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             has_sub_agents: !disable_agents,
             has_inform_user: true,
             has_task_tracking: false, // PM uses full task tools, not update_my_task
+            has_preferences: false,   // PM delegates preference access to sub-agents
             has_bash: false,          // PM delegates bash to sub-agents
             is_read_only: false,
         });

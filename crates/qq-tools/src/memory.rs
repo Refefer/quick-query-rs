@@ -1,4 +1,4 @@
-//! Memory tools for persistent key-value storage.
+//! Preference tools for persistent user preference storage.
 
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
@@ -113,169 +113,169 @@ impl MemoryStore {
 }
 
 // =============================================================================
-// Read Memory Tool
+// Read Preference Tool
 // =============================================================================
 
-pub struct ReadMemoryTool {
+pub struct ReadPreferenceTool {
     store: Arc<MemoryStore>,
 }
 
-impl ReadMemoryTool {
+impl ReadPreferenceTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
 }
 
 #[derive(Deserialize)]
-struct ReadMemoryArgs {
+struct ReadPreferenceArgs {
     name: String,
 }
 
 #[async_trait]
-impl Tool for ReadMemoryTool {
+impl Tool for ReadPreferenceTool {
     fn name(&self) -> &str {
-        "read_memory"
+        "read_preference"
     }
 
     fn description(&self) -> &str {
-        "Read a stored memory by name. Returns the value if found."
+        "Read a stored user preference by name. Returns the value if found."
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
-                .add_property("name", PropertySchema::string("Name of the memory to read"), true),
+                .add_property("name", PropertySchema::string("Name of the user preference to read (e.g., 'coding_style', 'preferred_language')"), true),
         )
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
-        let args: ReadMemoryArgs = serde_json::from_value(arguments)
-            .map_err(|e| Error::tool("read_memory", format!("Invalid arguments: {}", e)))?;
+        let args: ReadPreferenceArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("read_preference", format!("Invalid arguments: {}", e)))?;
 
         match self.store.get(&args.name)? {
             Some(value) => Ok(ToolOutput::success(value)),
-            None => Ok(ToolOutput::success(format!("Memory '{}' not found", args.name))),
+            None => Ok(ToolOutput::success(format!("Preference '{}' not found", args.name))),
         }
     }
 }
 
 // =============================================================================
-// Add Memory Tool
+// Update Preference Tool
 // =============================================================================
 
-pub struct AddMemoryTool {
+pub struct UpdatePreferenceTool {
     store: Arc<MemoryStore>,
 }
 
-impl AddMemoryTool {
+impl UpdatePreferenceTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
 }
 
 #[derive(Deserialize)]
-struct AddMemoryArgs {
+struct UpdatePreferenceArgs {
     name: String,
     value: String,
 }
 
 #[async_trait]
-impl Tool for AddMemoryTool {
+impl Tool for UpdatePreferenceTool {
     fn name(&self) -> &str {
-        "add_memory"
+        "update_preference"
     }
 
     fn description(&self) -> &str {
-        "Store a memory with a name and value. Overwrites if the name already exists."
+        "Store or update a user preference that persists across sessions. Use ONLY for long-lived facts about the user \u{2014} coding style, preferred frameworks, name, communication preferences. Do NOT use for task-specific data, intermediate results, or working notes \u{2014} write those to /tmp files instead."
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
-                .add_property("name", PropertySchema::string("Name/key for the memory"), true)
-                .add_property("value", PropertySchema::string("Value to store"), true),
+                .add_property("name", PropertySchema::string("Descriptive key for the user preference (e.g., 'indent_style', 'preferred_test_framework', 'user_name')"), true)
+                .add_property("value", PropertySchema::string("The preference value to store (e.g., 'tabs', 'pytest', 'Andrew')"), true),
         )
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
-        let args: AddMemoryArgs = serde_json::from_value(arguments)
-            .map_err(|e| Error::tool("add_memory", format!("Invalid arguments: {}", e)))?;
+        let args: UpdatePreferenceArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("update_preference", format!("Invalid arguments: {}", e)))?;
 
         self.store.set(&args.name, &args.value)?;
-        Ok(ToolOutput::success(format!("Memory '{}' saved", args.name)))
+        Ok(ToolOutput::success(format!("Preference '{}' saved", args.name)))
     }
 }
 
 // =============================================================================
-// Delete Memory Tool
+// Delete Preference Tool
 // =============================================================================
 
-pub struct DeleteMemoryTool {
+pub struct DeletePreferenceTool {
     store: Arc<MemoryStore>,
 }
 
-impl DeleteMemoryTool {
+impl DeletePreferenceTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
 }
 
 #[derive(Deserialize)]
-struct DeleteMemoryArgs {
+struct DeletePreferenceArgs {
     name: String,
 }
 
 #[async_trait]
-impl Tool for DeleteMemoryTool {
+impl Tool for DeletePreferenceTool {
     fn name(&self) -> &str {
-        "delete_memory"
+        "delete_preference"
     }
 
     fn description(&self) -> &str {
-        "Delete a stored memory by name."
+        "Delete a stored user preference by name."
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
-                .add_property("name", PropertySchema::string("Name of the memory to delete"), true),
+                .add_property("name", PropertySchema::string("Name of the user preference to delete"), true),
         )
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
-        let args: DeleteMemoryArgs = serde_json::from_value(arguments)
-            .map_err(|e| Error::tool("delete_memory", format!("Invalid arguments: {}", e)))?;
+        let args: DeletePreferenceArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("delete_preference", format!("Invalid arguments: {}", e)))?;
 
         if self.store.delete(&args.name)? {
-            Ok(ToolOutput::success(format!("Memory '{}' deleted", args.name)))
+            Ok(ToolOutput::success(format!("Preference '{}' deleted", args.name)))
         } else {
-            Ok(ToolOutput::success(format!("Memory '{}' not found", args.name)))
+            Ok(ToolOutput::success(format!("Preference '{}' not found", args.name)))
         }
     }
 }
 
 // =============================================================================
-// List Memories Tool
+// List Preferences Tool
 // =============================================================================
 
-pub struct ListMemoriesTool {
+pub struct ListPreferencesTool {
     store: Arc<MemoryStore>,
 }
 
-impl ListMemoriesTool {
+impl ListPreferencesTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
 }
 
 #[async_trait]
-impl Tool for ListMemoriesTool {
+impl Tool for ListPreferencesTool {
     fn name(&self) -> &str {
-        "list_memories"
+        "list_preferences"
     }
 
     fn description(&self) -> &str {
-        "List all stored memory names."
+        "List all stored user preference names."
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -287,7 +287,7 @@ impl Tool for ListMemoriesTool {
         let names = self.store.list()?;
 
         if names.is_empty() {
-            Ok(ToolOutput::success("No memories stored"))
+            Ok(ToolOutput::success("No preferences stored"))
         } else {
             Ok(ToolOutput::success(names.join("\n")))
         }
@@ -298,23 +298,23 @@ impl Tool for ListMemoriesTool {
 // Factory functions
 // =============================================================================
 
-/// Create all memory tools with a shared store (boxed version)
-pub fn create_memory_tools(store: Arc<MemoryStore>) -> Vec<Box<dyn Tool>> {
+/// Create all preference tools with a shared store (boxed version)
+pub fn create_preference_tools(store: Arc<MemoryStore>) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(ReadMemoryTool::new(store.clone())),
-        Box::new(AddMemoryTool::new(store.clone())),
-        Box::new(DeleteMemoryTool::new(store.clone())),
-        Box::new(ListMemoriesTool::new(store)),
+        Box::new(ReadPreferenceTool::new(store.clone())),
+        Box::new(UpdatePreferenceTool::new(store.clone())),
+        Box::new(DeletePreferenceTool::new(store.clone())),
+        Box::new(ListPreferencesTool::new(store)),
     ]
 }
 
-/// Create all memory tools with a shared store (Arc version)
-pub fn create_memory_tools_arc(store: Arc<MemoryStore>) -> Vec<Arc<dyn Tool>> {
+/// Create all preference tools with a shared store (Arc version)
+pub fn create_preference_tools_arc(store: Arc<MemoryStore>) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(ReadMemoryTool::new(store.clone())),
-        Arc::new(AddMemoryTool::new(store.clone())),
-        Arc::new(DeleteMemoryTool::new(store.clone())),
-        Arc::new(ListMemoriesTool::new(store)),
+        Arc::new(ReadPreferenceTool::new(store.clone())),
+        Arc::new(UpdatePreferenceTool::new(store.clone())),
+        Arc::new(DeletePreferenceTool::new(store.clone())),
+        Arc::new(ListPreferencesTool::new(store)),
     ]
 }
 
@@ -323,32 +323,32 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_memory_operations() {
+    async fn test_preference_operations() {
         let store = Arc::new(MemoryStore::in_memory().unwrap());
 
-        // Add memory
-        let add_tool = AddMemoryTool::new(store.clone());
-        let result = add_tool
+        // Update preference
+        let update_tool = UpdatePreferenceTool::new(store.clone());
+        let result = update_tool
             .execute(serde_json::json!({"name": "test", "value": "hello"}))
             .await
             .unwrap();
         assert!(!result.is_error);
 
-        // Read memory
-        let read_tool = ReadMemoryTool::new(store.clone());
+        // Read preference
+        let read_tool = ReadPreferenceTool::new(store.clone());
         let result = read_tool
             .execute(serde_json::json!({"name": "test"}))
             .await
             .unwrap();
         assert_eq!(result.content, "hello");
 
-        // List memories
-        let list_tool = ListMemoriesTool::new(store.clone());
+        // List preferences
+        let list_tool = ListPreferencesTool::new(store.clone());
         let result = list_tool.execute(serde_json::json!({})).await.unwrap();
         assert!(result.content.contains("test"));
 
-        // Delete memory
-        let delete_tool = DeleteMemoryTool::new(store.clone());
+        // Delete preference
+        let delete_tool = DeletePreferenceTool::new(store.clone());
         let result = delete_tool
             .execute(serde_json::json!({"name": "test"}))
             .await

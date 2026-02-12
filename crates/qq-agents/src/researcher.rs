@@ -44,7 +44,7 @@ Your response should:
 - Cite sources with URLs
 
 ## IMPORTANT: Read-Only Agent
-You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You must not write to memory. You may only read, search, and fetch web content. If the task requires saving results, return them in your response for the caller to handle.
+You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete any files or directories. You must not write to preference stores. You may only read, search, and fetch web content. If the task requires saving results, return them in your response for the caller to handle.
 
 ## Anti-patterns to Avoid
 - Don't over-research simple questions - one good search is often enough
@@ -114,7 +114,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["web_search", "fetch_webpage", "read_memory", "bash", "mount_external", "update_my_task"]
+        &["web_search", "fetch_webpage", "read_preference", "bash", "mount_external", "update_my_task"]
     }
 
     fn max_turns(&self) -> usize {
@@ -153,12 +153,12 @@ mod tests {
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
-        assert!(agent.tool_names().contains(&"read_memory"));
+        assert!(agent.tool_names().contains(&"read_preference"));
         assert!(agent.tool_names().contains(&"update_my_task"));
         assert!(agent.tool_names().contains(&"bash"));
         assert!(agent.tool_names().contains(&"mount_external"));
         // Researcher is read-only - no write tools
-        assert!(!agent.tool_names().contains(&"add_memory"));
+        assert!(!agent.tool_names().contains(&"update_preference"));
         assert!(!agent.tool_names().contains(&"write_file"));
     }
 
