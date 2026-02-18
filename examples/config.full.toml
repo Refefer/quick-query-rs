@@ -108,6 +108,14 @@ enable_memory = true
 # window manageable. When the log itself grows large, a "Reflector" LLM pass
 # merges and compresses it.
 #
+# This applies to the main chat session. Agents have their own context management
+# controlled per-agent via memory_strategy in agents.toml:
+#   - "obs-memory"  (default for built-in agents) - same observational memory,
+#     running inside the agent loop with agent-tuned thresholds (30KB/100KB).
+#   - "compaction"  (default for external agents) - post-execution LLM
+#     summarization with continuation support.
+# See agents.toml for per-agent configuration.
+#
 # The defaults work well for most use cases. Only change these if you have a
 # specific reason — incorrect values can cause excessive LLM calls (thresholds
 # too low) or blow through context limits (thresholds too high).
@@ -115,6 +123,7 @@ enable_memory = true
 [compaction]
 # Provider for compaction LLM calls (defaults to the session provider).
 # Set this to route compaction through a cheaper/faster provider.
+# This provider is shared with agents using obs-memory.
 # provider = "anthropic"
 
 # Model override for compaction LLM calls.
@@ -124,17 +133,17 @@ enable_memory = true
 
 # Byte threshold for unobserved messages before the Observer triggers.
 # When unobserved messages exceed this size, they are distilled into observations.
-# Default: 50000 (50 KB)
+# Default: 50000 (50 KB) for chat, 30000 (30 KB) for agents
 # message_threshold_bytes = 50000
 
 # Byte threshold for the observation log before the Reflector triggers.
 # When the observation log exceeds this size, it is merged and compressed.
-# Default: 200000 (200 KB)
+# Default: 200000 (200 KB) for chat, 100000 (100 KB) for agents
 # observation_threshold_bytes = 200000
 
 # Number of recent messages to always keep verbatim (never observe).
 # These are sent as-is to the LLM for full fidelity on recent exchanges.
-# Default: 10
+# Default: 10 for chat, 6 for agents
 # preserve_recent = 10
 
 # Hysteresis multiplier applied to thresholds to prevent compaction from
