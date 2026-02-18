@@ -31,6 +31,18 @@ pub struct ObservationConfig {
     pub hysteresis: f64,
 }
 
+impl ObservationConfig {
+    /// Agent-tuned defaults: smaller thresholds for agent contexts.
+    pub fn for_agents() -> Self {
+        Self {
+            message_threshold_bytes: 30_000,
+            observation_threshold_bytes: 100_000,
+            preserve_recent: 6,
+            hysteresis: 1.1,
+        }
+    }
+}
+
 impl Default for ObservationConfig {
     fn default() -> Self {
         Self {
@@ -65,6 +77,28 @@ impl ObservationalMemory {
             reflection_count: 0,
             config,
         }
+    }
+
+    /// Create with a pre-existing observation log (for resuming stateful agents).
+    /// All loaded messages are treated as unobserved (`observed_up_to: 0`).
+    pub fn with_observation_log(config: ObservationConfig, log: String) -> Self {
+        Self {
+            observation_log: log,
+            observed_up_to: 0,
+            observation_count: 0,
+            reflection_count: 0,
+            config,
+        }
+    }
+
+    /// Decompose into parts for storage: (observation_log, observation_count, reflection_count).
+    pub fn into_parts(self) -> (String, u32, u32) {
+        (self.observation_log, self.observation_count, self.reflection_count)
+    }
+
+    /// Get the number of observation passes completed.
+    pub fn observation_count(&self) -> u32 {
+        self.observation_count
     }
 
     /// Check if unobserved messages exceed the message threshold.

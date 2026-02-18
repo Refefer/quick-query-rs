@@ -10,6 +10,26 @@ fn default_max_turns() -> usize {
     20
 }
 
+fn default_compaction_strategy() -> AgentMemoryStrategy {
+    AgentMemoryStrategy::Compaction
+}
+
+/// Strategy for managing agent memory across execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentMemoryStrategy {
+    /// Post-execution LLM summarization with continuation support.
+    Compaction,
+    /// In-loop observational memory (messages -> observations -> reflections).
+    ObsMemory,
+}
+
+impl Default for AgentMemoryStrategy {
+    fn default() -> Self {
+        Self::ObsMemory
+    }
+}
+
 /// Configuration overrides for built-in agents.
 ///
 /// Allows customizing tool limits and other settings for internal agents
@@ -26,8 +46,17 @@ pub struct BuiltinAgentOverride {
 
     /// Optional compaction prompt override for agent memory summarization.
     /// When set, overrides the agent's built-in compact_prompt.
+    /// Only used when memory_strategy is "compaction".
     #[serde(default)]
     pub compact_prompt: Option<String>,
+
+    /// Memory strategy override: "compaction" or "obs-memory".
+    #[serde(default)]
+    pub memory_strategy: Option<AgentMemoryStrategy>,
+
+    /// Maximum observations before requesting wrap-up (obs-memory only).
+    #[serde(default)]
+    pub max_observations: Option<u32>,
 
     /// Disable bash tool for this agent (default: false = bash enabled).
     #[serde(default)]
@@ -71,8 +100,18 @@ pub struct AgentDefinition {
 
     /// Optional compaction prompt for agent memory summarization.
     /// Falls back to DEFAULT_COMPACT_PROMPT if omitted.
+    /// Only used when memory_strategy is "compaction".
     #[serde(default)]
     pub compact_prompt: Option<String>,
+
+    /// Memory strategy: "compaction" or "obs-memory".
+    /// Defaults to "compaction" for external agents (backward compat).
+    #[serde(default = "default_compaction_strategy")]
+    pub memory_strategy: AgentMemoryStrategy,
+
+    /// Maximum observations before requesting wrap-up (obs-memory only).
+    #[serde(default)]
+    pub max_observations: Option<u32>,
 
     /// Disable bash tool for this agent (default: false = bash is auto-injected).
     #[serde(default)]
@@ -169,6 +208,20 @@ impl AgentsConfig {
             .get(name)
             .and_then(|o| o.no_bash)
             .unwrap_or(false)
+    }
+
+    /// Get memory strategy override for a built-in agent.
+    pub fn get_builtin_memory_strategy(&self, name: &str) -> Option<&AgentMemoryStrategy> {
+        self.builtin
+            .get(name)
+            .and_then(|o| o.memory_strategy.as_ref())
+    }
+
+    /// Get max_observations override for a built-in agent.
+    pub fn get_builtin_max_observations(&self, name: &str) -> Option<u32> {
+        self.builtin
+            .get(name)
+            .and_then(|o| o.max_observations)
     }
 }
 
@@ -375,5 +428,61 @@ system_prompt = "You are simple"
 
         let agent = config.get("simple-agent").unwrap();
         assert!(agent.compact_prompt.is_none());
+    }
+
+    #[test]
+    fn test_builtin_memory_strategy_override() {
+        let toml_content = r#"
+[builtin.coder]
+memory_strategy = "compaction"
+
+[builtin.explore]
+memory_strategy = "obs-memory"
+max_observations = 15
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert_eq!(
+            config.get_builtin_memory_strategy("coder"),
+            Some(&AgentMemoryStrategy::Compaction)
+        );
+        assert_eq!(
+            config.get_builtin_memory_strategy("explore"),
+            Some(&AgentMemoryStrategy::ObsMemory)
+        );
+        assert_eq!(config.get_builtin_max_observations("explore"), Some(15));
+        assert!(config.get_builtin_memory_strategy("nonexistent").is_none());
+        assert!(config.get_builtin_max_observations("coder").is_none());
+    }
+
+    #[test]
+    fn test_external_agent_memory_strategy() {
+        let toml_content = r#"
+[agents.obs-agent]
+description = "Obs agent"
+system_prompt = "You are an obs agent"
+memory_strategy = "obs-memory"
+max_observations = 20
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("obs-agent").unwrap();
+        assert_eq!(agent.memory_strategy, AgentMemoryStrategy::ObsMemory);
+        assert_eq!(agent.max_observations, Some(20));
+    }
+
+    #[test]
+    fn test_external_agent_memory_strategy_default() {
+        let toml_content = r#"
+[agents.default-agent]
+description = "Default agent"
+system_prompt = "You are default"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("default-agent").unwrap();
+        // External agents default to compaction for backward compat
+        assert_eq!(agent.memory_strategy, AgentMemoryStrategy::Compaction);
+        assert!(agent.max_observations.is_none());
     }
 }
