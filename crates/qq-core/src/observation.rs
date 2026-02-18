@@ -84,14 +84,35 @@ impl ObservationalMemory {
         let threshold =
             (self.config.message_threshold_bytes as f64 * self.config.hysteresis) as usize;
 
-        unobserved_bytes > threshold
+        let triggered = unobserved_bytes > threshold;
+
+        tracing::debug!(
+            total_messages = messages.len(),
+            preserve_recent = preserve,
+            unobserved_range = %(format!("{}..{}", self.observed_up_to, unobserved_end)),
+            unobserved_bytes = unobserved_bytes,
+            threshold = threshold,
+            triggered = triggered,
+            "Observation check"
+        );
+
+        triggered
     }
 
     /// Check if the observation log exceeds the observation threshold.
     pub fn needs_reflection(&self) -> bool {
         let threshold =
             (self.config.observation_threshold_bytes as f64 * self.config.hysteresis) as usize;
-        self.observation_log.len() > threshold
+        let triggered = self.observation_log.len() > threshold;
+
+        tracing::debug!(
+            log_bytes = self.observation_log.len(),
+            threshold = threshold,
+            triggered = triggered,
+            "Reflection check"
+        );
+
+        triggered
     }
 
     /// Run the full compaction pipeline: observe then reflect if needed.
@@ -120,6 +141,13 @@ impl ObservationalMemory {
                 if safe_end > self.observed_up_to {
                     let to_observe = &messages[self.observed_up_to..safe_end];
 
+                    tracing::debug!(
+                        messages_to_observe = to_observe.len(),
+                        unobserved_bytes = unobserved_bytes,
+                        safe_split = safe_end,
+                        "Starting observation pass"
+                    );
+
                     match compactor.observe(to_observe).await {
                         Ok(observations) if !observations.is_empty() => {
                             // Append to observation log
@@ -135,6 +163,15 @@ impl ObservationalMemory {
                             // since we drained everything before it.
 
                             self.observation_count += 1;
+
+                            tracing::debug!(
+                                observation_bytes = observations.len(),
+                                messages_drained = safe_end - self.observed_up_to,
+                                remaining_messages = messages.len(),
+                                log_bytes = self.observation_log.len(),
+                                observation_count = self.observation_count,
+                                "Observation pass complete"
+                            );
                         }
                         Ok(_) => {
                             tracing::warn!("Observer returned empty result, skipping");
@@ -152,10 +189,21 @@ impl ObservationalMemory {
             (self.config.observation_threshold_bytes as f64 * self.config.hysteresis) as usize;
 
         if self.observation_log.len() > obs_threshold {
+            tracing::debug!(
+                log_bytes_before = self.observation_log.len(),
+                "Starting reflection pass"
+            );
+
             match compactor.reflect(&self.observation_log).await {
                 Ok(reflected) if !reflected.is_empty() => {
                     self.observation_log = reflected;
                     self.reflection_count += 1;
+
+                    tracing::debug!(
+                        log_bytes_after = self.observation_log.len(),
+                        reflection_count = self.reflection_count,
+                        "Reflection pass complete"
+                    );
                 }
                 Ok(_) => {
                     tracing::warn!("Reflector returned empty result, keeping current log");
@@ -207,7 +255,8 @@ impl ObservationalMemory {
 /// A tool call sequence is: assistant message with tool_calls followed by
 /// one or more tool result messages. We should never split in the middle.
 pub fn find_safe_split_point(messages: &[Message], desired_end: usize) -> usize {
-    let mut end = desired_end.min(messages.len());
+    let clamped = desired_end.min(messages.len());
+    let mut end = clamped;
 
     // Walk backwards to find a position that's not inside a tool call sequence
     while end > 0 {
@@ -228,6 +277,14 @@ pub fn find_safe_split_point(messages: &[Message], desired_end: usize) -> usize 
 
         // Safe position found
         break;
+    }
+
+    if end != clamped {
+        tracing::debug!(
+            desired = clamped,
+            actual = end,
+            "Split point adjusted to preserve tool call sequence"
+        );
     }
 
     end

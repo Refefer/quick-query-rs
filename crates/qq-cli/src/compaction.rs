@@ -129,6 +129,12 @@ impl ContextCompactor for LlmCompactor {
             }
         }
 
+        tracing::debug!(
+            message_count = messages.len(),
+            formatted_bytes = formatted.len(),
+            "Calling observer LLM"
+        );
+
         let request = self.build_request(&system, &formatted);
         let response = self.provider.complete(request).await?;
         let result = response.message.content.to_string_lossy();
@@ -137,12 +143,22 @@ impl ContextCompactor for LlmCompactor {
             return Err(Error::Unknown("Observer returned empty response".to_string()));
         }
 
+        tracing::debug!(
+            result_bytes = result.len(),
+            "Observer LLM response received"
+        );
+
         Ok(result)
     }
 
     async fn reflect(&self, observation_log: &str) -> Result<String, Error> {
         let date = self.current_date();
         let system = REFLECTOR_PROMPT.replace("{current_date}", &date);
+
+        tracing::debug!(
+            input_bytes = observation_log.len(),
+            "Calling reflector LLM"
+        );
 
         let request = self.build_request(&system, observation_log);
         let response = self.provider.complete(request).await?;
@@ -151,6 +167,11 @@ impl ContextCompactor for LlmCompactor {
         if result.is_empty() {
             return Err(Error::Unknown("Reflector returned empty response".to_string()));
         }
+
+        tracing::debug!(
+            result_bytes = result.len(),
+            "Reflector LLM response received"
+        );
 
         Ok(result)
     }

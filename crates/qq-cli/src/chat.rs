@@ -82,6 +82,12 @@ impl ChatSession {
         // Insert observation log as a system message (stable, cacheable prefix)
         let log = self.observation_memory.observation_log();
         if !log.is_empty() {
+            tracing::debug!(
+                observation_log_bytes = log.len(),
+                recent_messages = self.messages.len(),
+                "Building messages with observation log"
+            );
+
             let obs_msg = format!(
                 "## Observation Log\n\n\
                  The following is a structured log of observations from earlier in this \
@@ -114,6 +120,15 @@ impl ChatSession {
 
     /// Compact the conversation history using observational memory.
     pub async fn compact_if_needed(&mut self) {
+        tracing::debug!(
+            message_count = self.messages.len(),
+            total_bytes = self.total_bytes(),
+            log_bytes = self.observation_memory.log_bytes(),
+            observation_count = self.observation_memory.observation_count,
+            reflection_count = self.observation_memory.reflection_count,
+            "Checking if compaction needed"
+        );
+
         if let Some(ref compactor) = self.compactor {
             if let Err(e) = self
                 .observation_memory

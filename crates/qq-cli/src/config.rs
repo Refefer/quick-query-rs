@@ -26,23 +26,55 @@ pub struct Config {
 }
 
 /// Configuration for observational memory compaction.
+///
+/// Observational memory automatically compresses older conversation messages
+/// into a structured observation log, keeping the context window manageable
+/// during long sessions. An "Observer" LLM pass distills raw messages into
+/// dated observations; a "Reflector" pass further compresses the log when it
+/// grows large.
+///
+/// The defaults work well for most use cases. Only override these if you have
+/// a specific reason (e.g., running a very cheap model that benefits from a
+/// smaller window, or a very capable model where you want to delay compaction).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
-    /// Provider name for compaction LLM calls (defaults to session provider)
+    /// Provider name for compaction LLM calls (defaults to the session provider).
+    /// Set this to route compaction through a cheaper/faster model provider.
     #[serde(default)]
     pub provider: Option<String>,
-    /// Model override for compaction LLM calls (e.g., "claude-3-5-haiku")
+
+    /// Model override for compaction LLM calls (e.g., "claude-3-5-haiku").
+    /// When set, compaction uses this model instead of the session model.
     #[serde(default)]
     pub model: Option<String>,
-    /// Byte threshold for unobserved messages before Observer triggers
+
+    /// Byte threshold for unobserved messages before the Observer triggers.
+    /// When the total size of unobserved messages exceeds this value, the
+    /// Observer LLM is called to distill them into observations.
+    /// Default: 50000 (50 KB).
     #[serde(default)]
     pub message_threshold_bytes: Option<usize>,
-    /// Byte threshold for observation log before Reflector triggers
+
+    /// Byte threshold for the observation log before the Reflector triggers.
+    /// When the accumulated observation log exceeds this value, the Reflector
+    /// LLM is called to merge and compress it.
+    /// Default: 200000 (200 KB).
     #[serde(default)]
     pub observation_threshold_bytes: Option<usize>,
-    /// Number of recent messages to preserve
+
+    /// Number of recent messages to always keep as raw messages (never observe).
+    /// These messages are sent verbatim to the LLM so it has full fidelity on
+    /// the most recent exchanges.
+    /// Default: 10.
     #[serde(default)]
     pub preserve_recent: Option<usize>,
+
+    /// Hysteresis multiplier applied to thresholds to prevent compaction from
+    /// re-triggering immediately after a pass. The effective threshold is
+    /// `threshold * hysteresis`. Values slightly above 1.0 work best.
+    /// Default: 1.1.
+    #[serde(default)]
+    pub hysteresis: Option<f64>,
 }
 
 impl CompactionConfig {
@@ -53,7 +85,7 @@ impl CompactionConfig {
             message_threshold_bytes: self.message_threshold_bytes.unwrap_or(defaults.message_threshold_bytes),
             observation_threshold_bytes: self.observation_threshold_bytes.unwrap_or(defaults.observation_threshold_bytes),
             preserve_recent: self.preserve_recent.unwrap_or(defaults.preserve_recent),
-            hysteresis: defaults.hysteresis,
+            hysteresis: self.hysteresis.unwrap_or(defaults.hysteresis),
         }
     }
 }
@@ -516,6 +548,7 @@ mod tests {
             message_threshold_bytes = 30000
             observation_threshold_bytes = 150000
             preserve_recent = 8
+            hysteresis = 1.25
         "#;
 
         let config: Config = toml::from_str(toml).unwrap();
@@ -525,11 +558,13 @@ mod tests {
         assert_eq!(comp.message_threshold_bytes, Some(30000));
         assert_eq!(comp.observation_threshold_bytes, Some(150000));
         assert_eq!(comp.preserve_recent, Some(8));
+        assert_eq!(comp.hysteresis, Some(1.25));
 
         let obs_config = comp.to_observation_config();
         assert_eq!(obs_config.message_threshold_bytes, 30000);
         assert_eq!(obs_config.observation_threshold_bytes, 150000);
         assert_eq!(obs_config.preserve_recent, 8);
+        assert!((obs_config.hysteresis - 1.25).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -557,5 +592,6 @@ mod tests {
         assert_eq!(obs_config.message_threshold_bytes, 50_000);
         assert_eq!(obs_config.observation_threshold_bytes, 200_000);
         assert_eq!(obs_config.preserve_recent, 10);
+        assert!((obs_config.hysteresis - 1.1).abs() < f64::EPSILON);
     }
 }

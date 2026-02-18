@@ -99,3 +99,45 @@ allow_write = true
 enable_web = true
 enable_filesystem = true
 enable_memory = true
+
+# =============================================================================
+# Compaction - Observational Memory
+# =============================================================================
+# During long conversations, older messages are automatically distilled into a
+# structured observation log by an "Observer" LLM pass, keeping the context
+# window manageable. When the log itself grows large, a "Reflector" LLM pass
+# merges and compresses it.
+#
+# The defaults work well for most use cases. Only change these if you have a
+# specific reason — incorrect values can cause excessive LLM calls (thresholds
+# too low) or blow through context limits (thresholds too high).
+
+[compaction]
+# Provider for compaction LLM calls (defaults to the session provider).
+# Set this to route compaction through a cheaper/faster provider.
+# provider = "anthropic"
+
+# Model override for compaction LLM calls.
+# When set, compaction uses this model instead of the session model.
+# A smaller, cheaper model usually works fine here.
+# model = "claude-3-5-haiku"
+
+# Byte threshold for unobserved messages before the Observer triggers.
+# When unobserved messages exceed this size, they are distilled into observations.
+# Default: 50000 (50 KB)
+# message_threshold_bytes = 50000
+
+# Byte threshold for the observation log before the Reflector triggers.
+# When the observation log exceeds this size, it is merged and compressed.
+# Default: 200000 (200 KB)
+# observation_threshold_bytes = 200000
+
+# Number of recent messages to always keep verbatim (never observe).
+# These are sent as-is to the LLM for full fidelity on recent exchanges.
+# Default: 10
+# preserve_recent = 10
+
+# Hysteresis multiplier applied to thresholds to prevent compaction from
+# re-triggering immediately after a pass. Effective threshold = threshold * hysteresis.
+# Values slightly above 1.0 work best. Default: 1.1
+# hysteresis = 1.1
