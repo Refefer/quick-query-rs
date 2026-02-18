@@ -763,6 +763,8 @@ pub async fn run_tui(
     mut bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
     _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
     task_store: Option<Arc<qq_tools::TaskStore>>,
+    compactor: Option<Arc<dyn qq_core::ContextCompactor>>,
+    observation_config: qq_core::ObservationConfig,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -780,9 +782,12 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create chat session
+    // Create chat session with observational memory compaction
     let mut session = ChatSession::new(system_prompt)
-        .with_provider(Arc::clone(&provider));
+        .with_observation_config(observation_config);
+    if let Some(compactor) = compactor {
+        session = session.with_compactor(compactor);
+    }
 
     // Log conversation start
     if let Some(ref logger) = debug_logger {
@@ -1015,20 +1020,27 @@ pub async fn run_tui(
                                                 app.content_dirty = true;
                                             }
                                             TuiCommand::Memory => {
+                                                let msg_bytes: usize = session.messages.iter().map(|m| m.byte_count()).sum();
                                                 let mut info = format!(
                                                     "**Memory Usage**\n\n\
                                                     | Metric | Value |\n\
                                                     |--------|-------|\n\
-                                                    | Messages | {} |\n\
-                                                    | Context bytes | {} |\n\
+                                                    | Messages (recent) | {} |\n\
+                                                    | Message bytes | {} |\n\
+                                                    | Observation log | {} |\n\
+                                                    | Total context | {} |\n\
+                                                    | Observations | {} |\n\
+                                                    | Reflections | {} |\n\
                                                     | TUI content | {} |\n\
-                                                    | Compactions | {} |\n\
                                                     | Session input | {} |\n\
                                                     | Session output | {} |",
                                                     session.message_count(),
+                                                    crate::chat::format_bytes(msg_bytes),
+                                                    crate::chat::format_bytes(session.observation_memory.log_bytes()),
                                                     crate::chat::format_bytes(session.total_bytes()),
+                                                    session.observation_memory.observation_count,
+                                                    session.observation_memory.reflection_count,
                                                     crate::chat::format_bytes(app.content.len()),
-                                                    session.compaction_count,
                                                     crate::chat::format_bytes(app.session_input_bytes),
                                                     crate::chat::format_bytes(app.session_output_bytes),
                                                 );

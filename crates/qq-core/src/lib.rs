@@ -8,9 +8,13 @@ pub mod blocking;
 pub mod chunker;
 pub mod error;
 pub mod message;
+pub mod observation;
 pub mod provider;
 pub mod task;
 pub mod tool;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use agent::{
     Agent, AgentChannel, AgentConfig, AgentId, AgentInstanceMetadata, AgentInstanceState,
@@ -29,5 +33,6 @@ pub use task::{
 pub use tool::{PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry, execute_tool_dispatch};
 pub use chunker::{ChunkProcessor, ChunkerConfig};
 pub use blocking::run_blocking;
+pub use observation::{ContextCompactor, ObservationalMemory, ObservationConfig, find_safe_split_point};
 
 pub type Result<T> = std::result::Result<T, Error>;

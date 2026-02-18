@@ -13,6 +13,7 @@ use qq_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
 mod agents;
 mod chat;
+mod compaction;
 mod config;
 mod debug_log;
 mod event_bus;
@@ -26,7 +27,7 @@ pub use execution_context::ExecutionContext;
 
 use agents::{create_agent_tools, AgentExecutor, InformUserTool, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
-use qq_core::AgentMemory;
+use qq_core::{AgentMemory, ContextCompactor};
 use qq_tools::bash::permissions::parse_config_overrides;
 
 /// Log level for tracing output
@@ -686,6 +687,37 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         None => (None, None, None),
     };
 
+    // Create observational memory compactor
+    let observation_config = config
+        .compaction
+        .as_ref()
+        .map(|c| c.to_observation_config())
+        .unwrap_or_default();
+
+    let compactor: Option<Arc<dyn ContextCompactor>> = {
+        let compaction_provider = if let Some(ref comp_config) = config.compaction {
+            if let Some(ref provider_name) = comp_config.provider {
+                // Create a separate provider for compaction
+                let comp_settings = resolve_settings_for_provider(provider_name, config)?;
+                Arc::from(create_provider_from_settings(&comp_settings)?)
+            } else {
+                Arc::clone(&provider)
+            }
+        } else {
+            Arc::clone(&provider)
+        };
+
+        let model_override = config
+            .compaction
+            .as_ref()
+            .and_then(|c| c.model.clone());
+
+        Some(Arc::new(compaction::LlmCompactor::new(
+            compaction_provider,
+            model_override,
+        )))
+    };
+
     if use_tui {
         tui::run_tui(
             cli,
@@ -706,6 +738,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             bash_approval_rx,
             bash_permissions.clone(),
             task_store.clone(),
+            compactor.clone(),
+            observation_config.clone(),
         )
         .await
     } else {
@@ -726,6 +760,8 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             bash_approval_rx,
             bash_permissions,
             task_store,
+            compactor,
+            observation_config,
         )
         .await
     }
@@ -1001,6 +1037,35 @@ fn resolve_provider_type(
         "gemini" | "google" => "gemini".to_string(),
         _ => "openai".to_string(),
     }
+}
+
+/// Resolve minimal settings for a provider by name (used for compaction provider override).
+fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result<ResolvedSettings> {
+    let provider_config = config.providers.get(provider_name)
+        .with_context(|| format!("Compaction provider '{}' not found in config", provider_name))?;
+
+    let api_key = provider_config.api_key.clone()
+        .or_else(|| std::env::var(format!("{}_API_KEY", provider_name.to_uppercase())).ok())
+        .with_context(|| format!("API key not found for compaction provider '{}'", provider_name))?;
+
+    let provider_type = resolve_provider_type(
+        provider_config.provider_type.as_deref(),
+        provider_name,
+        provider_config.base_url.as_deref(),
+    );
+
+    Ok(ResolvedSettings {
+        profile_name: String::new(),
+        provider_name: provider_name.to_string(),
+        provider_type,
+        api_key,
+        base_url: provider_config.base_url.clone(),
+        model: provider_config.default_model.clone(),
+        system_prompt: None,
+        parameters: provider_config.parameters.clone(),
+        agents: None,
+        agent: String::new(),
+    })
 }
 
 fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn Provider>> {

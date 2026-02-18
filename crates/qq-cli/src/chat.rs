@@ -14,7 +14,8 @@ use futures::StreamExt;
 
 use qq_core::{
     execute_tools_parallel_with_chunker, AgentMemory, ChunkProcessor, ChunkerConfig,
-    CompletionRequest, Message, Provider, Role, StreamChunk, ToolCall, ToolRegistry,
+    CompletionRequest, ContextCompactor, Message, ObservationConfig, ObservationalMemory,
+    Provider, StreamChunk, ToolCall, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -25,54 +26,33 @@ use crate::event_bus::{AgentEvent, AgentEventBus};
 use crate::markdown::MarkdownRenderer;
 use crate::Cli;
 
-/// Chat session state
+/// Chat session state with observational memory compaction.
 pub struct ChatSession {
     pub messages: Vec<Message>,
     pub system_prompt: Option<String>,
-    provider: Option<Arc<dyn Provider>>,
-    /// Maximum context size in bytes before compaction triggers (default: 500KB)
-    max_context_bytes: usize,
-    /// Number of recent messages to always preserve during compaction (default: 10)
-    preserve_recent: usize,
-    /// Whether compaction has occurred during this session
-    pub compaction_count: u32,
-    /// Prompt used for LLM-powered context compaction
-    compact_prompt: String,
+    compactor: Option<Arc<dyn ContextCompactor>>,
+    pub observation_memory: ObservationalMemory,
 }
-
-/// Default max context bytes (500KB)
-const DEFAULT_MAX_CONTEXT_BYTES: usize = 500_000;
-/// Default number of recent messages to preserve
-const DEFAULT_PRESERVE_RECENT: usize = 10;
-/// Hysteresis margin: don't compact unless we're at least 10% over the limit
-const COMPACTION_HYSTERESIS: f64 = 1.1;
-
-/// Prompt for generating a conversation summary for context compaction.
-const COMPACTION_SUMMARY_PROMPT: &str = r#"The conversation history is getting long and needs to be compacted. Summarize the conversation so far in a way that preserves:
-
-1. Key decisions and conclusions reached
-2. Important facts, file paths, code snippets, or data mentioned
-3. The user's goals and preferences expressed
-4. Any pending tasks or unresolved questions
-
-Write a concise but comprehensive summary. Focus on information that would be needed to continue the conversation coherently. Do not include greetings or pleasantries."#;
 
 impl ChatSession {
     pub fn new(system_prompt: Option<String>) -> Self {
         Self {
             messages: Vec::new(),
             system_prompt,
-            provider: None,
-            max_context_bytes: DEFAULT_MAX_CONTEXT_BYTES,
-            preserve_recent: DEFAULT_PRESERVE_RECENT,
-            compaction_count: 0,
-            compact_prompt: COMPACTION_SUMMARY_PROMPT.to_string(),
+            compactor: None,
+            observation_memory: ObservationalMemory::new(ObservationConfig::default()),
         }
     }
 
-    /// Create a new session with a provider for LLM-powered compaction.
-    pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
-        self.provider = Some(provider);
+    /// Set the context compactor for LLM-powered observation and reflection.
+    pub fn with_compactor(mut self, compactor: Arc<dyn ContextCompactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
+    }
+
+    /// Set the observation config (thresholds, preserve_recent, etc.).
+    pub fn with_observation_config(mut self, config: ObservationConfig) -> Self {
+        self.observation_memory = ObservationalMemory::new(config);
         self
     }
 
@@ -99,191 +79,51 @@ impl ChatSession {
             msgs.push(Message::system(system.as_str()));
         }
 
+        // Insert observation log as a system message (stable, cacheable prefix)
+        let log = self.observation_memory.observation_log();
+        if !log.is_empty() {
+            let obs_msg = format!(
+                "## Observation Log\n\n\
+                 The following is a structured log of observations from earlier in this \
+                 conversation. Each entry captures a specific event, decision, or finding.\n\n\
+                 {}",
+                log
+            );
+            msgs.push(Message::system(obs_msg.as_str()));
+        }
+
+        // Recent unobserved messages
         msgs.extend(self.messages.clone());
         msgs
     }
 
     pub fn clear(&mut self) {
         self.messages.clear();
-        self.compaction_count = 0;
+        self.observation_memory.clear();
     }
 
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
 
-    /// Calculate total byte count of all messages in the session.
+    /// Calculate total byte count of all messages plus observation log.
     pub fn total_bytes(&self) -> usize {
-        self.messages.iter().map(|m| m.byte_count()).sum()
+        let msg_bytes: usize = self.messages.iter().map(|m| m.byte_count()).sum();
+        msg_bytes + self.observation_memory.log_bytes()
     }
 
-    /// Compact the conversation history if it exceeds the context limit.
-    ///
-    /// Uses a tiered strategy:
-    /// - Tier 1: LLM summarization of older messages (preferred)
-    /// - Tier 2: Partial truncation + summarization (fallback)
-    /// - Tier 3: Simple truncation (last resort)
+    /// Compact the conversation history using observational memory.
     pub async fn compact_if_needed(&mut self) {
-        let total = self.total_bytes();
-        let threshold = (self.max_context_bytes as f64 * COMPACTION_HYSTERESIS) as usize;
-
-        if total <= threshold {
-            return;
-        }
-
-        // Don't compact if we have very few messages
-        if self.messages.len() <= self.preserve_recent + 2 {
-            return;
-        }
-
-        let preserve_count = self.preserve_recent.min(self.messages.len());
-        let compact_end = self.messages.len() - preserve_count;
-
-        // Ensure we don't split in the middle of a tool call sequence.
-        // Walk backwards from compact_end to find a safe split point.
-        let safe_end = find_safe_split_point(&self.messages, compact_end);
-        if safe_end <= 1 {
-            // Nothing meaningful to compact
-            return;
-        }
-
-        let old_messages = &self.messages[..safe_end];
-
-        tracing::info!(
-            total_bytes = total,
-            max_bytes = self.max_context_bytes,
-            messages_to_compact = safe_end,
-            messages_to_preserve = self.messages.len() - safe_end,
-            "Context compaction triggered"
-        );
-
-        // Tier 1: Try LLM summarization
-        if let Some(ref provider) = self.provider {
-            match self.try_llm_summary(provider.clone(), old_messages).await {
-                Ok(summary) => {
-                    self.apply_compaction(safe_end, &summary);
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Tier 1 LLM summarization failed, trying tier 2");
-                }
-            }
-
-            // Tier 2: Try summarizing just the first half of old messages
-            let half = safe_end / 2;
-            if half > 0 {
-                let first_half = &self.messages[..half];
-                match self.try_llm_summary(provider.clone(), first_half).await {
-                    Ok(summary) => {
-                        self.apply_compaction(half, &summary);
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Tier 2 partial summarization failed, falling back to truncation"
-                        );
-                    }
-                }
+        if let Some(ref compactor) = self.compactor {
+            if let Err(e) = self
+                .observation_memory
+                .compact(&mut self.messages, compactor.as_ref())
+                .await
+            {
+                tracing::error!(error = %e, "Observation memory compaction failed");
             }
         }
-
-        // Tier 3: Simple truncation (no provider or all LLM calls failed)
-        tracing::warn!(
-            messages_dropped = safe_end,
-            "Tier 3 truncation: dropping old messages without summary"
-        );
-        let summary = format!(
-            "[Earlier conversation ({} messages, {} bytes) was truncated to save memory. \
-            Recent context is preserved below.]",
-            safe_end,
-            old_messages.iter().map(|m| m.byte_count()).sum::<usize>()
-        );
-        self.apply_compaction(safe_end, &summary);
     }
-
-    /// Attempt LLM-powered summarization of messages.
-    async fn try_llm_summary(
-        &self,
-        provider: Arc<dyn Provider>,
-        messages_to_summarize: &[Message],
-    ) -> Result<String> {
-        let mut summary_messages: Vec<Message> = messages_to_summarize.to_vec();
-        summary_messages.push(Message::user(self.compact_prompt.as_str()));
-
-        let request = CompletionRequest::new(summary_messages);
-        let response = provider.complete(request).await?;
-
-        let summary = response.message.content.to_string_lossy();
-        if summary.is_empty() {
-            return Err(anyhow::anyhow!("LLM returned empty summary"));
-        }
-
-        Ok(summary)
-    }
-
-    /// Apply compaction: replace old messages with a summary, keep recent messages.
-    fn apply_compaction(&mut self, compact_up_to: usize, summary: &str) {
-        let old_count = self.messages.len();
-        let old_bytes = self.total_bytes();
-
-        // Keep recent messages
-        let recent: Vec<Message> = self.messages.drain(compact_up_to..).collect();
-
-        // Replace all old messages with a single summary message
-        self.messages.clear();
-        let summary_text = format!("## Conversation Summary\n\n{}", summary);
-        self.messages.push(Message::system(summary_text.as_str()));
-        self.messages.extend(recent);
-        self.messages.shrink_to_fit();
-
-        self.compaction_count += 1;
-
-        let new_bytes = self.total_bytes();
-        tracing::info!(
-            old_messages = old_count,
-            new_messages = self.messages.len(),
-            old_bytes = old_bytes,
-            new_bytes = new_bytes,
-            bytes_freed = old_bytes.saturating_sub(new_bytes),
-            compaction_number = self.compaction_count,
-            "Context compaction complete"
-        );
-    }
-}
-
-/// Find a safe point to split messages that doesn't break tool call sequences.
-///
-/// A tool call sequence is: assistant message with tool_calls followed by
-/// one or more tool result messages. We should never split in the middle.
-fn find_safe_split_point(messages: &[Message], desired_end: usize) -> usize {
-    let mut end = desired_end;
-
-    // Walk backwards to find a position that's not inside a tool call sequence
-    while end > 0 {
-        let msg = &messages[end - 1];
-
-        // If the message at end-1 is a tool result, we're inside a sequence.
-        // Keep walking back until we find the assistant message that started it.
-        if msg.tool_call_id.is_some() {
-            end -= 1;
-            continue;
-        }
-
-        // If the message at end-1 is an assistant with tool_calls,
-        // the results come after it, so we'd split right before the results.
-        // That's bad - include this message's results OR exclude the assistant msg.
-        if msg.role == Role::Assistant && !msg.tool_calls.is_empty() {
-            // Exclude this assistant message too, so the tool results stay with it
-            end -= 1;
-            continue;
-        }
-
-        // Safe position found
-        break;
-    }
-
-    end
 }
 
 /// Get the process RSS (Resident Set Size) in bytes.
@@ -648,6 +488,8 @@ pub async fn run_chat(
     bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
     _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
     task_store: Option<Arc<qq_tools::TaskStore>>,
+    compactor: Option<Arc<dyn ContextCompactor>>,
+    observation_config: ObservationConfig,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -709,7 +551,10 @@ pub async fn run_chat(
     }
 
     let mut session = ChatSession::new(system_prompt)
-        .with_provider(Arc::clone(&provider));
+        .with_observation_config(observation_config);
+    if let Some(compactor) = compactor {
+        session = session.with_compactor(compactor);
+    }
 
     // Log conversation start
     if let Some(ref logger) = debug_logger {
@@ -757,12 +602,16 @@ pub async fn run_chat(
                     }
                     ChatCommand::Memory => {
                         println!("\n=== Memory Usage ===");
-                        println!("  Messages:       {}", session.message_count());
-                        println!("  Context bytes:  {}", format_bytes(session.total_bytes()));
-                        println!("  Max context:    {}", format_bytes(DEFAULT_MAX_CONTEXT_BYTES));
-                        println!("  Compactions:    {}", session.compaction_count);
+                        println!("  Messages (recent): {}", session.message_count());
+                        println!("  Message bytes:     {}", format_bytes(
+                            session.messages.iter().map(|m| m.byte_count()).sum::<usize>()
+                        ));
+                        println!("  Observation log:   {}", format_bytes(session.observation_memory.log_bytes()));
+                        println!("  Total context:     {}", format_bytes(session.total_bytes()));
+                        println!("  Observations:      {}", session.observation_memory.observation_count);
+                        println!("  Reflections:       {}", session.observation_memory.reflection_count);
                         if let Some(rss) = get_rss_bytes() {
-                            println!("  Process RSS:    {}", format_bytes(rss));
+                            println!("  Process RSS:       {}", format_bytes(rss));
                         }
 
                         let diagnostics = agent_memory.diagnostics().await;
@@ -1293,4 +1142,223 @@ async fn run_completion(
 
 fn get_history_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("qq").join("chat_history"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qq_core::testing::MockCompactor;
+    use qq_core::ObservationConfig;
+
+    #[test]
+    fn test_new_session_empty() {
+        let session = ChatSession::new(Some("system".to_string()));
+        assert_eq!(session.message_count(), 0);
+        assert_eq!(session.total_bytes(), 0);
+        assert!(session.system_prompt.is_some());
+    }
+
+    #[test]
+    fn test_add_user_message() {
+        let mut session = ChatSession::new(None);
+        session.add_user_message("hello");
+        assert_eq!(session.message_count(), 1);
+        assert!(session.total_bytes() > 0);
+    }
+
+    #[test]
+    fn test_add_assistant_message() {
+        let mut session = ChatSession::new(None);
+        session.add_assistant_message("response");
+        assert_eq!(session.message_count(), 1);
+    }
+
+    #[test]
+    fn test_add_tool_result() {
+        let mut session = ChatSession::new(None);
+        session.add_tool_result("tc-1", "tool output");
+        assert_eq!(session.message_count(), 1);
+    }
+
+    #[test]
+    fn test_message_count_and_total_bytes() {
+        let mut session = ChatSession::new(None);
+        session.add_user_message("hello");
+        session.add_assistant_message("world");
+        assert_eq!(session.message_count(), 2);
+        assert_eq!(session.total_bytes(), 10); // "hello" + "world"
+    }
+
+    #[test]
+    fn test_build_messages_with_system_prompt() {
+        let mut session = ChatSession::new(Some("Be helpful.".to_string()));
+        session.add_user_message("hi");
+
+        let msgs = session.build_messages();
+        assert_eq!(msgs.len(), 2); // system + user
+        assert_eq!(msgs[0].content.as_text(), Some("Be helpful."));
+    }
+
+    #[test]
+    fn test_build_messages_without_system_prompt() {
+        let mut session = ChatSession::new(None);
+        session.add_user_message("hi");
+
+        let msgs = session.build_messages();
+        assert_eq!(msgs.len(), 1); // just user
+    }
+
+    #[test]
+    fn test_build_messages_with_observation_log() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 10,
+            preserve_recent: 1,
+            hysteresis: 1.0,
+            ..Default::default()
+        };
+        let mut session = ChatSession::new(Some("system".to_string()))
+            .with_observation_config(config);
+
+        // When observation_log is empty, no extra system message should be added.
+        session.add_user_message("hi");
+        let msgs = session.build_messages();
+        assert_eq!(msgs.len(), 2); // system + user (no observation log)
+    }
+
+    #[test]
+    fn test_build_messages_empty_observation_log() {
+        let mut session = ChatSession::new(Some("system".to_string()));
+        session.add_user_message("hi");
+        session.add_assistant_message("hello");
+
+        let msgs = session.build_messages();
+        // Should be: system + user + assistant (no observation log message)
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn test_clear_resets_messages_and_observation_memory() {
+        let mut session = ChatSession::new(None);
+        session.add_user_message("hello");
+        session.add_assistant_message("world");
+
+        session.clear();
+
+        assert_eq!(session.message_count(), 0);
+        assert_eq!(session.total_bytes(), 0);
+        assert_eq!(session.observation_memory.observation_count, 0);
+        assert_eq!(session.observation_memory.reflection_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_compact_if_needed_triggers_observation() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 200,
+            observation_threshold_bytes: 100_000,
+            preserve_recent: 2,
+            hysteresis: 1.0,
+        };
+
+        let compactor = Arc::new(MockCompactor::new());
+        compactor.queue_observe(Ok("## Observations\n- key finding".to_string()));
+
+        let mut session = ChatSession::new(None)
+            .with_observation_config(config)
+            .with_compactor(compactor.clone());
+
+        // Add enough messages to exceed threshold
+        for _ in 0..8 {
+            session.add_user_message(&"x".repeat(100));
+        }
+        let original_count = session.message_count();
+
+        session.compact_if_needed().await;
+
+        // Messages should have been compacted
+        assert!(session.message_count() < original_count);
+        assert_eq!(session.observation_memory.observation_count, 1);
+        assert!(session.observation_memory.observation_log().contains("key finding"));
+    }
+
+    #[tokio::test]
+    async fn test_compact_if_needed_no_compactor_does_nothing() {
+        let mut session = ChatSession::new(None);
+        for _ in 0..20 {
+            session.add_user_message(&"x".repeat(100));
+        }
+        let count = session.message_count();
+
+        session.compact_if_needed().await;
+
+        assert_eq!(session.message_count(), count); // No change
+    }
+
+    #[tokio::test]
+    async fn test_compact_if_needed_below_threshold_does_nothing() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 50_000,
+            preserve_recent: 10,
+            hysteresis: 1.0,
+            ..Default::default()
+        };
+
+        let compactor = Arc::new(MockCompactor::new());
+        compactor.queue_observe(Ok("should not be called".to_string()));
+
+        let mut session = ChatSession::new(None)
+            .with_observation_config(config)
+            .with_compactor(compactor);
+
+        session.add_user_message("short");
+        session.add_assistant_message("also short");
+
+        session.compact_if_needed().await;
+
+        assert_eq!(session.message_count(), 2); // No compaction
+        assert_eq!(session.observation_memory.observation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 200,
+            observation_threshold_bytes: 100_000,
+            preserve_recent: 2,
+            hysteresis: 1.0,
+        };
+
+        let compactor = Arc::new(MockCompactor::new());
+        compactor.queue_observe(Ok("## Round 1\n- First observations".to_string()));
+        compactor.queue_observe(Ok("## Round 2\n- More observations".to_string()));
+
+        let mut session = ChatSession::new(Some("test system".to_string()))
+            .with_observation_config(config)
+            .with_compactor(compactor);
+
+        // Add messages and compact
+        for _ in 0..8 {
+            session.add_user_message(&"x".repeat(100));
+        }
+        session.compact_if_needed().await;
+        assert_eq!(session.observation_memory.observation_count, 1);
+
+        // Build messages should include observation log
+        let msgs = session.build_messages();
+        let has_obs_log = msgs.iter().any(|m| {
+            m.content.to_string_lossy().contains("Observation Log")
+        });
+        assert!(has_obs_log);
+
+        // Add more messages and compact again
+        for _ in 0..8 {
+            session.add_user_message(&"y".repeat(100));
+        }
+        session.compact_if_needed().await;
+        assert_eq!(session.observation_memory.observation_count, 2);
+
+        // Observation log should contain both rounds
+        let log = session.observation_memory.observation_log();
+        assert!(log.contains("First observations"));
+        assert!(log.contains("More observations"));
+    }
 }
