@@ -483,6 +483,18 @@ impl TuiApp {
                     agent_name, attempt, max_retries, error
                 ));
             }
+            AgentEvent::ObservationComplete {
+                agent_name,
+                observation_count,
+                log_bytes,
+            } => {
+                self.status_message = Some(format!(
+                    "{}: Observation #{} (log: {:.1}KB)",
+                    agent_name,
+                    observation_count,
+                    log_bytes as f64 / 1024.0
+                ));
+            }
         }
     }
 

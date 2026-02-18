@@ -621,6 +621,37 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Create scoped agent memory for persistent instance state
     let agent_memory = AgentMemory::new();
 
+    // Create observational memory compactor (used by both ChatSession and agents)
+    let observation_config = config
+        .compaction
+        .as_ref()
+        .map(|c| c.to_observation_config())
+        .unwrap_or_default();
+
+    let compactor: Option<Arc<dyn ContextCompactor>> = {
+        let compaction_provider = if let Some(ref comp_config) = config.compaction {
+            if let Some(ref provider_name) = comp_config.provider {
+                // Create a separate provider for compaction
+                let comp_settings = resolve_settings_for_provider(provider_name, config)?;
+                Arc::from(create_provider_from_settings(&comp_settings)?)
+            } else {
+                Arc::clone(&provider)
+            }
+        } else {
+            Arc::clone(&provider)
+        };
+
+        let model_override = config
+            .compaction
+            .as_ref()
+            .and_then(|c| c.model.clone());
+
+        Some(Arc::new(compaction::LlmCompactor::new(
+            compaction_provider,
+            model_override,
+        )))
+    };
+
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
         if disable_agents {
@@ -640,6 +671,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             Some(agent_memory.clone()),
             "pm".to_string(),
             task_store.clone(),
+            compactor.clone(),
         )
     };
 
@@ -685,37 +717,6 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     let (bash_mounts, bash_approval_rx, bash_permissions) = match bash_resources {
         Some(br) => (Some(br.mounts), Some(br.approval_rx), Some(br.permissions)),
         None => (None, None, None),
-    };
-
-    // Create observational memory compactor
-    let observation_config = config
-        .compaction
-        .as_ref()
-        .map(|c| c.to_observation_config())
-        .unwrap_or_default();
-
-    let compactor: Option<Arc<dyn ContextCompactor>> = {
-        let compaction_provider = if let Some(ref comp_config) = config.compaction {
-            if let Some(ref provider_name) = comp_config.provider {
-                // Create a separate provider for compaction
-                let comp_settings = resolve_settings_for_provider(provider_name, config)?;
-                Arc::from(create_provider_from_settings(&comp_settings)?)
-            } else {
-                Arc::clone(&provider)
-            }
-        } else {
-            Arc::clone(&provider)
-        };
-
-        let model_override = config
-            .compaction
-            .as_ref()
-            .and_then(|c| c.model.clone());
-
-        Some(Arc::new(compaction::LlmCompactor::new(
-            compaction_provider,
-            model_override,
-        )))
     };
 
     if use_tui {
