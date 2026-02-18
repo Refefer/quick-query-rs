@@ -191,8 +191,30 @@ fn render_help_overlay(frame: &mut Frame) {
 fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalRequest) {
     let area = frame.area();
 
-    let overlay_width = 64u16.min(area.width.saturating_sub(4));
-    let overlay_height = 10u16.min(area.height.saturating_sub(4));
+    // Use up to 80% of terminal width for the overlay
+    let overlay_width = (area.width * 4 / 5).max(40).min(area.width.saturating_sub(4));
+    // Inner width available for text (subtract 2 for borders)
+    let inner_width = overlay_width.saturating_sub(2) as usize;
+
+    let triggers = if request.trigger_commands.is_empty() {
+        String::new()
+    } else {
+        format!("Triggered by: {}", request.trigger_commands.join(", "))
+    };
+
+    // Calculate how many lines the command will wrap to
+    let cmd_lines = if inner_width > 0 {
+        (request.full_command.len() + inner_width - 1) / inner_width
+    } else {
+        1
+    };
+    // Cap command display to a reasonable number of wrapped lines
+    let max_cmd_lines: usize = 8;
+    let cmd_lines = cmd_lines.min(max_cmd_lines);
+
+    // Height: border(1) + header(1) + blank(1) + cmd_lines + triggers(0..1) + blank(1) + keys(1) + border(1)
+    let triggers_line = if triggers.is_empty() { 0u16 } else { 1 };
+    let overlay_height = (6 + cmd_lines as u16 + triggers_line).min(area.height.saturating_sub(4));
 
     let x = (area.width.saturating_sub(overlay_width)) / 2;
     let y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -202,18 +224,12 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
     // Clear the area behind the overlay (Clear replaces characters with spaces)
     frame.render_widget(Clear, overlay_area);
 
-    // Truncate command if it's too long for the overlay
-    let max_cmd_len = (overlay_width as usize).saturating_sub(6);
-    let cmd_display = if request.full_command.len() > max_cmd_len {
-        format!("{}...", &request.full_command[..max_cmd_len.saturating_sub(3)])
+    // Truncate command only if it exceeds the wrapped line cap
+    let max_chars = inner_width * max_cmd_lines;
+    let cmd_display = if request.full_command.len() > max_chars {
+        format!("{}...", &request.full_command[..max_chars.saturating_sub(3)])
     } else {
         request.full_command.clone()
-    };
-
-    let triggers = if request.trigger_commands.is_empty() {
-        String::new()
-    } else {
-        format!("Triggered by: {}", request.trigger_commands.join(", "))
     };
 
     let mut lines = vec![
@@ -222,11 +238,18 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
             Style::default().fg(Color::Yellow),
         )),
         Line::from(""),
-        Line::from(Span::styled(
-            cmd_display,
-            Style::default().fg(Color::White),
-        )),
     ];
+
+    // Manually wrap the command text so each Line gets styled correctly
+    let cmd_bytes = cmd_display.as_bytes();
+    for chunk_start in (0..cmd_display.len()).step_by(inner_width.max(1)) {
+        let chunk_end = (chunk_start + inner_width).min(cmd_display.len());
+        let chunk = String::from_utf8_lossy(&cmd_bytes[chunk_start..chunk_end]);
+        lines.push(Line::from(Span::styled(
+            chunk.into_owned(),
+            Style::default().fg(Color::White),
+        )));
+    }
 
     if !triggers.is_empty() {
         lines.push(Line::from(Span::styled(
