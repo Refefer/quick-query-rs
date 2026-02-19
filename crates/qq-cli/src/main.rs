@@ -708,7 +708,6 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             base_tools,
             agents_config,
             settings.agents.clone(),
-            settings.model.clone(),
         );
         Some(Arc::new(tokio::sync::RwLock::new(executor)))
     };

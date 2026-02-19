@@ -39,9 +39,6 @@ pub struct AgentExecutor {
     tools: Arc<ToolRegistry>,
     /// Provider for LLM calls
     provider: Arc<dyn Provider>,
-    /// Model to use (can be overridden per-agent)
-    #[allow(dead_code)]
-    default_model: Option<String>,
     /// Enabled agents filter (None = all enabled)
     enabled_agents: Option<Vec<String>>,
 }
@@ -53,7 +50,6 @@ impl AgentExecutor {
         tools: ToolRegistry,
         external_config: AgentsConfig,
         enabled_agents: Option<Vec<String>>,
-        default_model: Option<String>,
     ) -> Self {
         // Create all internal agents
         let mut internal_agents: HashMap<String, Box<dyn InternalAgent>> = HashMap::new();
@@ -67,7 +63,6 @@ impl AgentExecutor {
             external_agents: external_config,
             tools: Arc::new(tools),
             provider,
-            default_model,
             enabled_agents,
         }
     }

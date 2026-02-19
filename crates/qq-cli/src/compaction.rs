@@ -91,10 +91,8 @@ impl LlmCompactor {
     }
 
     fn build_request(&self, system: &str, user_content: &str) -> CompletionRequest {
-        let messages = vec![Message::user(user_content)];
-        let mut request = CompletionRequest::new(messages)
-            .with_system(system)
-            .with_stream(false);
+        let messages = vec![Message::system(system), Message::user(user_content)];
+        let mut request = CompletionRequest::new(messages).with_stream(false);
 
         if let Some(ref model) = self.model {
             request = request.with_model(model);
@@ -197,13 +195,13 @@ mod tests {
         assert_eq!(provider.request_count(), 1);
         let req = provider.last_request().unwrap();
 
-        // System prompt should contain observer instructions
-        let system = req.system.unwrap();
-        assert!(system.contains("Observer agent"));
-        assert!(system.contains("observation log"));
+        // System prompt should be the first message (Role::System)
+        let system_content = req.messages[0].content.to_string_lossy();
+        assert!(system_content.contains("Observer agent"));
+        assert!(system_content.contains("observation log"));
 
-        // Messages should be formatted in the user content
-        let user_content = req.messages[0].content.to_string_lossy();
+        // Messages should be formatted in the user content (second message)
+        let user_content = req.messages[1].content.to_string_lossy();
         assert!(user_content.contains("[user]: hello"));
         assert!(user_content.contains("[assistant]: world"));
     }
@@ -240,10 +238,10 @@ mod tests {
         assert_eq!(result, "compressed observations");
 
         let req = provider.last_request().unwrap();
-        let system = req.system.unwrap();
-        assert!(system.contains("Reflector agent"));
+        let system_content = req.messages[0].content.to_string_lossy();
+        assert!(system_content.contains("Reflector agent"));
 
-        let user_content = req.messages[0].content.to_string_lossy();
+        let user_content = req.messages[1].content.to_string_lossy();
         assert!(user_content.contains("Old entry 1"));
     }
 
@@ -288,5 +286,32 @@ mod tests {
 
         let req = provider.last_request().unwrap();
         assert!(req.model.is_none());
+    }
+
+    /// Regression: system prompt must be a Role::System message in the messages
+    /// array — providers only read messages.
+    #[tokio::test]
+    async fn test_system_prompt_in_messages_not_request_field() {
+        use qq_core::Role;
+
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_response("- Observation");
+
+        let compactor = LlmCompactor::new(provider.clone(), None);
+        compactor.observe(&[Message::user("test")]).await.unwrap();
+
+        let req = provider.last_request().unwrap();
+
+        // System prompt must be the first message with Role::System
+        assert_eq!(req.messages.len(), 2, "expected system + user messages");
+        assert_eq!(req.messages[0].role, Role::System);
+        assert_eq!(req.messages[1].role, Role::User);
+
+        // System message should contain the observer instructions
+        let sys = req.messages[0].content.to_string_lossy();
+        assert!(
+            sys.contains("Observer agent"),
+            "system message missing observer instructions"
+        );
     }
 }

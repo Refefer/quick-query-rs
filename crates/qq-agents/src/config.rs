@@ -166,16 +166,6 @@ impl AgentsConfig {
         self.agents.contains_key(name)
     }
 
-    /// Get all agent names.
-    pub fn names(&self) -> Vec<&str> {
-        self.agents.keys().map(|s| s.as_str()).collect()
-    }
-
-    /// Get override configuration for a built-in agent.
-    pub fn get_builtin_override(&self, name: &str) -> Option<&BuiltinAgentOverride> {
-        self.builtin.get(name)
-    }
-
     /// Get tool limits for a built-in agent from config overrides.
     ///
     /// Returns None if no override is configured.

@@ -526,14 +526,6 @@ impl Provider for GeminiProvider {
         Ok(Box::pin(stream) as StreamResult)
     }
 
-    fn supports_tools(&self) -> bool {
-        true
-    }
-
-    fn supports_vision(&self) -> bool {
-        true
-    }
-
     fn available_models(&self) -> Vec<&str> {
         vec![
             "gemini-2.5-pro",

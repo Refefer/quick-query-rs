@@ -24,7 +24,7 @@ pub use agent::{
 pub use error::Error;
 pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags};
 pub use provider::{
-    CompletionRequest, CompletionResponse, FinishReason, Provider, ProviderConfig, StreamResult,
+    CompletionRequest, CompletionResponse, FinishReason, Provider, StreamResult,
 };
 pub use task::{
     complete_parallel, execute_tools_parallel, execute_tools_parallel_with_chunker,
