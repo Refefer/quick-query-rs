@@ -112,6 +112,11 @@ impl ChatSession {
         self.messages.len()
     }
 
+    /// Get the current observation count (for detecting compaction).
+    pub fn observation_count(&self) -> u32 {
+        self.observation_memory.observation_count
+    }
+
     /// Calculate total byte count of all messages plus observation log.
     pub fn total_bytes(&self) -> usize {
         let msg_bytes: usize = self.messages.iter().map(|m| m.byte_count()).sum();
@@ -1272,6 +1277,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
 
         let compactor = Arc::new(MockCompactor::new());
@@ -1340,6 +1346,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
 
         let compactor = Arc::new(MockCompactor::new());

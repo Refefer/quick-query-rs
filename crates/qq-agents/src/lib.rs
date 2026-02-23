@@ -115,6 +115,14 @@ pub trait InternalAgent: Send + Sync {
     fn max_observations(&self) -> Option<u32> {
         Some(10)
     }
+
+    /// Per-agent observation config override (obs-memory only).
+    ///
+    /// When `Some(config)`, overrides `ObservationConfig::for_agents()` defaults.
+    /// Default: `None` (use agent defaults).
+    fn observation_config(&self) -> Option<qq_core::ObservationConfig> {
+        None
+    }
 }
 
 /// Information about an available agent.

@@ -38,6 +38,7 @@ struct AgentToolConfig {
     is_read_only: bool,
     memory_strategy: AgentMemoryStrategy,
     max_observations: Option<u32>,
+    observation_config: Option<qq_core::ObservationConfig>,
 }
 
 /// Build the standard agent tool definition.
@@ -102,6 +103,16 @@ async fn execute_agent(
     } else {
         (Vec::new(), String::new())
     };
+
+    tracing::info!(
+        agent = %config.agent_name,
+        strategy = ?config.memory_strategy,
+        has_compactor = compactor.is_some(),
+        scope = %child_scope,
+        prior_history_len = prior_history.len(),
+        prior_obs_log_bytes = prior_observation_log.len(),
+        "Executing agent"
+    );
 
     // Build tools for this agent: start with base tools it needs
     let mut agent_tools = base_tools.subset(&config.tool_names);
@@ -191,9 +202,11 @@ async fn execute_agent(
 
             // Wire up compactor and obs config
             if let Some(ref c) = compactor {
+                let obs_config = config.observation_config
+                    .unwrap_or_else(qq_core::ObservationConfig::for_agents);
                 agent_cfg = agent_cfg
                     .with_compactor(Arc::clone(c))
-                    .with_observation_config(qq_core::ObservationConfig::for_agents());
+                    .with_observation_config(obs_config);
             }
             if let Some(max_obs) = config.max_observations {
                 agent_cfg = agent_cfg.with_max_observations(max_obs);
@@ -217,6 +230,19 @@ async fn execute_agent(
                 Ok(qq_core::AgentRunResult::Success { messages, observation_log, .. })
                 | Ok(qq_core::AgentRunResult::ObservationLimitReached { messages, observation_log, .. })
                 | Ok(qq_core::AgentRunResult::MaxIterationsExceeded { messages, observation_log }) => {
+                    let variant = match &result {
+                        Ok(qq_core::AgentRunResult::Success { .. }) => "success",
+                        Ok(qq_core::AgentRunResult::ObservationLimitReached { .. }) => "obs_limit_reached",
+                        Ok(qq_core::AgentRunResult::MaxIterationsExceeded { .. }) => "max_iterations",
+                        _ => unreachable!(),
+                    };
+                    tracing::info!(
+                        agent = %config.agent_name,
+                        result = variant,
+                        messages = messages.len(),
+                        obs_log_bytes = observation_log.len(),
+                        "Agent run complete (obs-memory)"
+                    );
                     if let Some(ref memory) = agent_memory {
                         let tool_calls: u32 = messages
                             .iter()
@@ -227,7 +253,9 @@ async fn execute_agent(
                             .await;
                     }
                 }
-                Err(_) => {} // don't store on error
+                Err(ref e) => {
+                    tracing::warn!(agent = %config.agent_name, error = %e, "Agent run failed (obs-memory)");
+                }
             }
 
             match result {
@@ -444,6 +472,11 @@ impl Tool for InternalAgentTool {
             .get_builtin_max_observations(self.agent.name())
             .or_else(|| self.agent.max_observations());
 
+        let observation_config = self
+            .external_agents
+            .get_builtin_observation_config(self.agent.name())
+            .or_else(|| self.agent.observation_config());
+
         let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
 
         // Auto-inject bash + mount_external unless disabled via config
@@ -467,6 +500,7 @@ impl Tool for InternalAgentTool {
             is_read_only: self.agent.is_read_only(),
             memory_strategy,
             max_observations,
+            observation_config,
         };
 
         let output = execute_agent(
@@ -619,6 +653,31 @@ impl Tool for ExternalAgentTool {
             }
         }
 
+        // Build observation config from agent definition fields if any are set
+        let observation_config = {
+            let def = &self.agent_def;
+            if def.preserve_recent.is_some()
+                || def.message_threshold_bytes.is_some()
+                || def.observation_threshold_bytes.is_some()
+                || def.context_budget_bytes.is_some()
+            {
+                let defaults = qq_core::ObservationConfig::for_agents();
+                Some(qq_core::ObservationConfig {
+                    preserve_recent: def.preserve_recent.unwrap_or(defaults.preserve_recent),
+                    message_threshold_bytes: def
+                        .message_threshold_bytes
+                        .unwrap_or(defaults.message_threshold_bytes),
+                    observation_threshold_bytes: def
+                        .observation_threshold_bytes
+                        .unwrap_or(defaults.observation_threshold_bytes),
+                    context_budget_bytes: def.context_budget_bytes.or(defaults.context_budget_bytes),
+                    hysteresis: defaults.hysteresis,
+                })
+            } else {
+                None
+            }
+        };
+
         let config = AgentToolConfig {
             agent_name: self.agent_name.clone(),
             system_prompt: self.agent_def.system_prompt.clone(),
@@ -632,6 +691,7 @@ impl Tool for ExternalAgentTool {
             is_read_only: self.agent_def.read_only,
             memory_strategy: self.agent_def.memory_strategy.clone(),
             max_observations: self.agent_def.max_observations,
+            observation_config,
         };
 
         let output = execute_agent(

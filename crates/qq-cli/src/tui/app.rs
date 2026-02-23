@@ -821,6 +821,9 @@ pub async fn run_tui(
     // Cancellation token for stopping streams (recreated after each cancel)
     let mut cancel_token = CancellationToken::new();
 
+    // Reverse channel sender for mid-stream compaction (replaced each submission)
+    let mut base_msg_tx: Option<mpsc::Sender<Vec<Message>>> = None;
+
     // Main event loop
     let tick_rate = Duration::from_millis(33); // ~30fps
 
@@ -870,8 +873,15 @@ pub async fn run_tui(
                     if !content.is_empty() {
                         session.add_assistant_message(content);
                     }
+                    // Compact on completion
+                    session.compact_if_needed().await;
                     // Clear agent progress when main completion is done
                     app.clear_agent_progress();
+                    // Drop the reverse channel sender (task is done)
+                    base_msg_tx = None;
+                }
+                StreamEvent::Error { .. } => {
+                    base_msg_tx = None;
                 }
                 StreamEvent::SessionUpdate { messages } => {
                     // Add messages to session (tool calls and results)
@@ -883,6 +893,16 @@ pub async fn run_tui(
                                 msg.tool_call_id.as_ref().unwrap(),
                                 &msg.content.to_string_lossy(),
                             );
+                        }
+                    }
+
+                    // Mid-stream compaction: compact and send updated base to streaming task
+                    let pre_obs = session.observation_count();
+                    session.compact_if_needed().await;
+                    if session.observation_count() > pre_obs {
+                        if let Some(ref tx) = base_msg_tx {
+                            let updated_base = session.build_messages();
+                            let _ = tx.try_send(updated_base);
                         }
                     }
                 }
@@ -956,6 +976,7 @@ pub async fn run_tui(
                                 app.is_streaming = false;
                                 app.streaming_state = StreamingState::Idle;
                                 app.status_message = Some("Cancelled".to_string());
+                                base_msg_tx = None;
                             }
                         }
                         Some(InputAction::Submit) => {
@@ -1150,6 +1171,10 @@ pub async fn run_tui(
                                         // Clone cancel token for the spawned task
                                         let cancel = cancel_token.clone();
 
+                                        // Create reverse channel for mid-stream compaction
+                                        let (new_base_tx, new_base_rx) = mpsc::channel::<Vec<Message>>(4);
+                                        base_msg_tx = Some(new_base_tx);
+
                                         // Spawn streaming task
                                         tokio::spawn(async move {
                                             run_streaming_completion(
@@ -1167,6 +1192,7 @@ pub async fn run_tui(
                                                 original_query,
                                                 no_stream,
                                                 cancel,
+                                                new_base_rx,
                                             )
                                             .await;
                                         });
@@ -1410,7 +1436,7 @@ async fn run_streaming_completion(
     tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     model: Option<String>,
-    base_messages: Vec<Message>,
+    mut base_messages: Vec<Message>,
     tx: mpsc::Sender<StreamEvent>,
     debug_logger: Option<Arc<DebugLogger>>,
     temperature: Option<f32>,
@@ -1420,6 +1446,7 @@ async fn run_streaming_completion(
     original_query: String,
     no_stream: bool,
     cancel_token: CancellationToken,
+    mut base_rx: mpsc::Receiver<Vec<Message>>,
 ) {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -1438,6 +1465,12 @@ async fn run_streaming_completion(
                 })
                 .await;
             return;
+        }
+
+        // Check for updated base messages from main loop (mid-stream compaction)
+        while let Ok(new_base) = base_rx.try_recv() {
+            base_messages = new_base;
+            iteration_messages.clear();
         }
 
         let _ = tx

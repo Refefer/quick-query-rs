@@ -75,6 +75,13 @@ pub struct CompactionConfig {
     /// Default: 1.1.
     #[serde(default)]
     pub hysteresis: Option<f64>,
+
+    /// Context budget in bytes. When set, `preserve_recent` is dynamically
+    /// reduced so that (observation log + preserved messages) stays under
+    /// this limit. Useful for preventing context window overflow with large
+    /// individual messages.
+    #[serde(default)]
+    pub context_budget_bytes: Option<usize>,
 }
 
 impl CompactionConfig {
@@ -86,6 +93,7 @@ impl CompactionConfig {
             observation_threshold_bytes: self.observation_threshold_bytes.unwrap_or(defaults.observation_threshold_bytes),
             preserve_recent: self.preserve_recent.unwrap_or(defaults.preserve_recent),
             hysteresis: self.hysteresis.unwrap_or(defaults.hysteresis),
+            context_budget_bytes: self.context_budget_bytes.or(defaults.context_budget_bytes),
         }
     }
 }

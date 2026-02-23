@@ -29,6 +29,9 @@ pub struct ObservationConfig {
     pub preserve_recent: usize,
     /// Hysteresis multiplier to prevent compaction thrashing.
     pub hysteresis: f64,
+    /// Optional context budget. When set, preserve_recent is dynamically
+    /// reduced so that (obs_log + preserved_messages) stays under this limit.
+    pub context_budget_bytes: Option<usize>,
 }
 
 impl ObservationConfig {
@@ -39,7 +42,36 @@ impl ObservationConfig {
             observation_threshold_bytes: 100_000,
             preserve_recent: 6,
             hysteresis: 1.1,
+            context_budget_bytes: None,
         }
+    }
+
+    /// Calculate effective preserve_recent, dynamically reduced when context_budget_bytes is set.
+    ///
+    /// Walks backwards from the end of `messages`, accumulating byte counts until
+    /// the budget (minus obs_log overhead) is exceeded. Returns the count of messages
+    /// that fit, clamped to `[2, self.preserve_recent]`.
+    pub fn calculate_effective_preserve(&self, messages: &[Message], obs_log_bytes: usize) -> usize {
+        let budget = match self.context_budget_bytes {
+            Some(b) => b,
+            None => return self.preserve_recent,
+        };
+
+        let available = budget.saturating_sub(obs_log_bytes);
+        let mut cumulative: usize = 0;
+        let mut count: usize = 0;
+
+        for msg in messages.iter().rev() {
+            let msg_bytes = msg.byte_count();
+            if cumulative + msg_bytes > available {
+                break;
+            }
+            cumulative += msg_bytes;
+            count += 1;
+        }
+
+        // Minimum 2 (user+assistant pair), never exceed static preserve_recent
+        count.max(2).min(self.preserve_recent)
     }
 }
 
@@ -50,6 +82,7 @@ impl Default for ObservationConfig {
             observation_threshold_bytes: 200_000,
             preserve_recent: 10,
             hysteresis: 1.1,
+            context_budget_bytes: None,
         }
     }
 }
@@ -101,9 +134,15 @@ impl ObservationalMemory {
         self.observation_count
     }
 
+    /// Get the observation config (for diagnostic logging).
+    pub fn config(&self) -> &ObservationConfig {
+        &self.config
+    }
+
     /// Check if unobserved messages exceed the message threshold.
     pub fn needs_observation(&self, messages: &[Message]) -> bool {
-        let preserve = self.config.preserve_recent.min(messages.len());
+        let preserve = self.config.calculate_effective_preserve(messages, self.observation_log.len())
+            .min(messages.len());
         let unobserved_end = messages.len().saturating_sub(preserve);
 
         if unobserved_end <= self.observed_up_to {
@@ -120,7 +159,7 @@ impl ObservationalMemory {
 
         let triggered = unobserved_bytes > threshold;
 
-        tracing::debug!(
+        tracing::info!(
             total_messages = messages.len(),
             preserve_recent = preserve,
             unobserved_range = %(format!("{}..{}", self.observed_up_to, unobserved_end)),
@@ -139,7 +178,7 @@ impl ObservationalMemory {
             (self.config.observation_threshold_bytes as f64 * self.config.hysteresis) as usize;
         let triggered = self.observation_log.len() > threshold;
 
-        tracing::debug!(
+        tracing::info!(
             log_bytes = self.observation_log.len(),
             threshold = threshold,
             triggered = triggered,
@@ -157,7 +196,16 @@ impl ObservationalMemory {
         compactor: &dyn ContextCompactor,
     ) -> Result<(), Error> {
         // 1. Check if observation is needed
-        let preserve = self.config.preserve_recent.min(messages.len());
+        let preserve = self.config.calculate_effective_preserve(messages, self.observation_log.len())
+            .min(messages.len());
+
+        if preserve != self.config.preserve_recent.min(messages.len()) {
+            tracing::info!(
+                static_preserve = self.config.preserve_recent,
+                effective_preserve = preserve,
+                "Dynamic preserve_recent adjusted"
+            );
+        }
         let unobserved_end = messages.len().saturating_sub(preserve);
 
         if unobserved_end > self.observed_up_to {
@@ -175,7 +223,7 @@ impl ObservationalMemory {
                 if safe_end > self.observed_up_to {
                     let to_observe = &messages[self.observed_up_to..safe_end];
 
-                    tracing::debug!(
+                    tracing::info!(
                         messages_to_observe = to_observe.len(),
                         unobserved_bytes = unobserved_bytes,
                         safe_split = safe_end,
@@ -198,7 +246,7 @@ impl ObservationalMemory {
 
                             self.observation_count += 1;
 
-                            tracing::debug!(
+                            tracing::info!(
                                 observation_bytes = observations.len(),
                                 messages_drained = safe_end - self.observed_up_to,
                                 remaining_messages = messages.len(),
@@ -223,7 +271,7 @@ impl ObservationalMemory {
             (self.config.observation_threshold_bytes as f64 * self.config.hysteresis) as usize;
 
         if self.observation_log.len() > obs_threshold {
-            tracing::debug!(
+            tracing::info!(
                 log_bytes_before = self.observation_log.len(),
                 "Starting reflection pass"
             );
@@ -233,7 +281,7 @@ impl ObservationalMemory {
                     self.observation_log = reflected;
                     self.reflection_count += 1;
 
-                    tracing::debug!(
+                    tracing::info!(
                         log_bytes_after = self.observation_log.len(),
                         reflection_count = self.reflection_count,
                         "Reflection pass complete"
@@ -558,6 +606,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -581,6 +630,7 @@ mod tests {
             observation_threshold_bytes: 200_000,
             preserve_recent: 10,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -605,6 +655,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -627,6 +678,7 @@ mod tests {
             observation_threshold_bytes: 100,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
         om.observation_log = "x".repeat(200);
@@ -649,6 +701,7 @@ mod tests {
             observation_threshold_bytes: 100,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
         om.observation_log = "x".repeat(200);
@@ -671,6 +724,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -693,6 +747,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 3,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -715,6 +770,7 @@ mod tests {
             observation_threshold_bytes: 100_000,
             preserve_recent: 1,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -771,6 +827,7 @@ mod tests {
             observation_threshold_bytes: 50,
             preserve_recent: 2,
             hysteresis: 1.0,
+            ..Default::default()
         };
         let mut om = ObservationalMemory::new(config);
 
@@ -787,5 +844,118 @@ mod tests {
         assert!(om.observation_log.is_empty());
         assert_eq!(om.observation_count, 0);
         assert_eq!(om.reflection_count, 0);
+    }
+
+    // --- calculate_effective_preserve ---
+
+    #[test]
+    fn test_effective_preserve_no_budget_returns_static() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: None,
+            ..Default::default()
+        };
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        assert_eq!(config.calculate_effective_preserve(&messages, 0), 10);
+    }
+
+    #[test]
+    fn test_effective_preserve_large_budget_returns_static() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: Some(1_000_000),
+            ..Default::default()
+        };
+        // All messages fit easily within the budget
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        assert_eq!(config.calculate_effective_preserve(&messages, 0), 10);
+    }
+
+    #[test]
+    fn test_effective_preserve_tight_budget_reduces() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: Some(500),
+            ..Default::default()
+        };
+        // 20 messages of ~100 bytes each, budget of 500 bytes, no obs log
+        // Should fit about 5 messages, so effective preserve = 5 (< 10)
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        let effective = config.calculate_effective_preserve(&messages, 0);
+        assert!(effective < 10, "Expected < 10, got {}", effective);
+        assert!(effective >= 2, "Expected >= 2, got {}", effective);
+    }
+
+    #[test]
+    fn test_effective_preserve_obs_log_eats_budget() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: Some(1000),
+            ..Default::default()
+        };
+        // Budget = 1000, obs_log = 900, only 100 bytes left for messages
+        // Each message ~100 bytes, so only ~1 fits, clamped to minimum 2
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        let effective = config.calculate_effective_preserve(&messages, 900);
+        assert_eq!(effective, 2, "Expected minimum of 2");
+    }
+
+    #[test]
+    fn test_effective_preserve_minimum_is_two() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: Some(10), // Extremely tight budget
+            ..Default::default()
+        };
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        assert_eq!(config.calculate_effective_preserve(&messages, 0), 2);
+    }
+
+    #[test]
+    fn test_effective_preserve_never_exceeds_static() {
+        let config = ObservationConfig {
+            preserve_recent: 5,
+            context_budget_bytes: Some(1_000_000),
+            ..Default::default()
+        };
+        // Huge budget, but still capped at preserve_recent=5
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        assert_eq!(config.calculate_effective_preserve(&messages, 0), 5);
+    }
+
+    #[test]
+    fn test_effective_preserve_empty_messages() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: Some(1000),
+            ..Default::default()
+        };
+        let messages: Vec<Message> = vec![];
+        // 0 messages, max(0, 2) = 2, min(2, 10) = 2
+        assert_eq!(config.calculate_effective_preserve(&messages, 0), 2);
+    }
+
+    #[tokio::test]
+    async fn test_compact_with_context_budget_reduces_preserve() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 100,
+            observation_threshold_bytes: 100_000,
+            preserve_recent: 10,
+            context_budget_bytes: Some(300),
+            hysteresis: 1.0,
+            ..Default::default()
+        };
+        let mut om = ObservationalMemory::new(config);
+
+        // 12 messages of 100 bytes each = 1200 total
+        // Budget is 300, so effective preserve should be ~3 (not 10)
+        let mut messages: Vec<Message> = (0..12).map(|_| msg_with_bytes(Role::User, 100)).collect();
+        let compactor = TestCompactor::observe_ok("observations");
+
+        om.compact(&mut messages, &compactor).await.unwrap();
+
+        // Should have compacted and preserved fewer than 10 messages
+        assert_eq!(om.observation_count, 1);
+        assert!(messages.len() < 10, "Expected fewer than 10 remaining, got {}", messages.len());
     }
 }
