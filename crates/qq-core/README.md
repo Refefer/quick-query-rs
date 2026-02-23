@@ -59,8 +59,6 @@ pub trait Provider: Send + Sync {
     /// Streaming completion
     async fn stream(&self, request: CompletionRequest) -> Result<StreamResult, Error>;
 
-    fn supports_tools(&self) -> bool { true }
-    fn supports_vision(&self) -> bool { false }
 }
 ```
 

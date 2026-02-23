@@ -10,6 +10,26 @@ fn default_max_turns() -> usize {
     20
 }
 
+fn default_compaction_strategy() -> AgentMemoryStrategy {
+    AgentMemoryStrategy::Compaction
+}
+
+/// Strategy for managing agent memory across execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentMemoryStrategy {
+    /// Post-execution LLM summarization with continuation support.
+    Compaction,
+    /// In-loop observational memory (messages -> observations -> reflections).
+    ObsMemory,
+}
+
+impl Default for AgentMemoryStrategy {
+    fn default() -> Self {
+        Self::ObsMemory
+    }
+}
+
 /// Configuration overrides for built-in agents.
 ///
 /// Allows customizing tool limits and other settings for internal agents
@@ -26,12 +46,31 @@ pub struct BuiltinAgentOverride {
 
     /// Optional compaction prompt override for agent memory summarization.
     /// When set, overrides the agent's built-in compact_prompt.
+    /// Only used when memory_strategy is "compaction".
     #[serde(default)]
     pub compact_prompt: Option<String>,
+
+    /// Memory strategy override: "compaction" or "obs-memory".
+    #[serde(default)]
+    pub memory_strategy: Option<AgentMemoryStrategy>,
+
+    /// Maximum observations before requesting wrap-up (obs-memory only).
+    #[serde(default)]
+    pub max_observations: Option<u32>,
 
     /// Disable bash tool for this agent (default: false = bash enabled).
     #[serde(default)]
     pub no_bash: Option<bool>,
+
+    /// Observation config overrides (obs-memory only).
+    #[serde(default)]
+    pub preserve_recent: Option<usize>,
+    #[serde(default)]
+    pub message_threshold_bytes: Option<usize>,
+    #[serde(default)]
+    pub observation_threshold_bytes: Option<usize>,
+    #[serde(default)]
+    pub context_budget_bytes: Option<usize>,
 }
 
 /// External agent definition from agents.toml.
@@ -71,8 +110,18 @@ pub struct AgentDefinition {
 
     /// Optional compaction prompt for agent memory summarization.
     /// Falls back to DEFAULT_COMPACT_PROMPT if omitted.
+    /// Only used when memory_strategy is "compaction".
     #[serde(default)]
     pub compact_prompt: Option<String>,
+
+    /// Memory strategy: "compaction" or "obs-memory".
+    /// Defaults to "compaction" for external agents (backward compat).
+    #[serde(default = "default_compaction_strategy")]
+    pub memory_strategy: AgentMemoryStrategy,
+
+    /// Maximum observations before requesting wrap-up (obs-memory only).
+    #[serde(default)]
+    pub max_observations: Option<u32>,
 
     /// Disable bash tool for this agent (default: false = bash is auto-injected).
     #[serde(default)]
@@ -81,6 +130,16 @@ pub struct AgentDefinition {
     /// Whether this agent is read-only (default: false).
     #[serde(default)]
     pub read_only: bool,
+
+    /// Observation config overrides (obs-memory only).
+    #[serde(default)]
+    pub preserve_recent: Option<usize>,
+    #[serde(default)]
+    pub message_threshold_bytes: Option<usize>,
+    #[serde(default)]
+    pub observation_threshold_bytes: Option<usize>,
+    #[serde(default)]
+    pub context_budget_bytes: Option<usize>,
 }
 
 /// Agents configuration file (agents.toml).
@@ -127,16 +186,6 @@ impl AgentsConfig {
         self.agents.contains_key(name)
     }
 
-    /// Get all agent names.
-    pub fn names(&self) -> Vec<&str> {
-        self.agents.keys().map(|s| s.as_str()).collect()
-    }
-
-    /// Get override configuration for a built-in agent.
-    pub fn get_builtin_override(&self, name: &str) -> Option<&BuiltinAgentOverride> {
-        self.builtin.get(name)
-    }
-
     /// Get tool limits for a built-in agent from config overrides.
     ///
     /// Returns None if no override is configured.
@@ -169,6 +218,47 @@ impl AgentsConfig {
             .get(name)
             .and_then(|o| o.no_bash)
             .unwrap_or(false)
+    }
+
+    /// Get memory strategy override for a built-in agent.
+    pub fn get_builtin_memory_strategy(&self, name: &str) -> Option<&AgentMemoryStrategy> {
+        self.builtin
+            .get(name)
+            .and_then(|o| o.memory_strategy.as_ref())
+    }
+
+    /// Get max_observations override for a built-in agent.
+    pub fn get_builtin_max_observations(&self, name: &str) -> Option<u32> {
+        self.builtin
+            .get(name)
+            .and_then(|o| o.max_observations)
+    }
+
+    /// Get observation config overrides for a built-in agent.
+    ///
+    /// Returns `Some(ObservationConfig)` if at least one obs field is set,
+    /// with unset fields falling back to `ObservationConfig::for_agents()`.
+    pub fn get_builtin_observation_config(&self, name: &str) -> Option<qq_core::ObservationConfig> {
+        let o = self.builtin.get(name)?;
+        if o.preserve_recent.is_none()
+            && o.message_threshold_bytes.is_none()
+            && o.observation_threshold_bytes.is_none()
+            && o.context_budget_bytes.is_none()
+        {
+            return None;
+        }
+        let defaults = qq_core::ObservationConfig::for_agents();
+        Some(qq_core::ObservationConfig {
+            preserve_recent: o.preserve_recent.unwrap_or(defaults.preserve_recent),
+            message_threshold_bytes: o
+                .message_threshold_bytes
+                .unwrap_or(defaults.message_threshold_bytes),
+            observation_threshold_bytes: o
+                .observation_threshold_bytes
+                .unwrap_or(defaults.observation_threshold_bytes),
+            context_budget_bytes: o.context_budget_bytes.or(defaults.context_budget_bytes),
+            hysteresis: defaults.hysteresis,
+        })
     }
 }
 
@@ -375,5 +465,128 @@ system_prompt = "You are simple"
 
         let agent = config.get("simple-agent").unwrap();
         assert!(agent.compact_prompt.is_none());
+    }
+
+    #[test]
+    fn test_builtin_memory_strategy_override() {
+        let toml_content = r#"
+[builtin.coder]
+memory_strategy = "compaction"
+
+[builtin.explore]
+memory_strategy = "obs-memory"
+max_observations = 15
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert_eq!(
+            config.get_builtin_memory_strategy("coder"),
+            Some(&AgentMemoryStrategy::Compaction)
+        );
+        assert_eq!(
+            config.get_builtin_memory_strategy("explore"),
+            Some(&AgentMemoryStrategy::ObsMemory)
+        );
+        assert_eq!(config.get_builtin_max_observations("explore"), Some(15));
+        assert!(config.get_builtin_memory_strategy("nonexistent").is_none());
+        assert!(config.get_builtin_max_observations("coder").is_none());
+    }
+
+    #[test]
+    fn test_external_agent_memory_strategy() {
+        let toml_content = r#"
+[agents.obs-agent]
+description = "Obs agent"
+system_prompt = "You are an obs agent"
+memory_strategy = "obs-memory"
+max_observations = 20
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("obs-agent").unwrap();
+        assert_eq!(agent.memory_strategy, AgentMemoryStrategy::ObsMemory);
+        assert_eq!(agent.max_observations, Some(20));
+    }
+
+    #[test]
+    fn test_external_agent_memory_strategy_default() {
+        let toml_content = r#"
+[agents.default-agent]
+description = "Default agent"
+system_prompt = "You are default"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("default-agent").unwrap();
+        // External agents default to compaction for backward compat
+        assert_eq!(agent.memory_strategy, AgentMemoryStrategy::Compaction);
+        assert!(agent.max_observations.is_none());
+    }
+
+    #[test]
+    fn test_builtin_observation_config_override() {
+        let toml_content = r#"
+[builtin.coder]
+preserve_recent = 4
+message_threshold_bytes = 20000
+context_budget_bytes = 500000
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let obs = config.get_builtin_observation_config("coder").unwrap();
+        assert_eq!(obs.preserve_recent, 4);
+        assert_eq!(obs.message_threshold_bytes, 20000);
+        assert_eq!(obs.context_budget_bytes, Some(500000));
+        // Unset fields fall back to for_agents() defaults
+        assert_eq!(obs.observation_threshold_bytes, 100_000);
+    }
+
+    #[test]
+    fn test_builtin_observation_config_none_when_unset() {
+        let toml_content = r#"
+[builtin.explore]
+max_turns = 50
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert!(config.get_builtin_observation_config("explore").is_none());
+        assert!(config.get_builtin_observation_config("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_external_agent_observation_config_fields() {
+        let toml_content = r#"
+[agents.my-obs-agent]
+description = "Obs agent"
+system_prompt = "You are an obs agent"
+memory_strategy = "obs-memory"
+preserve_recent = 3
+message_threshold_bytes = 15000
+observation_threshold_bytes = 80000
+context_budget_bytes = 400000
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("my-obs-agent").unwrap();
+        assert_eq!(agent.preserve_recent, Some(3));
+        assert_eq!(agent.message_threshold_bytes, Some(15000));
+        assert_eq!(agent.observation_threshold_bytes, Some(80000));
+        assert_eq!(agent.context_budget_bytes, Some(400000));
+    }
+
+    #[test]
+    fn test_external_agent_observation_config_defaults_to_none() {
+        let toml_content = r#"
+[agents.simple-agent]
+description = "Simple"
+system_prompt = "Simple"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        let agent = config.get("simple-agent").unwrap();
+        assert!(agent.preserve_recent.is_none());
+        assert!(agent.message_threshold_bytes.is_none());
+        assert!(agent.observation_threshold_bytes.is_none());
+        assert!(agent.context_budget_bytes.is_none());
     }
 }

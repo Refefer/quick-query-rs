@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::error::Error;
 use crate::message::{Message, Role, StreamChunk, Usage};
+use crate::observation::{ContextCompactor, ObservationConfig, ObservationalMemory};
 use crate::provider::{CompletionRequest, Provider};
 use crate::tool::ToolRegistry;
 
@@ -29,9 +30,21 @@ pub enum AgentRunResult {
     Success {
         content: String,
         messages: Vec<Message>,
+        /// Observation log from observational memory (empty if not used).
+        observation_log: String,
     },
     /// Agent hit the max iterations limit. Contains the full message history.
-    MaxIterationsExceeded { messages: Vec<Message> },
+    MaxIterationsExceeded {
+        messages: Vec<Message>,
+        /// Observation log from observational memory (empty if not used).
+        observation_log: String,
+    },
+    /// Agent hit the max observations limit. Contains the last response and history.
+    ObservationLimitReached {
+        content: String,
+        messages: Vec<Message>,
+        observation_log: String,
+    },
 }
 
 /// Metadata about an agent instance's execution history.
@@ -46,6 +59,8 @@ pub struct AgentInstanceMetadata {
 pub struct AgentInstanceState {
     pub messages: Vec<Message>,
     pub metadata: AgentInstanceMetadata,
+    /// Observation log from observational memory (empty if using compaction strategy).
+    pub observation_log: String,
 }
 
 impl AgentInstanceState {
@@ -53,15 +68,18 @@ impl AgentInstanceState {
         Self {
             messages: Vec::new(),
             metadata: AgentInstanceMetadata::default(),
+            observation_log: String::new(),
         }
     }
 
     pub fn total_bytes(&self) -> usize {
-        self.messages.iter().map(|m| m.byte_count()).sum()
+        let msg_bytes: usize = self.messages.iter().map(|m| m.byte_count()).sum();
+        msg_bytes + self.observation_log.len()
     }
 
     /// Trim oldest messages to fit within byte budget.
     /// Uses find_safe_trim_point to avoid orphaning tool results.
+    /// Only trims messages, never the observation log (the log IS the compressed form).
     pub fn trim_to_budget(&mut self, max_bytes: usize) {
         while self.total_bytes() > max_bytes && !self.messages.is_empty() {
             let remove_count = find_safe_trim_point(&self.messages);
@@ -133,6 +151,34 @@ impl AgentMemory {
         state.metadata.call_count += 1;
         state.metadata.total_tool_calls += tool_calls;
         state.trim_to_budget(self.max_instance_bytes);
+    }
+
+    /// Store messages and observation log for a scope (obs-memory strategy).
+    pub async fn store_state(
+        &self,
+        scope: &str,
+        messages: Vec<Message>,
+        observation_log: String,
+        tool_calls: u32,
+    ) {
+        let mut instances = self.instances.write().await;
+        let state = instances
+            .entry(scope.to_string())
+            .or_insert_with(AgentInstanceState::new);
+        state.messages = messages;
+        state.observation_log = observation_log;
+        state.metadata.call_count += 1;
+        state.metadata.total_tool_calls += tool_calls;
+        state.trim_to_budget(self.max_instance_bytes);
+    }
+
+    /// Get messages and observation log for a scope.
+    pub async fn get_state(&self, scope: &str) -> (Vec<Message>, String) {
+        let instances = self.instances.read().await;
+        instances
+            .get(scope)
+            .map(|s| (s.messages.clone(), s.observation_log.clone()))
+            .unwrap_or_default()
     }
 
     /// Remove a single scope's instance.
@@ -456,19 +502,27 @@ impl AgentRegistry {
 }
 
 /// Configuration for an agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentConfig {
     /// Unique agent identifier.
     pub id: AgentId,
     /// System prompt for the agent.
     pub system_prompt: Option<String>,
-    /// Maximum agentic loop iterations.
+    /// Maximum agentic loop iterations (safety ceiling).
     pub max_turns: usize,
     /// Whether to maintain message history (stateful mode).
     pub stateful: bool,
     /// Per-tool call limits (tool_name -> max_calls).
     /// When a tool reaches its limit, the agent receives an error instead.
     pub tool_limits: Option<HashMap<String, usize>>,
+    /// Optional context compactor for observational memory in the loop.
+    pub compactor: Option<Arc<dyn ContextCompactor>>,
+    /// Observation config (thresholds). Used only when compactor is Some.
+    pub observation_config: Option<ObservationConfig>,
+    /// Maximum observations before requesting wrap-up. None = no limit.
+    pub max_observations: Option<u32>,
+    /// Prior observation log to restore (for resuming stateful agents).
+    pub prior_observation_log: Option<String>,
 }
 
 impl AgentConfig {
@@ -480,6 +534,10 @@ impl AgentConfig {
             max_turns: 20,
             stateful: false,
             tool_limits: None,
+            compactor: None,
+            observation_config: None,
+            max_observations: None,
+            prior_observation_log: None,
         }
     }
 
@@ -508,6 +566,50 @@ impl AgentConfig {
     pub fn with_tool_limits(mut self, limits: HashMap<String, usize>) -> Self {
         self.tool_limits = Some(limits);
         self
+    }
+
+    /// Set the context compactor for observational memory.
+    pub fn with_compactor(mut self, compactor: Arc<dyn ContextCompactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
+    }
+
+    /// Set the observation config (thresholds).
+    pub fn with_observation_config(mut self, config: ObservationConfig) -> Self {
+        self.observation_config = Some(config);
+        self
+    }
+
+    /// Set the maximum observations before requesting wrap-up.
+    pub fn with_max_observations(mut self, max: u32) -> Self {
+        self.max_observations = Some(max);
+        self
+    }
+
+    /// Set a prior observation log to restore when resuming.
+    pub fn with_prior_observation_log(mut self, log: String) -> Self {
+        if !log.is_empty() {
+            self.prior_observation_log = Some(log);
+        }
+        self
+    }
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("id", &self.id)
+            .field("system_prompt", &self.system_prompt.as_deref().map(|s| {
+                if s.len() > 50 { &s[..50] } else { s }
+            }))
+            .field("max_turns", &self.max_turns)
+            .field("stateful", &self.stateful)
+            .field("tool_limits", &self.tool_limits)
+            .field("has_compactor", &self.compactor.is_some())
+            .field("observation_config", &self.observation_config)
+            .field("max_observations", &self.max_observations)
+            .field("has_prior_obs_log", &self.prior_observation_log.is_some())
+            .finish()
     }
 }
 
@@ -564,6 +666,12 @@ pub enum AgentProgressEvent {
         attempt: u32,
         max_retries: u32,
         error: String,
+    },
+    /// An observation pass completed during the agent loop.
+    ObservationComplete {
+        agent_name: String,
+        observation_count: u32,
+        log_bytes: usize,
     },
 }
 
@@ -647,6 +755,7 @@ impl Agent {
     ) -> Result<String, Error> {
         match Self::run_once_with_progress(provider, tools, config, context, None).await? {
             AgentRunResult::Success { content, .. } => Ok(content),
+            AgentRunResult::ObservationLimitReached { content, .. } => Ok(content),
             AgentRunResult::MaxIterationsExceeded { .. } => {
                 Err(Error::Unknown("Agent exceeded max iterations".into()))
             }
@@ -658,7 +767,13 @@ impl Agent {
     /// When a progress handler is provided, this uses streaming for LLM calls
     /// and emits progress events for thinking content, tool execution, and usage.
     ///
-    /// Returns `AgentRunResult::Success` on completion or
+    /// If `config.compactor` is provided, observational memory runs inside the loop:
+    /// after each tool execution round, old messages are observed and drained,
+    /// with the observation log injected as a system message. The `max_observations`
+    /// config controls when the agent is asked to wrap up.
+    ///
+    /// Returns `AgentRunResult::Success` on completion,
+    /// `AgentRunResult::ObservationLimitReached` when max observations is hit, or
     /// `AgentRunResult::MaxIterationsExceeded` with the full conversation history
     /// when the iteration limit is reached.
     pub async fn run_once_with_progress(
@@ -677,30 +792,41 @@ impl Agent {
             context_messages = context.len(),
             tools_available = tools.definitions().len(),
             has_progress_handler = progress.is_some(),
+            has_compactor = config.compactor.is_some(),
             "Agent run_once starting"
         );
 
-        tracing::trace!(agent = %config.id, context_messages = context.len(), "Agent context");
+        // Hold system prompt separately — prepended to request each iteration.
+        let system_prompt = config.system_prompt.clone();
 
-        // Split into base (system prompt + initial context) and loop-accumulated messages.
-        // This avoids cloning the growing loop_messages into base on every iteration.
-        let mut base_messages = Vec::new();
+        // All conversation messages (context + accumulated loop messages).
+        // ObservationalMemory drains from this vec when it compacts.
+        let mut messages: Vec<Message> = context;
 
-        // Add system prompt if configured
-        if let Some(system) = &config.system_prompt {
-            base_messages.push(Message::system(system.as_str()));
-        }
-
-        // Add provided context
-        base_messages.extend(context);
-
-        // Messages accumulated during the agentic loop (assistant + tool_result)
-        let mut loop_messages: Vec<Message> = Vec::new();
+        // Initialize observational memory if compactor is provided
+        let mut obs_memory = if config.compactor.is_some() {
+            let obs_config = config
+                .observation_config
+                .clone()
+                .unwrap_or_else(ObservationConfig::for_agents);
+            let om = if let Some(ref prior_log) = config.prior_observation_log {
+                ObservationalMemory::with_observation_log(obs_config, prior_log.clone())
+            } else {
+                ObservationalMemory::new(obs_config)
+            };
+            Some(om)
+        } else {
+            None
+        };
 
         let max_turns = config.max_turns as u32;
 
         // Track tool call counts for enforcing limits
         let mut tool_call_counts: HashMap<String, usize> = HashMap::new();
+
+        // Wrap-up tracking for obs memory
+        let mut wrap_up_injected = false;
+        let mut wrap_up_iteration: usize = 0;
 
         // Run agentic loop
         for iteration in 0..config.max_turns {
@@ -718,13 +844,30 @@ impl Agent {
             debug!(
                 agent = %config.id,
                 iteration = iteration,
-                message_count = base_messages.len() + loop_messages.len(),
+                message_count = messages.len(),
                 "Agent iteration starting"
             );
 
+            // Build request messages: system prompt + obs log + conversation messages
+            let mut request_messages = Vec::new();
+            if let Some(ref system) = system_prompt {
+                request_messages.push(Message::system(system.as_str()));
+            }
+            // Inject observation log as system message (between system prompt and messages)
+            if let Some(ref om) = obs_memory {
+                let log = om.observation_log();
+                if !log.is_empty() {
+                    let log_msg = format!(
+                        "## Observation Log (prior context)\n\n{}",
+                        log
+                    );
+                    request_messages.push(Message::system(log_msg.as_str()));
+                }
+            }
+            request_messages.extend(messages.iter().cloned());
+
             // Count input bytes (messages being sent)
-            let input_bytes: usize = base_messages.iter()
-                .chain(loop_messages.iter())
+            let input_bytes: usize = request_messages.iter()
                 .map(|m| m.byte_count())
                 .sum();
 
@@ -761,11 +904,7 @@ impl Agent {
 
                     // Re-build the request for each attempt (need a fresh clone)
                     let attempt_request = CompletionRequest::new(
-                        base_messages
-                            .iter()
-                            .chain(loop_messages.iter())
-                            .cloned()
-                            .collect(),
+                        request_messages.clone(),
                     )
                     .with_tools(tools.definitions());
 
@@ -847,7 +986,7 @@ impl Agent {
 
                 // Store message with tool calls but NO content (don't store thinking)
                 let msg = Message::assistant_with_tool_calls("", tool_calls.clone());
-                loop_messages.push(msg);
+                messages.push(msg);
 
                 // Check tool limits and partition into executable vs limit-exceeded
                 let mut executable_calls = Vec::new();
@@ -908,7 +1047,7 @@ impl Agent {
                                 .await;
                         }
 
-                        loop_messages.push(Message::tool_result(&tool_call.id, result));
+                        messages.push(Message::tool_result(&tool_call.id, result));
                     } else {
                         *tool_call_counts.entry(tool_call.name.clone()).or_insert(0) += 1;
                         executable_calls.push(tool_call);
@@ -963,7 +1102,64 @@ impl Agent {
                             .await;
                     }
 
-                    loop_messages.push(Message::tool_result(&tool_call.id, result));
+                    messages.push(Message::tool_result(&tool_call.id, result));
+                }
+
+                // Run observational memory compaction after tool execution
+                if let (Some(ref mut om), Some(ref compactor)) =
+                    (&mut obs_memory, &config.compactor)
+                {
+                    if let Err(e) = om.compact(&mut messages, compactor.as_ref()).await {
+                        tracing::warn!(
+                            agent = %config.id,
+                            error = %e,
+                            "Observation compaction error (continuing)"
+                        );
+                    }
+
+                    let obs_count = om.observation_count();
+
+                    // Emit observation event if an observation just happened
+                    if obs_count > 0 {
+                        if let Some(ref handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::ObservationComplete {
+                                    agent_name: agent_name.clone(),
+                                    observation_count: obs_count,
+                                    log_bytes: om.log_bytes(),
+                                })
+                                .await;
+                        }
+                    }
+
+                    // Check max_observations limit
+                    if let Some(max_obs) = config.max_observations {
+                        if obs_count >= max_obs && !wrap_up_injected {
+                            debug!(
+                                agent = %config.id,
+                                obs_count = obs_count,
+                                max_obs = max_obs,
+                                "Max observations reached, injecting wrap-up"
+                            );
+                            messages.push(Message::user(
+                                "You are approaching the context limit for this session. \
+                                 Please wrap up your current work and provide a final response \
+                                 with your findings and any remaining recommendations."
+                            ));
+                            wrap_up_injected = true;
+                            wrap_up_iteration = iteration;
+                        }
+
+                        // Hard stop after grace period
+                        if wrap_up_injected && iteration >= wrap_up_iteration + 3 {
+                            let obs_log = om.observation_log().to_string();
+                            return Ok(AgentRunResult::ObservationLimitReached {
+                                content: String::new(),
+                                messages,
+                                observation_log: obs_log,
+                            });
+                        }
+                    }
                 }
 
                 continue;
@@ -976,15 +1172,23 @@ impl Agent {
                 response_len = content.len(),
                 "Agent completed successfully"
             );
+            let obs_log = obs_memory
+                .map(|om| om.into_parts().0)
+                .unwrap_or_default();
             return Ok(AgentRunResult::Success {
                 content,
-                messages: loop_messages,
+                messages,
+                observation_log: obs_log,
             });
         }
 
-        // Combine base + loop messages for the full conversation history
-        base_messages.extend(loop_messages);
-        Ok(AgentRunResult::MaxIterationsExceeded { messages: base_messages })
+        let obs_log = obs_memory
+            .map(|om| om.into_parts().0)
+            .unwrap_or_default();
+        Ok(AgentRunResult::MaxIterationsExceeded {
+            messages,
+            observation_log: obs_log,
+        })
     }
 
     /// Process an input message (stateful mode).

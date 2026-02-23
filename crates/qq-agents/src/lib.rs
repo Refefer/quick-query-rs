@@ -20,7 +20,7 @@ mod writer;
 
 pub use project_manager::ProjectManagerAgent;
 pub use coder::CoderAgent;
-pub use config::{AgentDefinition, AgentsConfig, BuiltinAgentOverride};
+pub use config::{AgentDefinition, AgentMemoryStrategy, AgentsConfig, BuiltinAgentOverride};
 pub use preamble::{generate_preamble, PreambleContext};
 pub use explore::ExploreAgent;
 
@@ -96,6 +96,32 @@ pub trait InternalAgent: Send + Sync {
     /// write, modify, create, move, or delete files. Default: false.
     fn is_read_only(&self) -> bool {
         false
+    }
+
+    /// Memory strategy for this agent.
+    ///
+    /// `ObsMemory` runs observational memory inside the agent loop.
+    /// `Compaction` uses post-execution LLM summarization with continuation.
+    /// Default: `ObsMemory`.
+    fn memory_strategy(&self) -> AgentMemoryStrategy {
+        AgentMemoryStrategy::ObsMemory
+    }
+
+    /// Maximum observations before requesting wrap-up (obs-memory only).
+    ///
+    /// When the observation count reaches this limit, the agent is asked to
+    /// wrap up. After a 3-turn grace period, execution stops.
+    /// Default: `Some(10)`.
+    fn max_observations(&self) -> Option<u32> {
+        Some(10)
+    }
+
+    /// Per-agent observation config override (obs-memory only).
+    ///
+    /// When `Some(config)`, overrides `ObservationConfig::for_agents()` defaults.
+    /// Default: `None` (use agent defaults).
+    fn observation_config(&self) -> Option<qq_core::ObservationConfig> {
+        None
     }
 }
 
@@ -288,6 +314,36 @@ mod tests {
                 "Agent {} should have a non-empty compact_prompt",
                 agent.name()
             );
+        }
+    }
+
+    #[test]
+    fn test_agent_memory_strategy() {
+        for t in InternalAgentType::all_with_pm() {
+            let agent = t.create();
+            let strategy = agent.memory_strategy();
+            // All agents should have a valid strategy (default is ObsMemory)
+            assert!(
+                strategy == AgentMemoryStrategy::ObsMemory
+                    || strategy == AgentMemoryStrategy::Compaction,
+                "Agent {} should have a valid memory strategy",
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_max_observations() {
+        for t in InternalAgentType::all_with_pm() {
+            let agent = t.create();
+            // Default is Some(10), should be reasonable
+            if let Some(max) = agent.max_observations() {
+                assert!(
+                    max > 0,
+                    "Agent {} max_observations should be > 0",
+                    agent.name()
+                );
+            }
         }
     }
 }

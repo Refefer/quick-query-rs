@@ -67,6 +67,12 @@ pub enum AgentEvent {
         max_retries: u32,
         error: String,
     },
+    /// An observation pass completed during agent execution.
+    ObservationComplete {
+        agent_name: String,
+        observation_count: u32,
+        log_bytes: usize,
+    },
 }
 
 impl From<AgentProgressEvent> for AgentEvent {
@@ -125,6 +131,15 @@ impl From<AgentProgressEvent> for AgentEvent {
                 attempt,
                 max_retries,
                 error,
+            },
+            AgentProgressEvent::ObservationComplete {
+                agent_name,
+                observation_count,
+                log_bytes,
+            } => AgentEvent::ObservationComplete {
+                agent_name,
+                observation_count,
+                log_bytes,
             },
             // AssistantResponse is only used for debug logging; never broadcast
             AgentProgressEvent::AssistantResponse { .. } => {

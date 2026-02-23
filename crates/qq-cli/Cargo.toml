@@ -49,3 +49,4 @@ static-tls = ["reqwest/rustls-tls"]
 
 [dev-dependencies]
 tempfile = "3.10"
+qq-core = { path = "../qq-core", features = ["testing"] }

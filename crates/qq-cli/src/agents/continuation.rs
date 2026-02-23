@@ -230,7 +230,10 @@ pub async fn execute_with_continuation(
         )
         .await
         {
-            Ok(AgentRunResult::Success { content, messages }) => {
+            Ok(AgentRunResult::Success { content, messages, .. }) => {
+                AgentExecutionResult::Success { content, messages }
+            }
+            Ok(AgentRunResult::ObservationLimitReached { content, messages, .. }) => {
                 AgentExecutionResult::Success { content, messages }
             }
             Ok(AgentRunResult::MaxIterationsExceeded { .. }) => {
@@ -258,10 +261,13 @@ pub async fn execute_with_continuation(
         .await;
 
         match result {
-            Ok(AgentRunResult::Success { content, messages }) => {
+            Ok(AgentRunResult::Success { content, messages, .. }) => {
                 return AgentExecutionResult::Success { content, messages };
             }
-            Ok(AgentRunResult::MaxIterationsExceeded { messages: agent_messages }) => {
+            Ok(AgentRunResult::ObservationLimitReached { content, messages, .. }) => {
+                return AgentExecutionResult::Success { content, messages };
+            }
+            Ok(AgentRunResult::MaxIterationsExceeded { messages: agent_messages, .. }) => {
 
                 // Max turns exceeded - check if we can continue
                 continuation_count += 1;

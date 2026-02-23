@@ -222,12 +222,6 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Register a boxed tool (convenience for backward compatibility)
-    pub fn register_boxed(&mut self, tool: Box<dyn Tool>) {
-        let arc: Arc<dyn Tool> = Arc::from(tool);
-        self.tools.insert(arc.name().to_string(), arc);
-    }
-
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
     }

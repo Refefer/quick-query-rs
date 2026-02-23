@@ -12,7 +12,8 @@ use serde::Deserialize;
 
 use qq_core::{AgentConfig, AgentMemory, CompletionRequest, Error, Message, PropertySchema, Provider, Role, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
-use qq_agents::{AgentDefinition, AgentsConfig, InternalAgent, InternalAgentType, DEFAULT_COMPACT_PROMPT};
+use qq_agents::{AgentDefinition, AgentMemoryStrategy, AgentsConfig, InternalAgent, InternalAgentType, DEFAULT_COMPACT_PROMPT};
+use qq_core::observation::ContextCompactor;
 use crate::agents::continuation::{execute_with_continuation, AgentExecutionResult, ContinuationConfig};
 use crate::agents::InformUserTool;
 use crate::event_bus::AgentEventBus;
@@ -35,6 +36,9 @@ struct AgentToolConfig {
     tool_limits: Option<HashMap<String, usize>>,
     compact_prompt: String,
     is_read_only: bool,
+    memory_strategy: AgentMemoryStrategy,
+    max_observations: Option<u32>,
+    observation_config: Option<qq_core::ObservationConfig>,
 }
 
 /// Build the standard agent tool definition.
@@ -63,7 +67,9 @@ fn agent_tool_definition(name: &str, description: &str) -> ToolDefinition {
 /// Shared execution logic for both internal and external agent tools.
 ///
 /// Handles scope management, tool setup, agent execution, memory compaction,
-/// and result formatting.
+/// and result formatting. Branches on `memory_strategy`:
+/// - `ObsMemory`: uses in-loop observational memory, stores obs log
+/// - `Compaction`: uses post-execution LLM summarization with continuation
 #[allow(clippy::too_many_arguments)]
 async fn execute_agent(
     config: AgentToolConfig,
@@ -80,6 +86,7 @@ async fn execute_agent(
     agent_memory: &Option<AgentMemory>,
     scope: &str,
     task_store: &Option<Arc<qq_tools::TaskStore>>,
+    compactor: &Option<Arc<dyn ContextCompactor>>,
 ) -> Result<ToolOutput, Error> {
     let child_scope = format!("{}/{}", scope, config.agent_name);
 
@@ -90,12 +97,22 @@ async fn execute_agent(
         }
     }
 
-    // Load prior conversation history
-    let prior_history = if let Some(ref memory) = agent_memory {
-        memory.get_messages(&child_scope).await
+    // Load prior state (messages + observation log)
+    let (prior_history, prior_observation_log) = if let Some(ref memory) = agent_memory {
+        memory.get_state(&child_scope).await
     } else {
-        Vec::new()
+        (Vec::new(), String::new())
     };
+
+    tracing::info!(
+        agent = %config.agent_name,
+        strategy = ?config.memory_strategy,
+        has_compactor = compactor.is_some(),
+        scope = %child_scope,
+        prior_history_len = prior_history.len(),
+        prior_obs_log_bytes = prior_observation_log.len(),
+        "Executing agent"
+    );
 
     // Build tools for this agent: start with base tools it needs
     let mut agent_tools = base_tools.subset(&config.tool_names);
@@ -115,6 +132,7 @@ async fn execute_agent(
             agent_memory.clone(),
             child_scope.clone(),
             task_store.clone(),
+            compactor.clone(),
         );
         for tool in nested_agent_tools {
             agent_tools.register(tool);
@@ -164,64 +182,159 @@ async fn execute_agent(
         task
     };
 
-    let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
-        .with_system_prompt(&full_prompt)
-        .with_max_turns(config.max_turns);
-
-    if let Some(limits) = config.tool_limits {
-        agent_cfg = agent_cfg.with_tool_limits(limits);
-    }
-
     // Create progress handler if event bus is available
     let progress = event_bus.as_ref().map(|bus| bus.create_handler());
 
-    // Use continuation wrapper for execution
-    let continuation_config = ContinuationConfig::default();
-    let result = execute_with_continuation(
-        Arc::clone(provider),
-        agent_tools,
-        agent_cfg,
-        augmented_task,
-        progress,
-        continuation_config,
-        event_bus.as_ref(),
-        prior_history,
-    )
-    .await;
+    // Branch on memory strategy
+    match config.memory_strategy {
+        AgentMemoryStrategy::ObsMemory => {
+            // Obs-memory path: compactor in the loop, higher max_turns, no continuation
+            let max_turns = if config.max_turns == 20 { 500 } else { config.max_turns };
 
-    // Store results back to memory, with LLM compaction
-    match &result {
-        AgentExecutionResult::Success { messages, .. }
-        | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
-            if let Some(ref memory) = agent_memory {
-                let tool_calls: u32 = messages
-                    .iter()
-                    .map(|m| m.tool_calls.len() as u32)
-                    .sum();
+            let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
+                .with_system_prompt(&full_prompt)
+                .with_max_turns(max_turns)
+                .with_prior_observation_log(prior_observation_log);
 
-                let compacted =
-                    compact_agent_messages(provider, messages.clone(), &config.compact_prompt).await;
+            if let Some(limits) = config.tool_limits {
+                agent_cfg = agent_cfg.with_tool_limits(limits);
+            }
 
-                memory
-                    .store_messages(&child_scope, compacted, tool_calls)
-                    .await;
+            // Wire up compactor and obs config
+            if let Some(ref c) = compactor {
+                let obs_config = config.observation_config
+                    .unwrap_or_else(qq_core::ObservationConfig::for_agents);
+                agent_cfg = agent_cfg
+                    .with_compactor(Arc::clone(c))
+                    .with_observation_config(obs_config);
+            }
+            if let Some(max_obs) = config.max_observations {
+                agent_cfg = agent_cfg.with_max_observations(max_obs);
+            }
+
+            // Build context: prior history + new task
+            let mut context = prior_history;
+            context.push(Message::user(augmented_task.as_str()));
+
+            let result = qq_core::Agent::run_once_with_progress(
+                Arc::clone(provider),
+                agent_tools,
+                agent_cfg,
+                context,
+                progress,
+            )
+            .await;
+
+            // Store results back to memory (obs log IS the compaction)
+            match &result {
+                Ok(qq_core::AgentRunResult::Success { messages, observation_log, .. })
+                | Ok(qq_core::AgentRunResult::ObservationLimitReached { messages, observation_log, .. })
+                | Ok(qq_core::AgentRunResult::MaxIterationsExceeded { messages, observation_log }) => {
+                    let variant = match &result {
+                        Ok(qq_core::AgentRunResult::Success { .. }) => "success",
+                        Ok(qq_core::AgentRunResult::ObservationLimitReached { .. }) => "obs_limit_reached",
+                        Ok(qq_core::AgentRunResult::MaxIterationsExceeded { .. }) => "max_iterations",
+                        _ => unreachable!(),
+                    };
+                    tracing::info!(
+                        agent = %config.agent_name,
+                        result = variant,
+                        messages = messages.len(),
+                        obs_log_bytes = observation_log.len(),
+                        "Agent run complete (obs-memory)"
+                    );
+                    if let Some(ref memory) = agent_memory {
+                        let tool_calls: u32 = messages
+                            .iter()
+                            .map(|m| m.tool_calls.len() as u32)
+                            .sum();
+                        memory
+                            .store_state(&child_scope, messages.clone(), observation_log.clone(), tool_calls)
+                            .await;
+                    }
+                }
+                Err(ref e) => {
+                    tracing::warn!(agent = %config.agent_name, error = %e, "Agent run failed (obs-memory)");
+                }
+            }
+
+            match result {
+                Ok(qq_core::AgentRunResult::Success { content, .. }) => {
+                    Ok(ToolOutput::success(content))
+                }
+                Ok(qq_core::AgentRunResult::ObservationLimitReached { content, .. }) => {
+                    let output = if content.is_empty() {
+                        "Task completed (observation limit reached).".to_string()
+                    } else {
+                        content
+                    };
+                    Ok(ToolOutput::success(output))
+                }
+                Ok(qq_core::AgentRunResult::MaxIterationsExceeded { .. }) => {
+                    Ok(ToolOutput::error("Agent exceeded max iterations".to_string()))
+                }
+                Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
             }
         }
-        AgentExecutionResult::Error(_) => {} // don't store on error
-    }
 
-    match result {
-        AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
-        AgentExecutionResult::MaxContinuationsReached {
-            partial_result,
-            continuations,
-            ..
-        } => Ok(ToolOutput::success(format!(
-            "Task partially completed after {} continuations.\n\n{}",
-            continuations, partial_result
-        ))),
-        AgentExecutionResult::Error(e) => {
-            Ok(ToolOutput::error(format!("Agent error: {}", e)))
+        AgentMemoryStrategy::Compaction => {
+            // Compaction path: post-execution LLM summarization with continuation
+            let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
+                .with_system_prompt(&full_prompt)
+                .with_max_turns(config.max_turns);
+
+            if let Some(limits) = config.tool_limits {
+                agent_cfg = agent_cfg.with_tool_limits(limits);
+            }
+
+            let continuation_config = ContinuationConfig::default();
+            let result = execute_with_continuation(
+                Arc::clone(provider),
+                agent_tools,
+                agent_cfg,
+                augmented_task,
+                progress,
+                continuation_config,
+                event_bus.as_ref(),
+                prior_history,
+            )
+            .await;
+
+            // Store results back to memory, with LLM compaction
+            match &result {
+                AgentExecutionResult::Success { messages, .. }
+                | AgentExecutionResult::MaxContinuationsReached { messages, .. } => {
+                    if let Some(ref memory) = agent_memory {
+                        let tool_calls: u32 = messages
+                            .iter()
+                            .map(|m| m.tool_calls.len() as u32)
+                            .sum();
+
+                        let compacted =
+                            compact_agent_messages(provider, messages.clone(), &config.compact_prompt).await;
+
+                        memory
+                            .store_messages(&child_scope, compacted, tool_calls)
+                            .await;
+                    }
+                }
+                AgentExecutionResult::Error(_) => {} // don't store on error
+            }
+
+            match result {
+                AgentExecutionResult::Success { content, .. } => Ok(ToolOutput::success(content)),
+                AgentExecutionResult::MaxContinuationsReached {
+                    partial_result,
+                    continuations,
+                    ..
+                } => Ok(ToolOutput::success(format!(
+                    "Task partially completed after {} continuations.\n\n{}",
+                    continuations, partial_result
+                ))),
+                AgentExecutionResult::Error(e) => {
+                    Ok(ToolOutput::error(format!("Agent error: {}", e)))
+                }
+            }
         }
     }
 }
@@ -258,6 +371,8 @@ pub struct InternalAgentTool {
     scope: String,
     /// Task store for task board injection into sub-agent context
     task_store: Option<Arc<qq_tools::TaskStore>>,
+    /// Context compactor for observational memory
+    compactor: Option<Arc<dyn ContextCompactor>>,
 }
 
 impl InternalAgentTool {
@@ -275,6 +390,7 @@ impl InternalAgentTool {
         agent_memory: Option<AgentMemory>,
         scope: String,
         task_store: Option<Arc<qq_tools::TaskStore>>,
+        compactor: Option<Arc<dyn ContextCompactor>>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -292,6 +408,7 @@ impl InternalAgentTool {
             agent_memory,
             scope,
             task_store,
+            compactor,
         }
     }
 }
@@ -344,6 +461,22 @@ impl Tool for InternalAgentTool {
             .unwrap_or_else(|| self.agent.compact_prompt())
             .to_string();
 
+        let memory_strategy = self
+            .external_agents
+            .get_builtin_memory_strategy(self.agent.name())
+            .cloned()
+            .unwrap_or_else(|| self.agent.memory_strategy());
+
+        let max_observations = self
+            .external_agents
+            .get_builtin_max_observations(self.agent.name())
+            .or_else(|| self.agent.max_observations());
+
+        let observation_config = self
+            .external_agents
+            .get_builtin_observation_config(self.agent.name())
+            .or_else(|| self.agent.observation_config());
+
         let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
 
         // Auto-inject bash + mount_external unless disabled via config
@@ -365,6 +498,9 @@ impl Tool for InternalAgentTool {
             tool_limits,
             compact_prompt,
             is_read_only: self.agent.is_read_only(),
+            memory_strategy,
+            max_observations,
+            observation_config,
         };
 
         let output = execute_agent(
@@ -382,6 +518,7 @@ impl Tool for InternalAgentTool {
             &self.agent_memory,
             &self.scope,
             &self.task_store,
+            &self.compactor,
         )
         .await;
 
@@ -428,6 +565,8 @@ pub struct ExternalAgentTool {
     scope: String,
     /// Task store for task board injection into sub-agent context
     task_store: Option<Arc<qq_tools::TaskStore>>,
+    /// Context compactor for observational memory
+    compactor: Option<Arc<dyn ContextCompactor>>,
 }
 
 impl ExternalAgentTool {
@@ -446,6 +585,7 @@ impl ExternalAgentTool {
         agent_memory: Option<AgentMemory>,
         scope: String,
         task_store: Option<Arc<qq_tools::TaskStore>>,
+        compactor: Option<Arc<dyn ContextCompactor>>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -464,6 +604,7 @@ impl ExternalAgentTool {
             agent_memory,
             scope,
             task_store,
+            compactor,
         }
     }
 }
@@ -512,6 +653,31 @@ impl Tool for ExternalAgentTool {
             }
         }
 
+        // Build observation config from agent definition fields if any are set
+        let observation_config = {
+            let def = &self.agent_def;
+            if def.preserve_recent.is_some()
+                || def.message_threshold_bytes.is_some()
+                || def.observation_threshold_bytes.is_some()
+                || def.context_budget_bytes.is_some()
+            {
+                let defaults = qq_core::ObservationConfig::for_agents();
+                Some(qq_core::ObservationConfig {
+                    preserve_recent: def.preserve_recent.unwrap_or(defaults.preserve_recent),
+                    message_threshold_bytes: def
+                        .message_threshold_bytes
+                        .unwrap_or(defaults.message_threshold_bytes),
+                    observation_threshold_bytes: def
+                        .observation_threshold_bytes
+                        .unwrap_or(defaults.observation_threshold_bytes),
+                    context_budget_bytes: def.context_budget_bytes.or(defaults.context_budget_bytes),
+                    hysteresis: defaults.hysteresis,
+                })
+            } else {
+                None
+            }
+        };
+
         let config = AgentToolConfig {
             agent_name: self.agent_name.clone(),
             system_prompt: self.agent_def.system_prompt.clone(),
@@ -523,6 +689,9 @@ impl Tool for ExternalAgentTool {
                 .unwrap_or(DEFAULT_COMPACT_PROMPT)
                 .to_string(),
             is_read_only: self.agent_def.read_only,
+            memory_strategy: self.agent_def.memory_strategy.clone(),
+            max_observations: self.agent_def.max_observations,
+            observation_config,
         };
 
         let output = execute_agent(
@@ -540,6 +709,7 @@ impl Tool for ExternalAgentTool {
             &self.agent_memory,
             &self.scope,
             &self.task_store,
+            &self.compactor,
         )
         .await;
 
@@ -571,6 +741,7 @@ impl Tool for ExternalAgentTool {
 /// * `event_bus` - Optional event bus for progress reporting
 /// * `agent_memory` - Optional scoped agent memory for persistent instance state
 /// * `scope` - Current scope path (e.g., "pm", "pm/coder")
+/// * `compactor` - Optional context compactor for observational memory
 #[allow(clippy::too_many_arguments)]
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
@@ -584,6 +755,7 @@ pub fn create_agent_tools(
     agent_memory: Option<AgentMemory>,
     scope: String,
     task_store: Option<Arc<qq_tools::TaskStore>>,
+    compactor: Option<Arc<dyn ContextCompactor>>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -613,6 +785,7 @@ pub fn create_agent_tools(
                 agent_memory.clone(),
                 scope.clone(),
                 task_store.clone(),
+                compactor.clone(),
             )));
         }
     }
@@ -634,6 +807,7 @@ pub fn create_agent_tools(
                 agent_memory.clone(),
                 scope.clone(),
                 task_store.clone(),
+                compactor.clone(),
             )));
         }
     }

@@ -4,11 +4,22 @@
 # Built-in agents: chat, researcher, summarizer, coder, reviewer, explore, planner, writer
 #
 # Configuration options:
-#   max_turns      - Maximum number of agentic loop turns per invocation
-#   tool_limits    - Per-tool call limits (tool_name -> max_calls)
-#   compact_prompt - Custom prompt for summarizing agent memory when it exceeds budget
+#   max_turns        - Maximum agentic loop turns (safety ceiling)
+#   tool_limits      - Per-tool call limits (tool_name -> max_calls)
+#   memory_strategy  - "obs-memory" or "compaction" (see below)
+#   max_observations - Max observation passes before wrap-up (obs-memory only)
+#   compact_prompt   - Custom summarization prompt (compaction only)
 #
-# When a limit is reached, the agent receives an error prompting it to complete.
+# Memory strategies:
+#   obs-memory   - In-loop observational memory (default for built-in agents).
+#                  Older messages are distilled into an observation log during execution.
+#                  Allows very long runs. max_turns is raised to 500 automatically.
+#                  Use max_observations to control when the agent wraps up.
+#   compaction   - Post-execution LLM summarization (default for external agents).
+#                  Agent runs up to max_turns, then summarizes and restarts (up to 3x).
+#                  Use compact_prompt to customize what gets preserved.
+#
+# When a tool limit is reached, the agent receives an error prompting it to complete.
 #
 # NOTE: All agents automatically have access to `inform_user` - a tool that sends
 # status messages to the user without ending the agent's turn. Use it to keep
@@ -23,45 +34,60 @@
 
 [builtin.researcher]
 # Default tools: web_search, fetch_webpage, read_preference + inform_user
+# memory_strategy = "obs-memory"  # default for all built-in agents
 max_turns = 10
 tool_limits = { web_search = 2, fetch_webpage = 5 }
 
 [builtin.coder]
 # Default tools: read_file, edit_file, write_file, find_files, search_files + inform_user
-max_turns = 100
+# memory_strategy = "obs-memory"  # default - context managed in-loop
+max_observations = 15             # wrap up after 15 observation passes
+# max_turns is auto-raised to 500 with obs-memory; override here if needed
 
 [builtin.explore]
 # Default tools: read_file, find_files, search_files + inform_user
-max_turns = 50
+# memory_strategy = "obs-memory"  # default
+max_observations = 12
 
 [builtin.reviewer]
 # Default tools: read_file, find_files, search_files + inform_user
-max_turns = 50
+# memory_strategy = "obs-memory"  # default
+# max_observations = 10           # default
 
 [builtin.writer]
 # Default tools: read_file, write_file, find_files, search_files + inform_user
-max_turns = 20
+# memory_strategy = "obs-memory"  # default
+max_observations = 8
 
 [builtin.chat]
 # Default tools: Agent tools only + inform_user (delegates all work to other agents)
-max_turns = 20
+# memory_strategy = "obs-memory"  # default
 
 [builtin.planner]
 # Default tools: read_preference + inform_user (delegates exploration to other agents)
+# memory_strategy = "obs-memory"  # default
 max_turns = 30
 
 [builtin.summarizer]
 # Default tools: inform_user only (pure LLM otherwise)
+# memory_strategy = "obs-memory"  # default
 max_turns = 20
+
+# Example: switch an agent back to the old compaction strategy
+# [builtin.coder]
+# memory_strategy = "compaction"
+# max_turns = 100
+# compact_prompt = "Summarize the coding session preserving file paths and changes made."
 
 # ============================================================================
 # EXTERNAL AGENT DEFINITIONS
 # ============================================================================
 
-# Custom research agent focused on technical documentation
+# Custom research agent using compaction (default for external agents)
 # Note: inform_user is automatically available to all agents
 [agents.doc-researcher]
 description = "Research technical documentation and APIs"
+# memory_strategy = "compaction"  # default for external agents
 system_prompt = """
 You are a technical documentation researcher. Your task is to find and
 analyze technical documentation, API references, and developer guides.
@@ -78,6 +104,7 @@ max_turns = 8
 tools = ["fetch_webpage", "web_search"]
 tool_limits = { web_search = 3, fetch_webpage = 5 }
 # Custom compaction prompt - preserves documentation-specific context when memory is summarized
+# (only used with memory_strategy = "compaction")
 compact_prompt = """
 Summarize this documentation research session. Preserve:
 1. API endpoints, function signatures, and code examples found
@@ -108,10 +135,12 @@ Use inform_user for progress updates on long explanations.
 max_turns = 1
 tools = []  # Pure LLM agent - inform_user is still available
 
-# Git helper agent
+# Git helper agent using obs-memory for thorough repo exploration
 # Note: inform_user is automatically available to all agents
 [agents.git-helper]
 description = "Help with git operations and history"
+memory_strategy = "obs-memory"  # in-loop context management
+max_observations = 8
 system_prompt = """
 You are a git expert assistant. Help users understand their git repository
 by exploring files and providing guidance.
@@ -125,14 +154,15 @@ You can:
 Use inform_user to keep the user updated on your progress.
 Be concise and practical in your advice.
 """
-max_turns = 10
 tools = ["read_file", "write_file", "find_files", "search_files"]
 tool_limits = { read_file = 15, write_file = 5, find_files = 10, search_files = 10 }
 
-# Security reviewer agent
+# Security reviewer agent using obs-memory for deep analysis
 # Note: inform_user is automatically available to all agents
 [agents.security-reviewer]
 description = "Review code for security issues"
+memory_strategy = "obs-memory"  # in-loop observational memory for deep analysis
+max_observations = 10
 system_prompt = """
 You are a security-focused code reviewer. Analyze code for potential
 security vulnerabilities and provide actionable recommendations.
@@ -154,6 +184,5 @@ For each issue found:
 3. Provide a specific fix recommendation
 4. Rate severity (Critical/High/Medium/Low)
 """
-max_turns = 15
 tools = ["read_file", "find_files", "search_files"]
 tool_limits = { read_file = 20, find_files = 10, search_files = 10 }

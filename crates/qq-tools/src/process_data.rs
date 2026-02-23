@@ -32,11 +32,6 @@ impl ProcessLargeDataTool {
         }
     }
 
-    /// Create with default config.
-    pub fn with_defaults(provider: Arc<dyn Provider>) -> Self {
-        let config = ChunkerConfig::default();
-        Self::new(provider, config)
-    }
 }
 
 #[derive(Deserialize)]

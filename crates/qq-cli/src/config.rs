@@ -19,6 +19,83 @@ pub struct Config {
 
     #[serde(default)]
     pub tools: ToolsConfigEntry,
+
+    /// Compaction configuration for observational memory
+    #[serde(default)]
+    pub compaction: Option<CompactionConfig>,
+}
+
+/// Configuration for observational memory compaction.
+///
+/// Observational memory automatically compresses older conversation messages
+/// into a structured observation log, keeping the context window manageable
+/// during long sessions. An "Observer" LLM pass distills raw messages into
+/// dated observations; a "Reflector" pass further compresses the log when it
+/// grows large.
+///
+/// The defaults work well for most use cases. Only override these if you have
+/// a specific reason (e.g., running a very cheap model that benefits from a
+/// smaller window, or a very capable model where you want to delay compaction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Provider name for compaction LLM calls (defaults to the session provider).
+    /// Set this to route compaction through a cheaper/faster model provider.
+    #[serde(default)]
+    pub provider: Option<String>,
+
+    /// Model override for compaction LLM calls (e.g., "claude-3-5-haiku").
+    /// When set, compaction uses this model instead of the session model.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Byte threshold for unobserved messages before the Observer triggers.
+    /// When the total size of unobserved messages exceeds this value, the
+    /// Observer LLM is called to distill them into observations.
+    /// Default: 50000 (50 KB).
+    #[serde(default)]
+    pub message_threshold_bytes: Option<usize>,
+
+    /// Byte threshold for the observation log before the Reflector triggers.
+    /// When the accumulated observation log exceeds this value, the Reflector
+    /// LLM is called to merge and compress it.
+    /// Default: 200000 (200 KB).
+    #[serde(default)]
+    pub observation_threshold_bytes: Option<usize>,
+
+    /// Number of recent messages to always keep as raw messages (never observe).
+    /// These messages are sent verbatim to the LLM so it has full fidelity on
+    /// the most recent exchanges.
+    /// Default: 10.
+    #[serde(default)]
+    pub preserve_recent: Option<usize>,
+
+    /// Hysteresis multiplier applied to thresholds to prevent compaction from
+    /// re-triggering immediately after a pass. The effective threshold is
+    /// `threshold * hysteresis`. Values slightly above 1.0 work best.
+    /// Default: 1.1.
+    #[serde(default)]
+    pub hysteresis: Option<f64>,
+
+    /// Context budget in bytes. When set, `preserve_recent` is dynamically
+    /// reduced so that (observation log + preserved messages) stays under
+    /// this limit. Useful for preventing context window overflow with large
+    /// individual messages.
+    #[serde(default)]
+    pub context_budget_bytes: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// Convert to qq_core::ObservationConfig, using defaults for unset fields.
+    pub fn to_observation_config(&self) -> qq_core::ObservationConfig {
+        let defaults = qq_core::ObservationConfig::default();
+        qq_core::ObservationConfig {
+            message_threshold_bytes: self.message_threshold_bytes.unwrap_or(defaults.message_threshold_bytes),
+            observation_threshold_bytes: self.observation_threshold_bytes.unwrap_or(defaults.observation_threshold_bytes),
+            preserve_recent: self.preserve_recent.unwrap_or(defaults.preserve_recent),
+            hysteresis: self.hysteresis.unwrap_or(defaults.hysteresis),
+            context_budget_bytes: self.context_budget_bytes.or(defaults.context_budget_bytes),
+        }
+    }
 }
 
 
@@ -444,5 +521,85 @@ mod tests {
         assert_eq!(resolved.provider_name, "openai");
         assert_eq!(resolved.system_prompt, Some("You are a coding assistant.".to_string()));
         assert_eq!(resolved.model, Some("gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn test_compaction_config_defaults() {
+        let toml = r#"
+            default_profile = "default"
+
+            [profiles.default]
+            provider = "openai"
+
+            [providers.openai]
+            api_key = "sk-test"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.compaction.is_none());
+    }
+
+    #[test]
+    fn test_compaction_config_from_toml() {
+        let toml = r#"
+            default_profile = "default"
+
+            [profiles.default]
+            provider = "openai"
+
+            [providers.openai]
+            api_key = "sk-test"
+
+            [compaction]
+            provider = "anthropic"
+            model = "claude-3-5-haiku"
+            message_threshold_bytes = 30000
+            observation_threshold_bytes = 150000
+            preserve_recent = 8
+            hysteresis = 1.25
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let comp = config.compaction.unwrap();
+        assert_eq!(comp.provider.as_deref(), Some("anthropic"));
+        assert_eq!(comp.model.as_deref(), Some("claude-3-5-haiku"));
+        assert_eq!(comp.message_threshold_bytes, Some(30000));
+        assert_eq!(comp.observation_threshold_bytes, Some(150000));
+        assert_eq!(comp.preserve_recent, Some(8));
+        assert_eq!(comp.hysteresis, Some(1.25));
+
+        let obs_config = comp.to_observation_config();
+        assert_eq!(obs_config.message_threshold_bytes, 30000);
+        assert_eq!(obs_config.observation_threshold_bytes, 150000);
+        assert_eq!(obs_config.preserve_recent, 8);
+        assert!((obs_config.hysteresis - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_compaction_config_partial_override() {
+        let toml = r#"
+            default_profile = "default"
+
+            [profiles.default]
+            provider = "openai"
+
+            [providers.openai]
+            api_key = "sk-test"
+
+            [compaction]
+            model = "gpt-4o-mini"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let comp = config.compaction.unwrap();
+        assert!(comp.provider.is_none());
+        assert_eq!(comp.model.as_deref(), Some("gpt-4o-mini"));
+
+        let obs_config = comp.to_observation_config();
+        // Should use defaults for unset fields
+        assert_eq!(obs_config.message_threshold_bytes, 50_000);
+        assert_eq!(obs_config.observation_threshold_bytes, 200_000);
+        assert_eq!(obs_config.preserve_recent, 10);
+        assert!((obs_config.hysteresis - 1.1).abs() < f64::EPSILON);
     }
 }

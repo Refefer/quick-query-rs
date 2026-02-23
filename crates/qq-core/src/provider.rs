@@ -23,8 +23,6 @@ pub struct CompletionRequest {
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tools: Vec<ToolDefinition>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
     #[serde(default)]
     pub stream: bool,
     /// Extra parameters to pass through to the API (e.g., reasoning_effort, chat_template_kwargs)
@@ -41,7 +39,6 @@ impl CompletionRequest {
             max_tokens: None,
             top_p: None,
             tools: Vec::new(),
-            system: None,
             stream: true,
             extra: std::collections::HashMap::new(),
         }
@@ -62,18 +59,8 @@ impl CompletionRequest {
         self
     }
 
-    pub fn with_top_p(mut self, top_p: f32) -> Self {
-        self.top_p = Some(top_p);
-        self
-    }
-
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = tools;
-        self
-    }
-
-    pub fn with_system(mut self, system: impl Into<String>) -> Self {
-        self.system = Some(system.into());
         self
     }
 
@@ -87,10 +74,6 @@ impl CompletionRequest {
         self
     }
 
-    pub fn with_extra_param(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.extra.insert(key.into(), value);
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,43 +98,6 @@ pub enum FinishReason {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderConfig {
-    pub name: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub default_model: Option<String>,
-    #[serde(default)]
-    pub extra: std::collections::HashMap<String, serde_json::Value>,
-}
-
-impl ProviderConfig {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            api_key: None,
-            base_url: None,
-            default_model: None,
-            extra: std::collections::HashMap::new(),
-        }
-    }
-
-    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
-        self
-    }
-
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = Some(base_url.into());
-        self
-    }
-
-    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
-        self.default_model = Some(model.into());
-        self
-    }
-}
-
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
@@ -163,14 +109,6 @@ pub trait Provider: Send + Sync {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error>;
 
     async fn stream(&self, request: CompletionRequest) -> Result<StreamResult, Error>;
-
-    fn supports_tools(&self) -> bool {
-        true
-    }
-
-    fn supports_vision(&self) -> bool {
-        false
-    }
 
     fn available_models(&self) -> Vec<&str> {
         self.default_model().into_iter().collect()
@@ -193,13 +131,4 @@ mod tests {
         assert_eq!(request.max_tokens, Some(1000));
     }
 
-    #[test]
-    fn test_provider_config() {
-        let config = ProviderConfig::new("openai")
-            .with_api_key("sk-test")
-            .with_default_model("gpt-4");
-
-        assert_eq!(config.name, "openai");
-        assert_eq!(config.api_key, Some("sk-test".to_string()));
-    }
 }

@@ -483,14 +483,6 @@ impl Provider for AnthropicProvider {
         Ok(Box::pin(stream) as StreamResult)
     }
 
-    fn supports_tools(&self) -> bool {
-        true
-    }
-
-    fn supports_vision(&self) -> bool {
-        true
-    }
-
     fn available_models(&self) -> Vec<&str> {
         vec![
             "claude-sonnet-4-20250514",
