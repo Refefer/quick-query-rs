@@ -151,6 +151,11 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Reasoning/thinking content from reasoning models (e.g., o1, DeepSeek-R1, Qwen3).
+    /// Preserved during tool-call exchanges so the model retains its reasoning context,
+    /// then stripped after the final answer.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -161,6 +166,7 @@ impl Message {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -171,6 +177,7 @@ impl Message {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -181,6 +188,7 @@ impl Message {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -191,6 +199,7 @@ impl Message {
             name: None,
             tool_calls,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -201,11 +210,19 @@ impl Message {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            reasoning_content: None,
         }
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Attach reasoning/thinking content to this message.
+    /// Normalizes `Some("")` to `None`.
+    pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
+        self.reasoning_content = reasoning.filter(|r| !r.is_empty());
         self
     }
 
@@ -222,6 +239,20 @@ impl Message {
                 .as_ref()
                 .map(|id| id.len())
                 .unwrap_or(0)
+            + self
+                .reasoning_content
+                .as_ref()
+                .map(|r| r.len())
+                .unwrap_or(0)
+    }
+}
+
+/// Strip reasoning content from all messages in a history slice.
+/// Called after the model delivers its final answer (no tool calls)
+/// to avoid sending stale reasoning on future turns.
+pub fn strip_reasoning_from_history(messages: &mut [Message]) {
+    for msg in messages {
+        msg.reasoning_content = None;
     }
 }
 
@@ -400,5 +431,61 @@ mod tests {
         // Content parts are joined with a space
         assert_eq!(clean, "Before After");
         assert_eq!(thinking, Some("thinking here".to_string()));
+    }
+
+    #[test]
+    fn test_with_reasoning_some() {
+        let msg = Message::assistant("hello")
+            .with_reasoning(Some("I thought about it".to_string()));
+        assert_eq!(msg.reasoning_content, Some("I thought about it".to_string()));
+    }
+
+    #[test]
+    fn test_with_reasoning_none() {
+        let msg = Message::assistant("hello")
+            .with_reasoning(None);
+        assert_eq!(msg.reasoning_content, None);
+    }
+
+    #[test]
+    fn test_with_reasoning_empty_string_becomes_none() {
+        let msg = Message::assistant("hello")
+            .with_reasoning(Some(String::new()));
+        assert_eq!(msg.reasoning_content, None);
+    }
+
+    #[test]
+    fn test_strip_reasoning_from_history() {
+        let mut messages = vec![
+            Message::user("hello"),
+            Message::assistant("thinking response")
+                .with_reasoning(Some("my reasoning".to_string())),
+            Message::assistant_with_tool_calls("", vec![
+                ToolCall::new("tc-1", "read_file", serde_json::json!({"path": "/tmp"})),
+            ]).with_reasoning(Some("tool reasoning".to_string())),
+            Message::tool_result("tc-1", "file contents"),
+        ];
+        assert!(messages[1].reasoning_content.is_some());
+        assert!(messages[2].reasoning_content.is_some());
+
+        strip_reasoning_from_history(&mut messages);
+
+        for msg in &messages {
+            assert_eq!(msg.reasoning_content, None);
+        }
+    }
+
+    #[test]
+    fn test_byte_count_includes_reasoning() {
+        let msg = Message::assistant("hello")
+            .with_reasoning(Some("reasoning text".to_string()));
+        // "hello" (5) + "reasoning text" (14) = 19
+        assert_eq!(msg.byte_count(), 19);
+    }
+
+    #[test]
+    fn test_byte_count_no_reasoning() {
+        let msg = Message::assistant("hello");
+        assert_eq!(msg.byte_count(), 5);
     }
 }

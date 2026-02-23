@@ -826,6 +826,7 @@ async fn run_completion(
     chunk_processor: &ChunkProcessor,
     original_query: &str,
 ) -> Result<()> {
+    let include_tool_reasoning = provider.include_tool_reasoning();
     let max_iterations = 100;
 
     for iteration in 0..max_iterations {
@@ -906,9 +907,15 @@ async fn run_completion(
                     println!();
                 }
 
-                // Add assistant message with tool calls
+                // Add assistant message with tool calls; attach reasoning if configured
+                let reasoning = if include_tool_reasoning {
+                    response.thinking.clone()
+                } else {
+                    None
+                };
                 let assistant_msg =
-                    Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+                    Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone())
+                        .with_reasoning(reasoning);
                 session.add_assistant_with_tools(assistant_msg);
 
                 // Log message stored
@@ -961,7 +968,8 @@ async fn run_completion(
                 continue;
             }
 
-            // No tool calls - print final response
+            // No tool calls - strip reasoning from history, print final response
+            qq_core::message::strip_reasoning_from_history(&mut session.messages);
             print_section_header("Response")?;
             let mut renderer = MarkdownRenderer::new();
             renderer.push(&content)?;
@@ -986,6 +994,7 @@ async fn run_completion(
         let mut in_content = false;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None; // (id, name, arguments)
+        let mut accumulated_thinking = String::new();
 
         while let Some(chunk) = stream.next().await {
             match chunk? {
@@ -995,6 +1004,9 @@ async fn run_completion(
                         // Print thinking header
                         print_section_header("Thinking")?;
                         in_thinking = true;
+                    }
+                    if include_tool_reasoning {
+                        accumulated_thinking.push_str(&delta);
                     }
                     thinking_renderer.push(&delta)?;
                 }
@@ -1075,9 +1087,15 @@ async fn run_completion(
                 println!(); // Newline after any content
             }
 
-            // Add assistant message with tool calls - only store actual content, not thinking
+            // Add assistant message with tool calls; attach reasoning if configured
+            let reasoning = if include_tool_reasoning && !accumulated_thinking.is_empty() {
+                Some(std::mem::take(&mut accumulated_thinking))
+            } else {
+                None
+            };
             let assistant_msg =
-                Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+                Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone())
+                    .with_reasoning(reasoning);
             session.add_assistant_with_tools(assistant_msg);
 
             // Log message stored
@@ -1135,7 +1153,8 @@ async fn run_completion(
             continue;
         }
 
-        // No tool calls - finish up
+        // No tool calls - strip reasoning from history and finish up
+        qq_core::message::strip_reasoning_from_history(&mut session.messages);
         if in_thinking && !in_content {
             // Only had thinking, no content
             thinking_renderer.finish()?;

@@ -113,6 +113,12 @@ pub trait Provider: Send + Sync {
     fn available_models(&self) -> Vec<&str> {
         self.default_model().into_iter().collect()
     }
+
+    /// Whether to preserve reasoning/thinking content on assistant messages
+    /// during multi-turn tool-call exchanges. Default: true.
+    fn include_tool_reasoning(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

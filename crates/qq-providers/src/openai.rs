@@ -21,6 +21,7 @@ pub struct OpenAIProvider {
     api_key: String,
     base_url: String,
     default_model: Option<String>,
+    include_tool_reasoning: bool,
 }
 
 impl OpenAIProvider {
@@ -34,6 +35,7 @@ impl OpenAIProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
+            include_tool_reasoning: true,
         }
     }
 
@@ -44,6 +46,11 @@ impl OpenAIProvider {
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
+        self
+    }
+
+    pub fn with_include_tool_reasoning(mut self, include: bool) -> Self {
+        self.include_tool_reasoning = include;
         self
     }
 
@@ -141,7 +148,7 @@ impl OpenAIProvider {
         OpenAIMessage {
             role: role.to_string(),
             content,
-            reasoning_content: None, // We never send reasoning content, only receive it
+            reasoning_content: message.reasoning_content.clone(),
             name: message.name.clone(),
             tool_calls,
             tool_call_id: message.tool_call_id.clone(),
@@ -233,6 +240,10 @@ impl Provider for OpenAIProvider {
 
     fn default_model(&self) -> Option<&str> {
         self.default_model.as_deref()
+    }
+
+    fn include_tool_reasoning(&self) -> bool {
+        self.include_tool_reasoning
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {
