@@ -38,7 +38,8 @@ let msg = Message::assistant_with_tool_calls("", vec![tool_call]);
 let result = Message::tool_result("call_123", "File contents here");
 
 // Memory tracking
-let bytes = msg.byte_count(); // Counts content + tool_calls + tool_call_id
+let bytes = msg.byte_count(); // Counts content + tool_calls + tool_call_id + reasoning_content
+let observable = msg.observable_byte_count(); // Excludes reasoning_content (for compaction thresholds)
 ```
 
 ### Provider Trait

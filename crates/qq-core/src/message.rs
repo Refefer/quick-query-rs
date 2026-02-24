@@ -245,6 +245,22 @@ impl Message {
                 .map(|r| r.len())
                 .unwrap_or(0)
     }
+
+    /// Count observable bytes (excludes ephemeral reasoning_content).
+    /// Use for observation threshold checks and preserve_recent calculations.
+    pub fn observable_byte_count(&self) -> usize {
+        self.content.byte_count()
+            + self
+                .tool_calls
+                .iter()
+                .map(|tc| tc.id.len() + tc.name.len() + tc.arguments.to_string().len())
+                .sum::<usize>()
+            + self
+                .tool_call_id
+                .as_ref()
+                .map(|id| id.len())
+                .unwrap_or(0)
+    }
 }
 
 /// Strip reasoning content from all messages in a history slice.
@@ -487,5 +503,36 @@ mod tests {
     fn test_byte_count_no_reasoning() {
         let msg = Message::assistant("hello");
         assert_eq!(msg.byte_count(), 5);
+    }
+
+    #[test]
+    fn test_observable_byte_count_excludes_reasoning() {
+        let msg = Message::assistant("hello")
+            .with_reasoning(Some("reasoning text here".to_string()));
+        // byte_count includes reasoning (19 bytes), observable does not
+        assert_eq!(msg.byte_count(), 5 + 19);
+        assert_eq!(msg.observable_byte_count(), 5);
+        assert!(msg.observable_byte_count() < msg.byte_count());
+    }
+
+    #[test]
+    fn test_observable_byte_count_no_reasoning_matches_byte_count() {
+        let msg = Message::assistant("hello");
+        assert_eq!(msg.observable_byte_count(), msg.byte_count());
+
+        let msg2 = Message::tool_result("tc-1", "result data");
+        assert_eq!(msg2.observable_byte_count(), msg2.byte_count());
+    }
+
+    #[test]
+    fn test_observable_byte_count_with_tool_calls() {
+        let tool_call = ToolCall::new("tc-1", "read_file", serde_json::json!({"path": "/tmp"}));
+        let msg = Message::assistant_with_tool_calls("thinking", vec![tool_call])
+            .with_reasoning(Some("long reasoning content".to_string()));
+        // observable should include content + tool call but NOT reasoning
+        let expected = 8 // "thinking"
+            + 4 + 9 + serde_json::json!({"path": "/tmp"}).to_string().len(); // tool call
+        assert_eq!(msg.observable_byte_count(), expected);
+        assert!(msg.observable_byte_count() < msg.byte_count());
     }
 }
