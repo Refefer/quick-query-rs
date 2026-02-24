@@ -125,6 +125,10 @@ impl ContextCompactor for LlmCompactor {
             if let Some(ref tc_id) = msg.tool_call_id {
                 formatted.push_str(&format!("  (tool_call_id: {})\n", tc_id));
             }
+
+            if let Some(ref reasoning) = msg.reasoning_content {
+                formatted.push_str(&format!("  [reasoning: {} bytes]\n", reasoning.len()));
+            }
         }
 
         tracing::debug!(
@@ -274,6 +278,51 @@ mod tests {
 
         let req = provider.last_request().unwrap();
         assert_eq!(req.model.as_deref(), Some("custom-model"));
+    }
+
+    #[tokio::test]
+    async fn test_observe_includes_reasoning_annotation() {
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_response("- Observation with reasoning");
+
+        let compactor = LlmCompactor::new(provider.clone(), None);
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant("I'll help with that")
+                .with_reasoning(Some("Let me think step by step...".to_string())),
+        ];
+
+        compactor.observe(&messages).await.unwrap();
+
+        let req = provider.last_request().unwrap();
+        let user_content = req.messages[1].content.to_string_lossy();
+        assert!(
+            user_content.contains("[reasoning: 28 bytes]"),
+            "Expected reasoning annotation, got: {}",
+            user_content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_observe_no_reasoning_annotation_when_none() {
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_response("- Observation without reasoning");
+
+        let compactor = LlmCompactor::new(provider.clone(), None);
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant("world"),
+        ];
+
+        compactor.observe(&messages).await.unwrap();
+
+        let req = provider.last_request().unwrap();
+        let user_content = req.messages[1].content.to_string_lossy();
+        assert!(
+            !user_content.contains("[reasoning:"),
+            "Should not contain reasoning annotation, got: {}",
+            user_content
+        );
     }
 
     #[tokio::test]

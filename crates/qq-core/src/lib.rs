@@ -22,7 +22,7 @@ pub use agent::{
     AgentRunResult, AgentSender, DEFAULT_MAX_INSTANCE_BYTES,
 };
 pub use error::Error;
-pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags};
+pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags, strip_reasoning_from_history};
 pub use provider::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, StreamResult,
 };

@@ -869,6 +869,8 @@ pub async fn run_tui(
         while let Ok(event) = stream_rx.try_recv() {
             match &event {
                 StreamEvent::Done { usage: _, content } => {
+                    // Strip reasoning from all prior messages before adding final answer
+                    qq_core::message::strip_reasoning_from_history(&mut session.messages);
                     // Add assistant response to session
                     if !content.is_empty() {
                         session.add_assistant_message(content);
@@ -1448,6 +1450,7 @@ async fn run_streaming_completion(
     cancel_token: CancellationToken,
     mut base_rx: mpsc::Receiver<Vec<Message>>,
 ) {
+    let include_tool_reasoning = provider.include_tool_reasoning();
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
     let max_turns = 100u32;
@@ -1610,9 +1613,15 @@ async fn run_streaming_completion(
                     .map(|tc| (tc.id.clone(), tc.name.clone()))
                     .collect();
 
-                // Add assistant message with tool calls
+                // Add assistant message with tool calls; attach reasoning if configured
+                let reasoning = if include_tool_reasoning {
+                    response.thinking.clone()
+                } else {
+                    None
+                };
                 let assistant_msg =
-                    Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+                    Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone())
+                        .with_reasoning(reasoning);
                 iteration_messages.push(assistant_msg.clone());
 
                 // Send session update for the assistant message with tool calls
@@ -1735,6 +1744,7 @@ async fn run_streaming_completion(
         // Streaming mode: use stream() with retry logic for transient errors
         let mut stream_retries = 0u32;
         let mut content = String::new();
+        let mut accumulated_thinking = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_call: Option<(String, String, String)> = None;
         let mut output_bytes: usize = 0;
@@ -1789,6 +1799,9 @@ async fn run_streaming_completion(
                             }
                             Ok(Some(Ok(StreamChunk::ThinkingDelta { content: delta }))) => {
                                 output_bytes += delta.len();
+                                if include_tool_reasoning {
+                                    accumulated_thinking.push_str(&delta);
+                                }
                                 let _ = tx.send(StreamEvent::ThinkingDelta(delta)).await;
                             }
                             Ok(Some(Ok(StreamChunk::Delta { content: delta }))) => {
@@ -1866,6 +1879,7 @@ async fn run_streaming_completion(
                                 );
                                 // Reset partial state since LLM will re-generate from scratch
                                 content.clear();
+                                accumulated_thinking.clear();
                                 tool_calls.clear();
                                 current_tool_call = None;
                                 output_bytes = 0;
@@ -1936,9 +1950,15 @@ async fn run_streaming_completion(
                 .map(|tc| (tc.id.clone(), tc.name.clone()))
                 .collect();
 
-            // Add assistant message with tool calls
+            // Add assistant message with tool calls; attach reasoning if configured
+            let reasoning = if include_tool_reasoning && !accumulated_thinking.is_empty() {
+                Some(std::mem::take(&mut accumulated_thinking))
+            } else {
+                None
+            };
             let assistant_msg =
-                Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone());
+                Message::assistant_with_tool_calls(content.as_str(), tool_calls.clone())
+                    .with_reasoning(reasoning);
             iteration_messages.push(assistant_msg.clone());
 
             // Send session update for the assistant message with tool calls

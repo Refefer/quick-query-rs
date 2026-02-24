@@ -62,7 +62,7 @@ impl ObservationConfig {
         let mut count: usize = 0;
 
         for msg in messages.iter().rev() {
-            let msg_bytes = msg.byte_count();
+            let msg_bytes = msg.observable_byte_count();
             if cumulative + msg_bytes > available {
                 break;
             }
@@ -151,7 +151,7 @@ impl ObservationalMemory {
 
         let unobserved_bytes: usize = messages[self.observed_up_to..unobserved_end]
             .iter()
-            .map(|m| m.byte_count())
+            .map(|m| m.observable_byte_count())
             .sum();
 
         let threshold =
@@ -211,7 +211,7 @@ impl ObservationalMemory {
         if unobserved_end > self.observed_up_to {
             let unobserved_bytes: usize = messages[self.observed_up_to..unobserved_end]
                 .iter()
-                .map(|m| m.byte_count())
+                .map(|m| m.observable_byte_count())
                 .sum();
 
             let msg_threshold =
@@ -957,5 +957,45 @@ mod tests {
         // Should have compacted and preserved fewer than 10 messages
         assert_eq!(om.observation_count, 1);
         assert!(messages.len() < 10, "Expected fewer than 10 remaining, got {}", messages.len());
+    }
+
+    // --- reasoning_content handling ---
+
+    /// Helper: create a message with content bytes and reasoning bytes.
+    fn msg_with_reasoning(content_bytes: usize, reasoning_bytes: usize) -> Message {
+        Message::assistant("x".repeat(content_bytes).as_str())
+            .with_reasoning(Some("r".repeat(reasoning_bytes)))
+    }
+
+    #[test]
+    fn test_needs_observation_reasoning_not_counted() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 200,
+            preserve_recent: 2,
+            hysteresis: 1.0,
+            ..Default::default()
+        };
+        let om = ObservationalMemory::new(config);
+
+        // 5 messages: 50 bytes content + 500 bytes reasoning each
+        // Observable bytes per msg = 50, so 3 unobserved = 150 < 200 threshold
+        // Total byte_count per msg = 550, so 3 unobserved = 1650 (would trigger with byte_count)
+        let messages: Vec<Message> = (0..5).map(|_| msg_with_reasoning(50, 500)).collect();
+        assert!(!om.needs_observation(&messages));
+    }
+
+    #[test]
+    fn test_effective_preserve_ignores_reasoning_bytes() {
+        let config = ObservationConfig {
+            preserve_recent: 10,
+            context_budget_bytes: Some(600),
+            ..Default::default()
+        };
+        // 20 messages: 50 bytes content + 500 bytes reasoning each
+        // With byte_count (550 each), budget 600 fits ~1 → clamped to 2
+        // With observable_byte_count (50 each), budget 600 fits 12 → capped at 10
+        let messages: Vec<Message> = (0..20).map(|_| msg_with_reasoning(50, 500)).collect();
+        let effective = config.calculate_effective_preserve(&messages, 0);
+        assert_eq!(effective, 10, "Should fit all 10 with observable bytes, got {}", effective);
     }
 }

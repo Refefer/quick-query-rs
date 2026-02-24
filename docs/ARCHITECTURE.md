@@ -122,12 +122,14 @@ classDiagram
         +Option~String~ name
         +Vec~ToolCall~ tool_calls
         +Option~String~ tool_call_id
+        +Option~String~ reasoning_content
         +system(content) Message
         +user(content) Message
         +assistant(content) Message
         +assistant_with_tool_calls(content, calls) Message
         +tool_result(id, content) Message
         +byte_count() usize
+        +observable_byte_count() usize
     }
 
     class Role {
@@ -183,7 +185,9 @@ classDiagram
     ContentPart --> ToolResult
 ```
 
-Messages flow through the system in `Vec<Message>` sequences. The `byte_count()` method on `Message` and `Content` enables memory budgeting throughout the compaction and agent memory systems.
+Messages flow through the system in `Vec<Message>` sequences. Two byte-counting methods serve different purposes:
+- `byte_count()` — includes all fields (content, tool calls, reasoning_content). Used for memory diagnostics, agent trim budgets, and hard byte caps.
+- `observable_byte_count()` — excludes ephemeral `reasoning_content`. Used for observation threshold checks and `preserve_recent` calculations in the compaction system, preventing reasoning-heavy models from triggering premature observation.
 
 ### Provider Trait
 

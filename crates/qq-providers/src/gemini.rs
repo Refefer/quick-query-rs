@@ -21,6 +21,7 @@ pub struct GeminiProvider {
     api_key: String,
     base_url: String,
     default_model: Option<String>,
+    include_tool_reasoning: bool,
 }
 
 impl GeminiProvider {
@@ -34,6 +35,7 @@ impl GeminiProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
+            include_tool_reasoning: true,
         }
     }
 
@@ -44,6 +46,11 @@ impl GeminiProvider {
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
+        self
+    }
+
+    pub fn with_include_tool_reasoning(mut self, include: bool) -> Self {
+        self.include_tool_reasoning = include;
         self
     }
 
@@ -332,6 +339,10 @@ impl Provider for GeminiProvider {
 
     fn default_model(&self) -> Option<&str> {
         self.default_model.as_deref()
+    }
+
+    fn include_tool_reasoning(&self) -> bool {
+        self.include_tool_reasoning
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {

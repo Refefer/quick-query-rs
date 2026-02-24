@@ -873,7 +873,7 @@ impl Agent {
 
             // Use streaming if we have a progress handler, otherwise use complete()
             // Wrap with retry logic for transient transport/stream errors
-            let (content, tool_calls, usage) = {
+            let (content, tool_calls, usage, thinking) = {
                 let mut last_error = None;
                 let mut result = None;
                 for attempt in 0..=MAX_STREAM_RETRIES {
@@ -984,8 +984,10 @@ impl Agent {
                     "Agent executing tools"
                 );
 
-                // Store message with tool calls but NO content (don't store thinking)
-                let msg = Message::assistant_with_tool_calls("", tool_calls.clone());
+                // Store message with tool calls; attach reasoning if configured
+                let reasoning = if provider.include_tool_reasoning() { thinking } else { None };
+                let msg = Message::assistant_with_tool_calls("", tool_calls.clone())
+                    .with_reasoning(reasoning);
                 messages.push(msg);
 
                 // Check tool limits and partition into executable vs limit-exceeded
@@ -1165,7 +1167,8 @@ impl Agent {
                 continue;
             }
 
-            // No tool calls - return final response
+            // No tool calls - strip reasoning from history and return final response
+            crate::message::strip_reasoning_from_history(&mut messages);
             debug!(
                 agent = %config.id,
                 iterations = iteration + 1,
@@ -1222,8 +1225,14 @@ impl Agent {
 
             // Check for tool calls
             if !response.message.tool_calls.is_empty() {
-                // Add assistant message with tool calls but NO content (don't store thinking)
-                let msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone());
+                // Add assistant message with tool calls; attach reasoning if configured
+                let reasoning = if self.provider.include_tool_reasoning() {
+                    response.thinking
+                } else {
+                    None
+                };
+                let msg = Message::assistant_with_tool_calls("", response.message.tool_calls.clone())
+                    .with_reasoning(reasoning);
                 self.messages.push(msg);
 
                 // Execute tools
@@ -1235,7 +1244,8 @@ impl Agent {
                 continue;
             }
 
-            // No tool calls - save and return response (content only, no thinking)
+            // No tool calls - strip reasoning from history, save and return response
+            crate::message::strip_reasoning_from_history(&mut self.messages);
             let content = response.message.content.to_string_lossy();
             self.messages.push(Message::assistant(content.as_str()));
             return Ok(content);
@@ -1319,17 +1329,19 @@ const MAX_STREAM_RETRIES: u32 = 3;
 const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run a single iteration using streaming (for progress reporting).
+/// Returns (content, tool_calls, usage, thinking).
 async fn run_streaming_iteration(
     provider: &Arc<dyn Provider>,
     agent_name: &str,
     request: CompletionRequest,
     progress: Option<&Arc<dyn AgentProgressHandler>>,
-) -> Result<(String, Vec<crate::message::ToolCall>, Usage), Error> {
+) -> Result<(String, Vec<crate::message::ToolCall>, Usage, Option<String>), Error> {
     use tracing::debug;
 
     let mut stream = provider.stream(request).await?;
 
     let mut content = String::new();
+    let mut thinking_content = String::new();
     let mut tool_calls: Vec<crate::message::ToolCall> = Vec::new();
     let mut current_tool_call: Option<(String, String, String)> = None;
     let mut usage = Usage::default();
@@ -1342,6 +1354,8 @@ async fn run_streaming_iteration(
                         // Model started
                     }
                     Ok(StreamChunk::ThinkingDelta { content: delta }) => {
+                        // Accumulate thinking content for potential round-tripping
+                        thinking_content.push_str(&delta);
                         // Emit thinking delta event
                         if let Some(handler) = progress {
                             handler
@@ -1404,15 +1418,21 @@ async fn run_streaming_iteration(
         }
     }
 
-    Ok((content, tool_calls, usage))
+    let thinking = if thinking_content.is_empty() {
+        None
+    } else {
+        Some(thinking_content)
+    };
+    Ok((content, tool_calls, usage, thinking))
 }
 
 /// Run a single iteration using non-streaming complete() (when no progress handler).
+/// Returns (content, tool_calls, usage, thinking).
 async fn run_complete_iteration(
     provider: &Arc<dyn Provider>,
     config: &AgentConfig,
     mut request: CompletionRequest,
-) -> Result<(String, Vec<crate::message::ToolCall>, Usage), Error> {
+) -> Result<(String, Vec<crate::message::ToolCall>, Usage, Option<String>), Error> {
     use tracing::debug;
 
     request.stream = false;
@@ -1424,15 +1444,16 @@ async fn run_complete_iteration(
         debug!(
             agent = %config.id,
             thinking_len = thinking.len(),
-            "Extracted thinking content (not stored)"
+            "Extracted thinking content"
         );
     }
 
     let content = response.message.content.to_string_lossy();
     let tool_calls = response.message.tool_calls;
     let usage = response.usage;
+    let thinking = response.thinking;
 
-    Ok((content, tool_calls, usage))
+    Ok((content, tool_calls, usage, thinking))
 }
 
 /// Maximum bytes for a tool result in agent context.

@@ -923,6 +923,8 @@ struct ResolvedSettings {
     agents: Option<Vec<String>>,
     /// Primary agent for interactive sessions
     agent: String,
+    /// Include reasoning/thinking content in tool-call exchanges
+    include_tool_reasoning: bool,
 }
 
 /// Resolve all settings from CLI args, profile, and config
@@ -1006,6 +1008,9 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         parameters,
         agents: resolved_profile.agents.clone(),
         agent,
+        include_tool_reasoning: provider_config
+            .map(|p| p.include_tool_reasoning)
+            .unwrap_or(true),
     })
 }
 
@@ -1065,13 +1070,15 @@ fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result
         parameters: provider_config.parameters.clone(),
         agents: None,
         agent: String::new(),
+        include_tool_reasoning: provider_config.include_tool_reasoning,
     })
 }
 
 fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn Provider>> {
     match settings.provider_type.as_str() {
         "anthropic" => {
-            let mut provider = AnthropicProvider::new(&settings.api_key);
+            let mut provider = AnthropicProvider::new(&settings.api_key)
+                .with_include_tool_reasoning(settings.include_tool_reasoning);
             if let Some(model) = &settings.model {
                 provider = provider.with_default_model(model);
             }
@@ -1081,7 +1088,8 @@ fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn 
             Ok(Box::new(provider))
         }
         "gemini" => {
-            let mut provider = GeminiProvider::new(&settings.api_key);
+            let mut provider = GeminiProvider::new(&settings.api_key)
+                .with_include_tool_reasoning(settings.include_tool_reasoning);
             if let Some(model) = &settings.model {
                 provider = provider.with_default_model(model);
             }
@@ -1092,7 +1100,8 @@ fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn 
         }
         _ => {
             // Default: OpenAI-compatible
-            let mut provider = OpenAIProvider::new(&settings.api_key);
+            let mut provider = OpenAIProvider::new(&settings.api_key)
+                .with_include_tool_reasoning(settings.include_tool_reasoning);
             if let Some(model) = &settings.model {
                 provider = provider.with_default_model(model);
             }

@@ -158,6 +158,14 @@ pub struct ProviderConfigEntry {
     /// Extra parameters to pass to the API (e.g., reasoning_effort, chat_template_kwargs)
     #[serde(default)]
     pub parameters: std::collections::HashMap<String, serde_json::Value>,
+
+    /// Preserve reasoning/thinking content on assistant messages during tool-call
+    /// exchanges. When enabled, reasoning tokens from models like o1, DeepSeek-R1,
+    /// and Qwen3 are kept on intermediate messages and sent back to the API, then
+    /// stripped after the final answer. This improves tool-call quality for reasoning
+    /// models. Default: true
+    #[serde(default = "default_true")]
+    pub include_tool_reasoning: bool,
 }
 
 /// Tools configuration
@@ -206,6 +214,7 @@ pub struct ToolsConfigEntry {
     /// Bash permission overrides
     #[serde(default)]
     pub bash_permissions: Option<BashPermissionOverrides>,
+
 }
 
 /// Web search (Perplexica) configuration

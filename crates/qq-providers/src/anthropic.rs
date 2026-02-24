@@ -23,6 +23,7 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     default_model: Option<String>,
+    include_tool_reasoning: bool,
 }
 
 impl AnthropicProvider {
@@ -36,6 +37,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
+            include_tool_reasoning: true,
         }
     }
 
@@ -46,6 +48,11 @@ impl AnthropicProvider {
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
+        self
+    }
+
+    pub fn with_include_tool_reasoning(mut self, include: bool) -> Self {
+        self.include_tool_reasoning = include;
         self
     }
 
@@ -144,6 +151,15 @@ impl AnthropicProvider {
 
     fn convert_assistant_content(&self, msg: &Message) -> Vec<AnthropicContentBlock> {
         let mut blocks = Vec::new();
+
+        // Emit Thinking block before text/tool_use if reasoning is present
+        if let Some(ref reasoning) = msg.reasoning_content {
+            if !reasoning.is_empty() {
+                blocks.push(AnthropicContentBlock::Thinking {
+                    thinking: reasoning.clone(),
+                });
+            }
+        }
 
         let text = msg.content.to_string_lossy();
         if !text.is_empty() {
@@ -285,6 +301,10 @@ impl Provider for AnthropicProvider {
 
     fn default_model(&self) -> Option<&str> {
         self.default_model.as_deref()
+    }
+
+    fn include_tool_reasoning(&self) -> bool {
+        self.include_tool_reasoning
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {
