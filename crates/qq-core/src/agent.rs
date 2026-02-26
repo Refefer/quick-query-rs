@@ -848,21 +848,24 @@ impl Agent {
                 "Agent iteration starting"
             );
 
-            // Build request messages: system prompt + obs log + conversation messages
+            // Build request messages: single system prompt (with obs log merged) + conversation messages
             let mut request_messages = Vec::new();
-            if let Some(ref system) = system_prompt {
-                request_messages.push(Message::system(system.as_str()));
-            }
-            // Inject observation log as system message (between system prompt and messages)
-            if let Some(ref om) = obs_memory {
-                let log = om.observation_log();
-                if !log.is_empty() {
-                    let log_msg = format!(
+            let obs_log = obs_memory.as_ref().map(|om| om.observation_log()).unwrap_or_default();
+            let has_system = system_prompt.is_some();
+            let has_log = !obs_log.is_empty();
+
+            if has_system || has_log {
+                let mut system_content = system_prompt.clone().unwrap_or_default();
+                if has_log {
+                    if !system_content.is_empty() {
+                        system_content.push_str("\n\n");
+                    }
+                    system_content.push_str(&format!(
                         "## Observation Log (prior context)\n\n{}",
-                        log
-                    );
-                    request_messages.push(Message::system(log_msg.as_str()));
+                        obs_log
+                    ));
                 }
+                request_messages.push(Message::system(system_content.as_str()));
             }
             request_messages.extend(messages.iter().cloned());
 

@@ -75,27 +75,35 @@ impl ChatSession {
     pub fn build_messages(&self) -> Vec<Message> {
         let mut msgs = Vec::new();
 
-        if let Some(system) = &self.system_prompt {
-            msgs.push(Message::system(system.as_str()));
-        }
-
-        // Insert observation log as a system message (stable, cacheable prefix)
+        // Merge system prompt and observation log into a single system message
+        // to avoid multi-system-message errors with strict chat templates.
         let log = self.observation_memory.observation_log();
-        if !log.is_empty() {
+        let has_system = self.system_prompt.is_some();
+        let has_log = !log.is_empty();
+
+        if has_log {
             tracing::debug!(
                 observation_log_bytes = log.len(),
                 recent_messages = self.messages.len(),
                 "Building messages with observation log"
             );
+        }
 
-            let obs_msg = format!(
-                "## Observation Log\n\n\
-                 The following is a structured log of observations from earlier in this \
-                 conversation. Each entry captures a specific event, decision, or finding.\n\n\
-                 {}",
-                log
-            );
-            msgs.push(Message::system(obs_msg.as_str()));
+        if has_system || has_log {
+            let mut system_content = self.system_prompt.clone().unwrap_or_default();
+            if has_log {
+                if !system_content.is_empty() {
+                    system_content.push_str("\n\n");
+                }
+                system_content.push_str(&format!(
+                    "## Observation Log\n\n\
+                     The following is a structured log of observations from earlier in this \
+                     conversation. Each entry captures a specific event, decision, or finding.\n\n\
+                     {}",
+                    log
+                ));
+            }
+            msgs.push(Message::system(system_content.as_str()));
         }
 
         // Recent unobserved messages

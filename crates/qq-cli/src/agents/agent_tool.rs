@@ -87,6 +87,7 @@ async fn execute_agent(
     scope: &str,
     task_store: &Option<Arc<qq_tools::TaskStore>>,
     compactor: &Option<Arc<dyn ContextCompactor>>,
+    context_window: Option<u32>,
 ) -> Result<ToolOutput, Error> {
     let child_scope = format!("{}/{}", scope, config.agent_name);
 
@@ -133,6 +134,7 @@ async fn execute_agent(
             child_scope.clone(),
             task_store.clone(),
             compactor.clone(),
+            context_window,
         );
         for tool in nested_agent_tools {
             agent_tools.register(tool);
@@ -203,7 +205,10 @@ async fn execute_agent(
             // Wire up compactor and obs config
             if let Some(ref c) = compactor {
                 let obs_config = config.observation_config
-                    .unwrap_or_else(qq_core::ObservationConfig::for_agents);
+                    .unwrap_or_else(|| match context_window {
+                        Some(cw) => qq_core::ObservationConfig::from_context_window_for_agents(cw),
+                        None => qq_core::ObservationConfig::for_agents(),
+                    });
                 agent_cfg = agent_cfg
                     .with_compactor(Arc::clone(c))
                     .with_observation_config(obs_config);
@@ -373,6 +378,8 @@ pub struct InternalAgentTool {
     task_store: Option<Arc<qq_tools::TaskStore>>,
     /// Context compactor for observational memory
     compactor: Option<Arc<dyn ContextCompactor>>,
+    /// Context window size in tokens for deriving obs thresholds
+    context_window: Option<u32>,
 }
 
 impl InternalAgentTool {
@@ -391,6 +398,7 @@ impl InternalAgentTool {
         scope: String,
         task_store: Option<Arc<qq_tools::TaskStore>>,
         compactor: Option<Arc<dyn ContextCompactor>>,
+        context_window: Option<u32>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -409,6 +417,7 @@ impl InternalAgentTool {
             scope,
             task_store,
             compactor,
+            context_window,
         }
     }
 }
@@ -474,7 +483,7 @@ impl Tool for InternalAgentTool {
 
         let observation_config = self
             .external_agents
-            .get_builtin_observation_config(self.agent.name())
+            .get_builtin_observation_config(self.agent.name(), self.context_window)
             .or_else(|| self.agent.observation_config());
 
         let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
@@ -519,6 +528,7 @@ impl Tool for InternalAgentTool {
             &self.scope,
             &self.task_store,
             &self.compactor,
+            self.context_window,
         )
         .await;
 
@@ -567,6 +577,8 @@ pub struct ExternalAgentTool {
     task_store: Option<Arc<qq_tools::TaskStore>>,
     /// Context compactor for observational memory
     compactor: Option<Arc<dyn ContextCompactor>>,
+    /// Context window size in tokens for deriving obs thresholds
+    context_window: Option<u32>,
 }
 
 impl ExternalAgentTool {
@@ -586,6 +598,7 @@ impl ExternalAgentTool {
         scope: String,
         task_store: Option<Arc<qq_tools::TaskStore>>,
         compactor: Option<Arc<dyn ContextCompactor>>,
+        context_window: Option<u32>,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -605,6 +618,7 @@ impl ExternalAgentTool {
             scope,
             task_store,
             compactor,
+            context_window,
         }
     }
 }
@@ -661,7 +675,10 @@ impl Tool for ExternalAgentTool {
                 || def.observation_threshold_bytes.is_some()
                 || def.context_budget_bytes.is_some()
             {
-                let defaults = qq_core::ObservationConfig::for_agents();
+                let defaults = match self.context_window {
+                    Some(cw) => qq_core::ObservationConfig::from_context_window_for_agents(cw),
+                    None => qq_core::ObservationConfig::for_agents(),
+                };
                 Some(qq_core::ObservationConfig {
                     preserve_recent: def.preserve_recent.unwrap_or(defaults.preserve_recent),
                     message_threshold_bytes: def
@@ -710,6 +727,7 @@ impl Tool for ExternalAgentTool {
             &self.scope,
             &self.task_store,
             &self.compactor,
+            self.context_window,
         )
         .await;
 
@@ -742,6 +760,7 @@ impl Tool for ExternalAgentTool {
 /// * `agent_memory` - Optional scoped agent memory for persistent instance state
 /// * `scope` - Current scope path (e.g., "pm", "pm/coder")
 /// * `compactor` - Optional context compactor for observational memory
+/// * `context_window` - Optional context window size in tokens for deriving obs thresholds
 #[allow(clippy::too_many_arguments)]
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
@@ -756,6 +775,7 @@ pub fn create_agent_tools(
     scope: String,
     task_store: Option<Arc<qq_tools::TaskStore>>,
     compactor: Option<Arc<dyn ContextCompactor>>,
+    context_window: Option<u32>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -786,6 +806,7 @@ pub fn create_agent_tools(
                 scope.clone(),
                 task_store.clone(),
                 compactor.clone(),
+                context_window,
             )));
         }
     }
@@ -808,6 +829,7 @@ pub fn create_agent_tools(
                 scope.clone(),
                 task_store.clone(),
                 compactor.clone(),
+                context_window,
             )));
         }
     }
@@ -906,10 +928,12 @@ async fn compact_agent_messages(
                 return messages;
             }
 
-            // Build compacted message list: summary + recent messages
+            // Build compacted message list: summary (as user msg) + recent messages.
+            // Using a user message avoids creating a second system message when
+            // the agent loop prepends its own system prompt.
             let mut compacted = Vec::new();
             let summary_text = format!("## Prior Session Summary\n\n{}", summary);
-            compacted.push(Message::system(summary_text.as_str()));
+            compacted.push(Message::user(summary_text.as_str()));
             compacted.extend_from_slice(&messages[safe_end..]);
 
             let new_bytes: usize = compacted.iter().map(|m| m.byte_count()).sum();
