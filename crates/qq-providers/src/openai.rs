@@ -22,6 +22,7 @@ pub struct OpenAIProvider {
     base_url: String,
     default_model: Option<String>,
     include_tool_reasoning: bool,
+    context_window: Option<u32>,
 }
 
 impl OpenAIProvider {
@@ -36,6 +37,7 @@ impl OpenAIProvider {
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
             include_tool_reasoning: true,
+            context_window: None,
         }
     }
 
@@ -52,6 +54,26 @@ impl OpenAIProvider {
     pub fn with_include_tool_reasoning(mut self, include: bool) -> Self {
         self.include_tool_reasoning = include;
         self
+    }
+
+    pub fn with_context_window(mut self, cw: u32) -> Self {
+        self.context_window = Some(cw);
+        self
+    }
+
+    /// Get the base URL (for probe logic).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Get the API key (for probe logic).
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    /// Get the internal HTTP client (for probe logic).
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     fn build_request(&self, request: &CompletionRequest) -> OpenAIChatRequest {
@@ -244,6 +266,13 @@ impl Provider for OpenAIProvider {
 
     fn include_tool_reasoning(&self) -> bool {
         self.include_tool_reasoning
+    }
+
+    fn context_window(&self) -> Option<u32> {
+        self.context_window.or_else(|| {
+            self.default_model.as_deref()
+                .and_then(crate::context_windows::known_context_window)
+        })
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {
@@ -488,6 +517,77 @@ impl OpenAIProvider {
             Error::api(status, body.to_string())
         }
     }
+}
+
+/// Probe an OpenAI-compatible endpoint for the context window size of a model.
+///
+/// Queries `GET {base_url}/models/{model}` and looks for common context window
+/// fields in the JSON response. Skips probing for the default OpenAI API (those
+/// models are handled by the static lookup table).
+///
+/// Returns `None` on any failure (timeout, HTTP error, missing fields).
+pub async fn probe_context_window(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> Option<u32> {
+    // Skip for default OpenAI API — handled by known_context_window()
+    if base_url == DEFAULT_BASE_URL {
+        return None;
+    }
+
+    let url = format!("{}/models/{}", base_url.trim_end_matches('/'), model);
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        tracing::debug!(
+            status = response.status().as_u16(),
+            url = %url,
+            "Context window probe failed"
+        );
+        return None;
+    }
+
+    let body: serde_json::Value = response.json().await.ok()?;
+
+    // Try common field names used by various OpenAI-compatible servers
+    // vLLM: max_model_len
+    // Ollama/LiteLLM: context_window or context_length
+    // Some servers nest under model_info
+    let candidates = [
+        body.get("context_window").and_then(|v| v.as_u64()),
+        body.get("context_length").and_then(|v| v.as_u64()),
+        body.get("max_model_len").and_then(|v| v.as_u64()),
+        body.get("model_info")
+            .and_then(|m| m.get("context_length"))
+            .and_then(|v| v.as_u64()),
+    ];
+
+    for candidate in candidates {
+        if let Some(value) = candidate {
+            tracing::debug!(
+                model = model,
+                context_window = value,
+                "Context window probed from API"
+            );
+            return Some(value as u32);
+        }
+    }
+
+    tracing::debug!(
+        model = model,
+        url = %url,
+        "Context window probe: no recognized field in response"
+    );
+    None
 }
 
 // OpenAI API types

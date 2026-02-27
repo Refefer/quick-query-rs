@@ -159,7 +159,7 @@ impl Tool for BashTool {
                 // 3. Request user approval via channel
                 match self
                     .approval
-                    .request_approval(command.to_string(), trigger_cmds.clone())
+                    .request_approval(command.to_string(), trigger_cmds.clone(), "Bash Command")
                     .await
                 {
                     Ok(permissions::ApprovalResponse::Allow) => { /* proceed */ }

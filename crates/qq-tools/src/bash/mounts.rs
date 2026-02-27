@@ -209,6 +209,7 @@ impl Tool for MountExternalTool {
             .request_approval(
                 format!("Mount {} (reason: {})", canonical.display(), args.reason),
                 vec![approval_msg],
+                "Mount",
             )
             .await
         {

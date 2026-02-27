@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Widget},
 };
+use unicode_width::UnicodeWidthChar;
 use serde::{Deserialize, Serialize};
 use tui_input::Input;
 
@@ -82,10 +83,18 @@ impl Widget for InputArea<'_> {
         while !remaining.is_empty() || is_first_line {
             let line_width = if is_first_line { first_line_width } else { full_line_width };
 
-            let (line_text, rest) = if remaining.len() <= line_width {
-                (remaining, "")
-            } else {
-                remaining.split_at(line_width)
+            let (line_text, rest) = {
+                let mut width = 0;
+                let mut split_byte = remaining.len();
+                for (byte_idx, ch) in remaining.char_indices() {
+                    let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if width + ch_width > line_width {
+                        split_byte = byte_idx;
+                        break;
+                    }
+                    width += ch_width;
+                }
+                remaining.split_at(split_byte)
             };
 
             if is_first_line {

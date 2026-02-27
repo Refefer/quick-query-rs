@@ -6,6 +6,7 @@
 //! - Memory: persistent user preferences
 //! - Process data: chunk and summarize large content
 
+pub mod approval;
 pub mod bash;
 pub mod filesystem;
 pub mod memory;
@@ -13,12 +14,12 @@ pub mod process_data;
 pub mod tasks;
 pub mod web;
 
+pub use approval::{create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse};
 pub use bash::{
-    create_approval_channel, create_bash_tools, ApprovalChannel, ApprovalRequest,
-    ApprovalResponse, BashTool, MountExternalTool, MountPoint, PermissionStore, SandboxExecutor,
+    create_bash_tools, BashTool, MountExternalTool, MountPoint, PermissionStore, SandboxExecutor,
     SandboxMounts,
 };
-pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig};
+pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig, FileWritePermissions};
 pub use memory::{create_preference_tools, create_preference_tools_arc, MemoryStore};
 pub use process_data::{create_process_data_tool, create_process_data_tool_arc, ProcessLargeDataTool};
 pub use tasks::{create_task_tools, create_task_tools_arc, TaskStore};

@@ -8,7 +8,44 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
+
 use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
+
+use crate::approval::{ApprovalChannel, ApprovalResponse};
+
+/// Session-scoped tracker for which tool names have been auto-approved.
+pub struct FileWritePermissions {
+    session_promoted: RwLock<HashSet<String>>,
+}
+
+impl Default for FileWritePermissions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileWritePermissions {
+    pub fn new() -> Self {
+        Self {
+            session_promoted: RwLock::new(HashSet::new()),
+        }
+    }
+
+    pub fn is_session_approved(&self, tool_name: &str) -> bool {
+        self.session_promoted
+            .read()
+            .map(|s| s.contains(tool_name))
+            .unwrap_or(false)
+    }
+
+    pub fn promote_to_session(&self, tool_name: &str) {
+        if let Ok(mut s) = self.session_promoted.write() {
+            s.insert(tool_name.to_string());
+        }
+    }
+}
 
 /// Base path for filesystem operations (security boundary)
 #[derive(Clone)]
@@ -21,6 +58,10 @@ pub struct FileSystemConfig {
     /// Per-instance sandbox /tmp directory. When set, `/tmp/*` paths are
     /// remapped here, and file operations within it are permitted.
     sandbox_tmp: Option<PathBuf>,
+    /// Approval channel for write operations (shared with bash tool).
+    approval: Option<ApprovalChannel>,
+    /// Session-scoped write permission tracker.
+    write_permissions: Option<Arc<FileWritePermissions>>,
 }
 
 impl Default for FileSystemConfig {
@@ -30,6 +71,8 @@ impl Default for FileSystemConfig {
             allow_write: false,
             include_search_tools: true,
             sandbox_tmp: None,
+            approval: None,
+            write_permissions: None,
         }
     }
 }
@@ -41,6 +84,8 @@ impl FileSystemConfig {
             allow_write: false,
             include_search_tools: true,
             sandbox_tmp: None,
+            approval: None,
+            write_permissions: None,
         }
     }
 
@@ -57,6 +102,45 @@ impl FileSystemConfig {
     pub fn with_sandbox_tmp(mut self, tmp: PathBuf) -> Self {
         self.sandbox_tmp = Some(tmp);
         self
+    }
+
+    pub fn with_approval(mut self, approval: ApprovalChannel, permissions: Arc<FileWritePermissions>) -> Self {
+        self.approval = Some(approval);
+        self.write_permissions = Some(permissions);
+        self
+    }
+
+    /// Request user approval for a write operation.
+    ///
+    /// Returns `Ok(())` if the operation is approved (or no approval channel is configured).
+    /// Returns `Err(ToolOutput)` with a denial message if the user denies.
+    async fn require_approval(&self, tool_name: &str, description: String) -> Result<(), ToolOutput> {
+        let approval = match self.approval {
+            Some(ref a) => a,
+            None => return Ok(()),
+        };
+
+        // Check session-level approval for this tool
+        if let Some(ref perms) = self.write_permissions {
+            if perms.is_session_approved(tool_name) {
+                return Ok(());
+            }
+        }
+
+        match approval
+            .request_approval(description, vec![tool_name.to_string()], "File Operation")
+            .await
+        {
+            Ok(ApprovalResponse::Allow) => Ok(()),
+            Ok(ApprovalResponse::AllowForSession) => {
+                if let Some(ref perms) = self.write_permissions {
+                    perms.promote_to_session(tool_name);
+                }
+                Ok(())
+            }
+            Ok(ApprovalResponse::Deny) => Err(ToolOutput::error("File operation denied by user.")),
+            Err(e) => Err(ToolOutput::error(format!("Approval system unavailable: {}", e))),
+        }
     }
 
     /// Remap `/tmp/...` paths to the sandbox tmp dir when configured.
@@ -946,6 +1030,13 @@ impl Tool for WriteFileTool {
         let args: WriteFileArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("write_file", format!("Invalid arguments: {}", e)))?;
 
+        if let Err(denied) = self.config.require_approval(
+            "write_file",
+            format!("write_file: {} ({} bytes)", args.path, args.content.len()),
+        ).await {
+            return Ok(denied);
+        }
+
         let path = self.config.resolve_path(&args.path)?;
 
         // Create parent directories if needed
@@ -1092,6 +1183,16 @@ impl Tool for EditFileTool {
 
         if args.edits.is_empty() {
             return Err(Error::tool("edit_file", "No edits specified"));
+        }
+
+        // dry_run is read-only validation — skip approval
+        if !args.dry_run {
+            if let Err(denied) = self.config.require_approval(
+                "edit_file",
+                format!("edit_file: {} ({} edits)", args.path, args.edits.len()),
+            ).await {
+                return Ok(denied);
+            }
         }
 
         // Resolve path
@@ -1490,6 +1591,13 @@ impl Tool for MoveFileTool {
         let args: MoveFileArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("move_file", format!("Invalid arguments: {}", e)))?;
 
+        if let Err(denied) = self.config.require_approval(
+            "move_file",
+            format!("move_file: {} -> {}", args.source, args.destination),
+        ).await {
+            return Ok(denied);
+        }
+
         // Resolve source path (must exist)
         let source_path = self.config.resolve_path(&args.source)?;
 
@@ -1590,6 +1698,13 @@ impl Tool for CopyFileTool {
 
         let args: CopyFileArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("copy_file", format!("Invalid arguments: {}", e)))?;
+
+        if let Err(denied) = self.config.require_approval(
+            "copy_file",
+            format!("copy_file: {} -> {}", args.source, args.destination),
+        ).await {
+            return Ok(denied);
+        }
 
         // Resolve source path (must exist and be within root)
         let source_path = self.config.resolve_path(&args.source)?;
@@ -1696,6 +1811,13 @@ impl Tool for CreateDirectoryTool {
         let args: CreateDirectoryArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("create_directory", format!("Invalid arguments: {}", e)))?;
 
+        if let Err(denied) = self.config.require_approval(
+            "create_directory",
+            format!("create_directory: {}", args.path),
+        ).await {
+            return Ok(denied);
+        }
+
         // Normalize and validate the path
         let dir_path = self.config.normalize_path_for_creation(&args.path)?;
 
@@ -1780,6 +1902,13 @@ impl Tool for RemoveFileTool {
 
         let args: RemoveFileArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("rm_file", format!("Invalid arguments: {}", e)))?;
+
+        if let Err(denied) = self.config.require_approval(
+            "rm_file",
+            format!("rm_file: {}", args.path),
+        ).await {
+            return Ok(denied);
+        }
 
         let path = self.config.resolve_path(&args.path)?;
 
@@ -1871,6 +2000,14 @@ impl Tool for RemoveDirectoryTool {
         let args: RemoveDirectoryArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("rm_directory", format!("Invalid arguments: {}", e)))?;
 
+        let recursive_suffix = if args.recursive { " (recursive)" } else { "" };
+        if let Err(denied) = self.config.require_approval(
+            "rm_directory",
+            format!("rm_directory: {}{}", args.path, recursive_suffix),
+        ).await {
+            return Ok(denied);
+        }
+
         let path = self.config.resolve_path(&args.path)?;
 
         if !path.exists() {
@@ -1916,8 +2053,6 @@ impl Tool for RemoveDirectoryTool {
 // =============================================================================
 // Factory functions
 // =============================================================================
-
-use std::sync::Arc;
 
 /// Create all filesystem tools with the given configuration (boxed version)
 pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {

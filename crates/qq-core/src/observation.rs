@@ -35,6 +35,36 @@ pub struct ObservationConfig {
 }
 
 impl ObservationConfig {
+    /// Derive thresholds from the provider's context window size (in tokens).
+    ///
+    /// Uses a 4 bytes/token approximation to map token counts to byte thresholds.
+    /// For a 200K-token model this produces values close to the hardcoded defaults.
+    pub fn from_context_window(context_window: u32) -> Self {
+        let ctx_bytes = context_window as usize * 4;
+        Self {
+            message_threshold_bytes: ctx_bytes * 6 / 100,
+            observation_threshold_bytes: ctx_bytes / 4,
+            preserve_recent: (context_window as usize / 20_000).clamp(4, 20),
+            hysteresis: 1.1,
+            context_budget_bytes: Some(ctx_bytes * 65 / 100),
+        }
+    }
+
+    /// Derive agent-tuned thresholds from the provider's context window size.
+    ///
+    /// More aggressive than `from_context_window()` — agents have smaller budgets
+    /// and need earlier compaction.
+    pub fn from_context_window_for_agents(context_window: u32) -> Self {
+        let ctx_bytes = context_window as usize * 4;
+        Self {
+            message_threshold_bytes: ctx_bytes * 4 / 100,
+            observation_threshold_bytes: ctx_bytes * 12 / 100,
+            preserve_recent: (context_window as usize / 30_000).clamp(3, 10),
+            hysteresis: 1.1,
+            context_budget_bytes: Some(ctx_bytes / 2),
+        }
+    }
+
     /// Agent-tuned defaults: smaller thresholds for agent contexts.
     pub fn for_agents() -> Self {
         Self {
@@ -921,6 +951,78 @@ mod tests {
         // Huge budget, but still capped at preserve_recent=5
         let messages: Vec<Message> = (0..20).map(|_| msg_with_bytes(Role::User, 100)).collect();
         assert_eq!(config.calculate_effective_preserve(&messages, 0), 5);
+    }
+
+    // --- from_context_window ---
+
+    #[test]
+    fn test_from_context_window_200k() {
+        let config = ObservationConfig::from_context_window(200_000);
+        // 200K tokens * 4 = 800KB
+        assert_eq!(config.message_threshold_bytes, 48_000); // 800K * 6%
+        assert_eq!(config.observation_threshold_bytes, 200_000); // 800K / 4
+        assert_eq!(config.preserve_recent, 10); // 200K / 20K = 10
+        assert_eq!(config.context_budget_bytes, Some(520_000)); // 800K * 65%
+        assert!((config.hysteresis - 1.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_from_context_window_128k() {
+        let config = ObservationConfig::from_context_window(128_000);
+        let ctx_bytes = 128_000 * 4;
+        assert_eq!(config.message_threshold_bytes, ctx_bytes * 6 / 100);
+        assert_eq!(config.observation_threshold_bytes, ctx_bytes / 4);
+        assert_eq!(config.preserve_recent, 6); // 128K / 20K = 6
+        assert_eq!(config.context_budget_bytes, Some(ctx_bytes * 65 / 100));
+    }
+
+    #[test]
+    fn test_from_context_window_1m() {
+        let config = ObservationConfig::from_context_window(1_000_000);
+        assert_eq!(config.preserve_recent, 20); // 1M / 20K = 50, clamped to 20
+        assert_eq!(config.message_threshold_bytes, 4_000_000 * 6 / 100);
+    }
+
+    #[test]
+    fn test_from_context_window_2k_small() {
+        let config = ObservationConfig::from_context_window(2_000);
+        // 2K tokens * 4 = 8KB
+        assert_eq!(config.message_threshold_bytes, 480); // 8K * 6%
+        assert_eq!(config.preserve_recent, 4); // 2K / 20K = 0, clamped to 4
+    }
+
+    // --- from_context_window_for_agents ---
+
+    #[test]
+    fn test_from_context_window_for_agents_200k() {
+        let config = ObservationConfig::from_context_window_for_agents(200_000);
+        // 200K tokens * 4 = 800KB
+        assert_eq!(config.message_threshold_bytes, 32_000); // 800K * 4%
+        assert_eq!(config.observation_threshold_bytes, 96_000); // 800K * 12%
+        assert_eq!(config.preserve_recent, 6); // 200K / 30K = 6
+        assert_eq!(config.context_budget_bytes, Some(400_000)); // 800K / 2
+    }
+
+    #[test]
+    fn test_from_context_window_for_agents_128k() {
+        let config = ObservationConfig::from_context_window_for_agents(128_000);
+        let ctx_bytes = 128_000 * 4;
+        assert_eq!(config.message_threshold_bytes, ctx_bytes * 4 / 100);
+        assert_eq!(config.observation_threshold_bytes, ctx_bytes * 12 / 100);
+        assert_eq!(config.preserve_recent, 4); // 128K / 30K = 4
+    }
+
+    #[test]
+    fn test_from_context_window_for_agents_1m() {
+        let config = ObservationConfig::from_context_window_for_agents(1_000_000);
+        assert_eq!(config.preserve_recent, 10); // 1M / 30K = 33, clamped to 10
+    }
+
+    #[test]
+    fn test_from_context_window_for_agents_2k_small() {
+        let config = ObservationConfig::from_context_window_for_agents(2_000);
+        assert_eq!(config.preserve_recent, 3); // 2K / 30K = 0, clamped to 3
+        assert_eq!(config.message_threshold_bytes, 320); // 8K * 4%
     }
 
     #[test]

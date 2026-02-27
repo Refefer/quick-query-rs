@@ -206,7 +206,7 @@ pub struct TuiApp {
     /// Whether the UI needs to be redrawn (set on any state change, cleared after draw)
     needs_redraw: bool,
 
-    /// Pending bash approval request (shown as overlay, user responds with a/s/d keys)
+    /// Pending approval request (shown as overlay, user responds with a/s/d keys)
     pub pending_approval: Option<qq_tools::ApprovalRequest>,
 }
 
@@ -772,7 +772,7 @@ pub async fn run_tui(
     debug_logger: Option<Arc<DebugLogger>>,
     agent_memory: AgentMemory,
     bash_mounts: Option<Arc<qq_tools::SandboxMounts>>,
-    mut bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
+    mut approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
     _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
     task_store: Option<Arc<qq_tools::TaskStore>>,
     compactor: Option<Arc<dyn qq_core::ContextCompactor>>,
@@ -920,9 +920,9 @@ pub async fn run_tui(
             }
         }
 
-        // Poll for bash approval requests
+        // Poll for approval requests (bash commands, file operations)
         if app.pending_approval.is_none() {
-            if let Some(ref mut rx) = bash_approval_rx {
+            if let Some(ref mut rx) = approval_rx {
                 if let Ok(request) = rx.try_recv() {
                     app.pending_approval = Some(request);
                     app.needs_redraw = true;
@@ -941,7 +941,7 @@ pub async fn run_tui(
                         continue;
                     }
 
-                    // Handle pending bash approval
+                    // Handle pending approval
                     if app.pending_approval.is_some() {
                         use crossterm::event::KeyCode;
                         let response = match key.code {

@@ -237,8 +237,9 @@ impl AgentsConfig {
     /// Get observation config overrides for a built-in agent.
     ///
     /// Returns `Some(ObservationConfig)` if at least one obs field is set,
-    /// with unset fields falling back to `ObservationConfig::for_agents()`.
-    pub fn get_builtin_observation_config(&self, name: &str) -> Option<qq_core::ObservationConfig> {
+    /// with unset fields falling back to context-window-derived defaults
+    /// (or `ObservationConfig::for_agents()` if context_window is None).
+    pub fn get_builtin_observation_config(&self, name: &str, context_window: Option<u32>) -> Option<qq_core::ObservationConfig> {
         let o = self.builtin.get(name)?;
         if o.preserve_recent.is_none()
             && o.message_threshold_bytes.is_none()
@@ -247,7 +248,10 @@ impl AgentsConfig {
         {
             return None;
         }
-        let defaults = qq_core::ObservationConfig::for_agents();
+        let defaults = match context_window {
+            Some(cw) => qq_core::ObservationConfig::from_context_window_for_agents(cw),
+            None => qq_core::ObservationConfig::for_agents(),
+        };
         Some(qq_core::ObservationConfig {
             preserve_recent: o.preserve_recent.unwrap_or(defaults.preserve_recent),
             message_threshold_bytes: o
@@ -533,7 +537,7 @@ context_budget_bytes = 500000
 "#;
         let config: AgentsConfig = toml::from_str(toml_content).unwrap();
 
-        let obs = config.get_builtin_observation_config("coder").unwrap();
+        let obs = config.get_builtin_observation_config("coder", None).unwrap();
         assert_eq!(obs.preserve_recent, 4);
         assert_eq!(obs.message_threshold_bytes, 20000);
         assert_eq!(obs.context_budget_bytes, Some(500000));
@@ -549,8 +553,8 @@ max_turns = 50
 "#;
         let config: AgentsConfig = toml::from_str(toml_content).unwrap();
 
-        assert!(config.get_builtin_observation_config("explore").is_none());
-        assert!(config.get_builtin_observation_config("nonexistent").is_none());
+        assert!(config.get_builtin_observation_config("explore", None).is_none());
+        assert!(config.get_builtin_observation_config("nonexistent", None).is_none());
     }
 
     #[test]
