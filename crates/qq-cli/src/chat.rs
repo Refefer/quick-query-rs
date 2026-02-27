@@ -513,7 +513,7 @@ pub async fn run_chat(
     debug_logger: Option<Arc<DebugLogger>>,
     agent_memory: AgentMemory,
     bash_mounts: Option<Arc<qq_tools::SandboxMounts>>,
-    bash_approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
+    approval_rx: Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>,
     _bash_permissions: Option<Arc<qq_tools::PermissionStore>>,
     task_store: Option<Arc<qq_tools::TaskStore>>,
     compactor: Option<Arc<dyn ContextCompactor>>,
@@ -533,16 +533,18 @@ pub async fn run_chat(
         }
     });
 
-    // Spawn approval handler for bash tool (handles per-call command approval)
-    if let Some(mut approval_rx) = bash_approval_rx {
+    // Spawn approval handler (handles per-call approval for bash commands and file operations)
+    if let Some(mut approval_rx) = approval_rx {
         tokio::spawn(async move {
             while let Some(request) = approval_rx.recv().await {
-                eprintln!("\n--- Bash approval required ---");
-                eprintln!("  Command: {}", request.full_command);
-                eprintln!(
-                    "  Requires approval: {}",
-                    request.trigger_commands.join(", ")
-                );
+                eprintln!("\n--- {} approval required ---", request.category);
+                eprintln!("  {}", request.full_command);
+                if !request.trigger_commands.is_empty() {
+                    eprintln!(
+                        "  Requires approval: {}",
+                        request.trigger_commands.join(", ")
+                    );
+                }
                 eprintln!("  [a]llow once / allow for [s]ession / [d]eny (default: deny)");
                 eprint!("  > ");
 

@@ -245,7 +245,6 @@ async fn main() -> Result<()> {
 /// Resources created by bash tool setup, passed to TUI/CLI for approval handling.
 struct BashResources {
     mounts: Arc<qq_tools::SandboxMounts>,
-    approval_rx: tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>,
     permissions: Arc<qq_tools::PermissionStore>,
 }
 
@@ -255,7 +254,7 @@ struct BashResources {
 /// - Default: requires kernel sandbox, exits if unavailable
 /// - `--classic`: no bash tools, built-in search tools instead
 /// - `--insecure`: bash tools without kernel sandbox
-fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Result<(ToolRegistry, Option<BashResources>)> {
+fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Result<(ToolRegistry, Option<BashResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
     // Resolve root directory: config > $PWD
     let root = config.tools.root.as_ref()
         .map(|s| expand_path(s))
@@ -323,6 +322,26 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
         None
     };
 
+    // Create shared approval channel when at least one consumer needs it.
+    let needs_write_approval = config.tools.enable_filesystem
+        && config.tools.allow_write
+        && config.tools.require_write_approval;
+    let needs_approval = needs_write_approval || use_bash;
+
+    let (approval_tx, approval_rx) = if needs_approval {
+        let (tx, rx) = qq_tools::create_approval_channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    // Shared write permissions tracker (used by filesystem write tools)
+    let write_permissions = if needs_write_approval {
+        Some(Arc::new(qq_tools::FileWritePermissions::new()))
+    } else {
+        None
+    };
+
     // Filesystem tools — include search tools only when bash is not available.
     // When kernel sandbox is active (not --insecure), share its /tmp with file tools.
     if config.tools.enable_filesystem {
@@ -333,6 +352,9 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
             if let Some(ref m) = mounts {
                 fs_config = fs_config.with_sandbox_tmp(m.tmp_dir().to_path_buf());
             }
+        }
+        if let (Some(ref tx), Some(ref perms)) = (&approval_tx, &write_permissions) {
+            fs_config = fs_config.with_approval(tx.clone(), Arc::clone(perms));
         }
         for tool in qq_tools::create_filesystem_tools_arc(fs_config) {
             registry.register(tool);
@@ -369,7 +391,8 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
             .unwrap_or_default();
         let permissions = Arc::new(qq_tools::PermissionStore::new(overrides));
 
-        let (approval_tx, approval_rx) = qq_tools::create_approval_channel();
+        // approval_tx is guaranteed Some when use_bash is true
+        let approval_tx = approval_tx.clone().expect("approval_tx must exist when bash is enabled");
 
         for tool in qq_tools::create_bash_tools(
             Arc::clone(&mounts),
@@ -381,14 +404,13 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
 
         Some(BashResources {
             mounts,
-            approval_rx,
             permissions,
         })
     } else {
         None
     };
 
-    Ok((registry, bash_resources))
+    Ok((registry, bash_resources, approval_rx))
 }
 
 fn is_apparmor_restricting_userns() -> bool {
@@ -403,7 +425,7 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let (mut tools_registry, _bash_resources) = build_tools_registry(config, cli.classic, cli.insecure)?;
+    let (mut tools_registry, _bash_resources, _approval_rx) = build_tools_registry(config, cli.classic, cli.insecure)?;
 
     // Set up chunk processor for large tool outputs
     let chunker_config = config.tools.chunker.to_chunker_config();
@@ -568,9 +590,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Set up base tools (conditionally)
-    let (mut base_tools, bash_resources) = if disable_tools {
+    let (mut base_tools, bash_resources, approval_rx) = if disable_tools {
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
-        (ToolRegistry::new(), None)
+        (ToolRegistry::new(), None, None)
     } else {
         build_tools_registry(config, cli.classic, cli.insecure)?
     };
@@ -621,12 +643,25 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Create scoped agent memory for persistent instance state
     let agent_memory = AgentMemory::new();
 
+    // Resolve context window: config override > provider trait (known model lookup)
+    // For OpenAI-compatible with custom base_url, we could probe, but that's
+    // deferred to avoid blocking startup. The config override covers that case.
+    let context_window = settings.context_window
+        .or_else(|| provider.context_window());
+
+    if let Some(cw) = context_window {
+        tracing::info!(context_window = cw, "Resolved context window");
+    }
+
     // Create observational memory compactor (used by both ChatSession and agents)
     let observation_config = config
         .compaction
         .as_ref()
-        .map(|c| c.to_observation_config())
-        .unwrap_or_default();
+        .map(|c| c.to_observation_config(context_window))
+        .unwrap_or_else(|| match context_window {
+            Some(cw) => qq_core::ObservationConfig::from_context_window(cw),
+            None => qq_core::ObservationConfig::default(),
+        });
 
     let compactor: Option<Arc<dyn ContextCompactor>> = {
         let compaction_provider = if let Some(ref comp_config) = config.compaction {
@@ -672,6 +707,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             "pm".to_string(),
             task_store.clone(),
             compactor.clone(),
+            context_window,
         )
     };
 
@@ -713,9 +749,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Destructure bash resources for TUI/CLI
-    let (bash_mounts, bash_approval_rx, bash_permissions) = match bash_resources {
-        Some(br) => (Some(br.mounts), Some(br.approval_rx), Some(br.permissions)),
-        None => (None, None, None),
+    let (bash_mounts, bash_permissions) = match bash_resources {
+        Some(br) => (Some(br.mounts), Some(br.permissions)),
+        None => (None, None),
     };
 
     if use_tui {
@@ -735,7 +771,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             debug_logger,
             agent_memory.clone(),
             bash_mounts.clone(),
-            bash_approval_rx,
+            approval_rx,
             bash_permissions.clone(),
             task_store.clone(),
             compactor.clone(),
@@ -757,7 +793,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             debug_logger,
             agent_memory.clone(),
             bash_mounts,
-            bash_approval_rx,
+            approval_rx,
             bash_permissions,
             task_store,
             compactor,
@@ -925,6 +961,8 @@ struct ResolvedSettings {
     agent: String,
     /// Include reasoning/thinking content in tool-call exchanges
     include_tool_reasoning: bool,
+    /// Context window size in tokens (from config override)
+    context_window: Option<u32>,
 }
 
 /// Resolve all settings from CLI args, profile, and config
@@ -997,6 +1035,9 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         base_url.as_deref(),
     );
 
+    // Resolve context window from config
+    let context_window = provider_config.and_then(|p| p.context_window);
+
     Ok(ResolvedSettings {
         profile_name,
         provider_name,
@@ -1011,6 +1052,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         include_tool_reasoning: provider_config
             .map(|p| p.include_tool_reasoning)
             .unwrap_or(true),
+        context_window,
     })
 }
 
@@ -1071,6 +1113,7 @@ fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result
         agents: None,
         agent: String::new(),
         include_tool_reasoning: provider_config.include_tool_reasoning,
+        context_window: provider_config.context_window,
     })
 }
 

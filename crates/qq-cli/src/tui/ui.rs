@@ -187,7 +187,7 @@ fn render_help_overlay(frame: &mut Frame) {
     frame.render_widget(help, overlay_area);
 }
 
-/// Render approval overlay modal for bash command approval
+/// Render approval overlay modal for per-call approval (bash commands, file operations, mounts)
 fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalRequest) {
     let area = frame.area();
 
@@ -232,9 +232,10 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
         request.full_command.clone()
     };
 
+    let header_text = format!("{} Approval Required", request.category);
     let mut lines = vec![
         Line::from(Span::styled(
-            "Bash Command Approval Required",
+            header_text,
             Style::default().fg(Color::Yellow),
         )),
         Line::from(""),
@@ -273,7 +274,7 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
-                .title(" Approve Command ")
+                .title(format!(" Approve {} ", request.category))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow)),
         )

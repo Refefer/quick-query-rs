@@ -85,9 +85,15 @@ pub struct CompactionConfig {
 }
 
 impl CompactionConfig {
-    /// Convert to qq_core::ObservationConfig, using defaults for unset fields.
-    pub fn to_observation_config(&self) -> qq_core::ObservationConfig {
-        let defaults = qq_core::ObservationConfig::default();
+    /// Convert to qq_core::ObservationConfig, using context-window-derived defaults
+    /// when available, otherwise falling back to hardcoded defaults.
+    ///
+    /// Explicit per-field overrides in `[compaction]` always win over derived values.
+    pub fn to_observation_config(&self, context_window: Option<u32>) -> qq_core::ObservationConfig {
+        let defaults = match context_window {
+            Some(cw) => qq_core::ObservationConfig::from_context_window(cw),
+            None => qq_core::ObservationConfig::default(),
+        };
         qq_core::ObservationConfig {
             message_threshold_bytes: self.message_threshold_bytes.unwrap_or(defaults.message_threshold_bytes),
             observation_threshold_bytes: self.observation_threshold_bytes.unwrap_or(defaults.observation_threshold_bytes),
@@ -166,6 +172,11 @@ pub struct ProviderConfigEntry {
     /// models. Default: true
     #[serde(default = "default_true")]
     pub include_tool_reasoning: bool,
+
+    /// Context window size in tokens. Overrides automatic detection.
+    /// Used to derive compaction thresholds when [compaction] fields are unset.
+    #[serde(default)]
+    pub context_window: Option<u32>,
 }
 
 /// Tools configuration
@@ -215,6 +226,9 @@ pub struct ToolsConfigEntry {
     #[serde(default)]
     pub bash_permissions: Option<BashPermissionOverrides>,
 
+    /// Require per-call user approval for filesystem write operations
+    #[serde(default = "default_true")]
+    pub require_write_approval: bool,
 }
 
 /// Web search (Perplexica) configuration
@@ -321,6 +335,7 @@ impl Default for ToolsConfigEntry {
             enable_bash: true,
             bash_mounts: Vec::new(),
             bash_permissions: None,
+            require_write_approval: true,
         }
     }
 }
@@ -577,7 +592,7 @@ mod tests {
         assert_eq!(comp.preserve_recent, Some(8));
         assert_eq!(comp.hysteresis, Some(1.25));
 
-        let obs_config = comp.to_observation_config();
+        let obs_config = comp.to_observation_config(None);
         assert_eq!(obs_config.message_threshold_bytes, 30000);
         assert_eq!(obs_config.observation_threshold_bytes, 150000);
         assert_eq!(obs_config.preserve_recent, 8);
@@ -604,11 +619,83 @@ mod tests {
         assert!(comp.provider.is_none());
         assert_eq!(comp.model.as_deref(), Some("gpt-4o-mini"));
 
-        let obs_config = comp.to_observation_config();
+        let obs_config = comp.to_observation_config(None);
         // Should use defaults for unset fields
         assert_eq!(obs_config.message_threshold_bytes, 50_000);
         assert_eq!(obs_config.observation_threshold_bytes, 200_000);
         assert_eq!(obs_config.preserve_recent, 10);
         assert!((obs_config.hysteresis - 1.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_compaction_config_with_context_window() {
+        // No explicit overrides, but context_window supplied → derived values
+        let toml = r#"
+            default_profile = "default"
+
+            [profiles.default]
+            provider = "openai"
+
+            [providers.openai]
+            api_key = "sk-test"
+
+            [compaction]
+            model = "gpt-4o-mini"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let comp = config.compaction.unwrap();
+        let obs_config = comp.to_observation_config(Some(128_000));
+
+        // Should use context-window-derived values (128K * 4 = 512KB)
+        assert_eq!(obs_config.message_threshold_bytes, 512_000 * 6 / 100);
+        assert_eq!(obs_config.observation_threshold_bytes, 512_000 / 4);
+        assert_eq!(obs_config.preserve_recent, 6); // 128K / 20K = 6
+        assert_eq!(obs_config.context_budget_bytes, Some(512_000 * 65 / 100));
+    }
+
+    #[test]
+    fn test_compaction_config_explicit_overrides_win_over_context_window() {
+        let toml = r#"
+            default_profile = "default"
+
+            [profiles.default]
+            provider = "openai"
+
+            [providers.openai]
+            api_key = "sk-test"
+
+            [compaction]
+            message_threshold_bytes = 99999
+            preserve_recent = 15
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let comp = config.compaction.unwrap();
+        let obs_config = comp.to_observation_config(Some(128_000));
+
+        // Explicit fields win
+        assert_eq!(obs_config.message_threshold_bytes, 99999);
+        assert_eq!(obs_config.preserve_recent, 15);
+        // Non-explicit fields use derived values
+        assert_eq!(obs_config.observation_threshold_bytes, 512_000 / 4);
+    }
+
+    #[test]
+    fn test_provider_config_context_window() {
+        let toml = r#"
+            default_profile = "default"
+
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            context_window = 8192
+
+            [profiles.default]
+            provider = "ollama"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let provider = config.providers.get("ollama").unwrap();
+        assert_eq!(provider.context_window, Some(8192));
     }
 }

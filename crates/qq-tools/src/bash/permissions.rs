@@ -7,7 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
-use tokio::sync::{mpsc, oneshot};
+
+pub use crate::approval::{create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse};
 
 /// Permission tier for a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -219,64 +220,6 @@ const RESTRICTED_COMMANDS: &[&str] = &[
     "chown", "chgrp", "useradd", "userdel", "passwd", "usermod", "groupadd",
 ];
 
-/// Request sent to the UI for user approval.
-pub struct ApprovalRequest {
-    /// The full command string the agent wants to run.
-    pub full_command: String,
-    /// Which specific commands triggered the per-call requirement.
-    pub trigger_commands: Vec<String>,
-    /// Channel to send the user's response back.
-    pub response_tx: oneshot::Sender<ApprovalResponse>,
-}
-
-/// User's response to an approval request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalResponse {
-    /// Allow this single execution.
-    Allow,
-    /// Allow and promote trigger commands to session tier.
-    AllowForSession,
-    /// Deny execution.
-    Deny,
-}
-
-/// Sender side of the approval channel, held by BashTool.
-#[derive(Clone)]
-pub struct ApprovalChannel {
-    pub(crate) request_tx: mpsc::Sender<ApprovalRequest>,
-}
-
-impl ApprovalChannel {
-    /// Send an approval request and wait for the response.
-    pub async fn request_approval(
-        &self,
-        full_command: String,
-        trigger_commands: Vec<String>,
-    ) -> Result<ApprovalResponse, String> {
-        let (response_tx, response_rx) = oneshot::channel();
-
-        self.request_tx
-            .send(ApprovalRequest {
-                full_command,
-                trigger_commands,
-                response_tx,
-            })
-            .await
-            .map_err(|_| "Approval channel closed".to_string())?;
-
-        response_rx
-            .await
-            .map_err(|_| "Approval cancelled".to_string())
-    }
-}
-
-/// Create an approval channel pair.
-///
-/// Returns the sender (for BashTool) and receiver (for TUI/CLI).
-pub fn create_approval_channel() -> (ApprovalChannel, mpsc::Receiver<ApprovalRequest>) {
-    let (tx, rx) = mpsc::channel(8);
-    (ApprovalChannel { request_tx: tx }, rx)
-}
 
 /// Parse config-level permission overrides into a tier map.
 pub fn parse_config_overrides(

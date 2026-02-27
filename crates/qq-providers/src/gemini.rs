@@ -22,6 +22,7 @@ pub struct GeminiProvider {
     base_url: String,
     default_model: Option<String>,
     include_tool_reasoning: bool,
+    context_window: Option<u32>,
 }
 
 impl GeminiProvider {
@@ -36,6 +37,7 @@ impl GeminiProvider {
             base_url: DEFAULT_BASE_URL.to_string(),
             default_model: None,
             include_tool_reasoning: true,
+            context_window: None,
         }
     }
 
@@ -51,6 +53,11 @@ impl GeminiProvider {
 
     pub fn with_include_tool_reasoning(mut self, include: bool) -> Self {
         self.include_tool_reasoning = include;
+        self
+    }
+
+    pub fn with_context_window(mut self, cw: u32) -> Self {
+        self.context_window = Some(cw);
         self
     }
 
@@ -343,6 +350,13 @@ impl Provider for GeminiProvider {
 
     fn include_tool_reasoning(&self) -> bool {
         self.include_tool_reasoning
+    }
+
+    fn context_window(&self) -> Option<u32> {
+        self.context_window.or_else(|| {
+            self.default_model.as_deref()
+                .and_then(crate::context_windows::known_context_window)
+        })
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {

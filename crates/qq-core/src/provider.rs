@@ -119,6 +119,12 @@ pub trait Provider: Send + Sync {
     fn include_tool_reasoning(&self) -> bool {
         true
     }
+
+    /// Context window size in tokens for this provider's active model.
+    /// Returns None if unknown.
+    fn context_window(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(test)]
