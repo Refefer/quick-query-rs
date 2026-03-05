@@ -14,6 +14,8 @@ pub struct CommandResult {
     pub stderr: String,
     pub exit_code: i32,
     pub timed_out: bool,
+    /// Container-level error (e.g. namespace/mount setup failure).
+    pub sandbox_error: Option<String>,
 }
 
 /// Sandbox executor backend.
@@ -112,6 +114,7 @@ fn probe_user_namespaces_uncached() -> bool {
     use hakoniwa::Container;
 
     let mut container = Container::new();
+    container.runctl(hakoniwa::Runctl::MountFallback);
     container
         .bindmount_ro("/bin", "/bin")
         .bindmount_ro("/usr", "/usr")
@@ -145,6 +148,11 @@ pub fn execute_kernel(
     let root_str = root.to_str().ok_or("Project root is not valid UTF-8")?;
 
     let mut container = Container::new();
+
+    // Allow remount fallback: on newer kernels (6.17+), remounting bind mounts
+    // requires preserving CL_UNPRIVILEGED locked flags (nodev, nosuid, etc.).
+    // Without this, remount_rdonly fails with EPERM inside user namespaces.
+    container.runctl(hakoniwa::Runctl::MountFallback);
 
     // Mount system directories read-only
     container
@@ -198,13 +206,27 @@ pub fn execute_kernel(
         .output()
         .map_err(|e| format!("Sandbox execution failed: {}", e))?;
 
-    let timed_out = !output.status.success() && output.status.exit_code.is_none();
+    // Hakoniwa sets exit_code=None for both timeouts (SIGKILL, code=137) and
+    // container setup failures (code=125).  Distinguish them by checking code.
+    let (timed_out, sandbox_error) = if !output.status.success() && output.status.exit_code.is_none() {
+        if output.status.code == 128 + 9 {
+            // SIGKILL — the timeout alarm handler killed the inner process.
+            (true, None)
+        } else {
+            // Container-level failure (code 125) or other signal death.
+            // Surface hakoniwa's reason so the user sees what actually broke.
+            (false, Some(output.status.reason.clone()))
+        }
+    } else {
+        (false, None)
+    };
 
     Ok(CommandResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.exit_code.unwrap_or(output.status.code),
         timed_out,
+        sandbox_error,
     })
 }
 
@@ -275,6 +297,7 @@ async fn execute_app_level(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             exit_code: output.status.code().unwrap_or(-1),
             timed_out: false,
+            sandbox_error: None,
         }),
         Ok(Err(e)) => Err(format!("Failed to execute command: {}", e)),
         Err(_) => Ok(CommandResult {
@@ -282,6 +305,7 @@ async fn execute_app_level(
             stderr: format!("Command timed out after {} seconds", timeout_secs),
             exit_code: -1,
             timed_out: true,
+            sandbox_error: None,
         }),
     }
 }

@@ -206,6 +206,8 @@ fn format_output(result: sandbox::CommandResult, max_bytes: usize) -> ToolOutput
 
     if result.timed_out {
         output.push_str("[Command timed out]\n\n");
+    } else if let Some(ref err) = result.sandbox_error {
+        output.push_str(&format!("[Sandbox error: {}]\n\n", err));
     }
 
     // Combine stdout and stderr
@@ -247,7 +249,7 @@ fn format_output(result: sandbox::CommandResult, max_bytes: usize) -> ToolOutput
         );
     }
 
-    if result.exit_code != 0 || result.timed_out {
+    if result.exit_code != 0 || result.timed_out || result.sandbox_error.is_some() {
         ToolOutput::error(output)
     } else {
         ToolOutput::success(output)
@@ -335,6 +337,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
+            sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(!output.is_error);
@@ -348,6 +351,7 @@ mod tests {
             stderr: "warning: something\n".to_string(),
             exit_code: 0,
             timed_out: false,
+            sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(output.content.contains("output"));
@@ -362,6 +366,7 @@ mod tests {
             stderr: "error: not found\n".to_string(),
             exit_code: 1,
             timed_out: false,
+            sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(output.is_error);
@@ -375,10 +380,26 @@ mod tests {
             stderr: String::new(),
             exit_code: -1,
             timed_out: true,
+            sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(output.is_error);
         assert!(output.content.contains("timed out"));
+    }
+
+    #[test]
+    fn test_format_output_sandbox_error() {
+        let result = sandbox::CommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 125,
+            timed_out: false,
+            sandbox_error: Some("mount: /etc: permission denied".to_string()),
+        };
+        let output = format_output(result, MAX_OUTPUT_BYTES);
+        assert!(output.is_error);
+        assert!(output.content.contains("Sandbox error"));
+        assert!(output.content.contains("permission denied"));
     }
 
     #[test]
@@ -389,6 +410,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
+            sandbox_error: None,
         };
         let output = format_output(result, 500);
         assert!(output.content.contains("truncated"));
@@ -402,6 +424,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
+            sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert_eq!(output.content, "(no output)");
