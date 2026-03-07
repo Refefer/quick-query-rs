@@ -105,20 +105,6 @@ Only `pattern` (regex) is required.
 }
 ```
 
-**edit_file**
-```json
-{
-  "path": "src/main.rs",
-  "edits": [
-    { "old": "fn old_name()", "new": "fn new_name()" },
-    { "operation": "insert", "after_line": 10, "content": "// new comment" },
-    { "operation": "delete", "start_line": 5, "end_line": 8 }
-  ],
-  "create_if_missing": false,
-  "show_diff": true,
-  "dry_run": false
-}
-```
 Supports `replace` (default), `insert`, `delete`, and `replace_lines` operations. Multiple edits are applied in sequence.
 
 **move_file**
@@ -505,3 +491,75 @@ registry.register(Arc::new(MyCustomTool::new()));
 - `glob` - File pattern matching
 - `regex` - Content search
 - `hakoniwa` (optional, Linux only) - Kernel sandbox for bash tools
+### edit_file
+
+*Precision file editing tool that supports replace, insert, delete, and replace_lines operations.*
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EditFileParams",
+  "type": "object",
+  "required": ["path", "edits"],
+  "properties": {
+    "path": { "type": "string" },
+    "create_if_missing": { "type": "boolean", "default": false },
+    "dry_run": { "type": "boolean", "default": false },
+    "show_diff": { "type": "boolean", "default": false },
+    "edits": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/editOperation" }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "editOperation": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["replace", "insert", "delete"] },
+
+        "old":   { "type": "string" },
+        "new":   { "type": "string" },
+        "search":{ "type": "string" },
+
+        "after_line": { "type": "integer", "minimum": 1 },
+        "content":    { "type": "string" },
+
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line":   { "type": "integer", "minimum": 1 }
+      },
+      "oneOf": [
+        {
+          "properties": { "type": { "const": "replace" } },
+          "required": ["old", "new"]
+        },
+        {
+          "properties": { "type": { "const": "insert" } },
+          "required": ["after_line", "content"]
+        },
+        {
+          "properties": { "type": { "const": "delete" } },
+          "required": ["start_line", "end_line"]
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+#### Example edits
+
+```json
+{
+  "path": "src/main.rs",
+  "edits": [
+    { "type": "replace", "old": "fn old_name()", "new": "fn new_name()" },
+    { "type": "insert", "after_line": 10, "content": "// added comment" },
+    { "type": "delete", "start_line": 5, "end_line": 8 },
+    { "type": "replace_lines", "old": "let x = 1;", "new": "let x = 42;" }
+  ],
+  "show_diff": true
+}
+```

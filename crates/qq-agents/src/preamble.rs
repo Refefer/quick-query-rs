@@ -3,7 +3,66 @@
 //! Generates a common preamble explaining the quick-query agent framework,
 //! conditionally including sections based on agent capabilities.
 
-/// Context for generating the shared agent preamble.
+use chrono::Local;
+use std::collections::HashMap;
+
+/// Runtime context for agents - contains dynamic variables resolved at startup.
+/// 
+/// This struct provides extensible access to runtime values like current date/time,
+/// working directory, and custom environment-specific variables.
+#[derive(Debug, Clone)]
+pub struct AgentContext {
+    /// Current date in YYYY-MM-DD format
+    pub current_date: String,
+    /// Current day of week (e.g., "Monday")
+    pub current_day: String,
+    /// Present working directory (may be None if unavailable)
+    pub pwd: Option<String>,
+    /// Custom runtime variables for extensibility
+    pub custom_vars: HashMap<String, String>,
+}
+
+impl AgentContext {
+    /// Create a new AgentContext with populated runtime values.
+    /// 
+    /// This should be called at agent startup to resolve dynamic variables.
+    pub fn new() -> Self {
+        let now = Local::now();
+        
+        Self {
+            current_date: now.format("%Y-%m-%d").to_string(),
+            current_day: now.format("%A").to_string(),
+            pwd: std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string())),
+            custom_vars: HashMap::new(),
+        }
+    }
+
+    /// Create a new AgentContext with the ability to set custom variables.
+    pub fn with_custom_var(mut self, key: &str, value: &str) -> Self {
+        self.custom_vars.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    /// Get all custom variables as a reference.
+    pub fn get_custom_vars(&self) -> &HashMap<String, String> {
+        &self.custom_vars
+    }
+
+    /// Get a specific custom variable, returning None if not found.
+    pub fn get_custom_var(&self, key: &str) -> Option<&String> {
+        self.custom_vars.get(key)
+    }
+}
+
+impl Default for AgentContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Context for generate_preamble - describes agent capabilities.
 pub struct PreambleContext {
     /// Whether this agent has tools available.
     pub has_tools: bool,
@@ -25,10 +84,11 @@ pub struct PreambleContext {
 ///
 /// Sections are conditionally included based on the agent's capabilities:
 /// - Core sections (execution model, conversation continuity) are always included
+/// - Runtime context section with dynamic variables (current date, day, pwd)
 /// - Sub-agent delegation section only if `has_sub_agents` is true
 /// - Inform user section only if `has_inform_user` is true
 /// - Tool efficiency section only if `has_tools` is true
-pub fn generate_preamble(ctx: &PreambleContext) -> String {
+pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> String {
     let mut sections = Vec::new();
 
     // Core sections always included
@@ -54,6 +114,28 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
          done. Focus on the new task while leveraging prior discoveries and results."
             .to_string(),
     );
+
+    // Runtime context section - always included with dynamic variables
+    let mut runtime_context = format!(
+        "### Runtime Context\n\
+         You have access to runtime context that was resolved at your startup:\n\
+         - **Current Date**: {}\n\
+         - **Current Day**: {}",
+        agent_ctx.current_date, agent_ctx.current_day
+    );
+
+    if let Some(ref pwd) = agent_ctx.pwd {
+        runtime_context.push_str(&format!("\n- **Working Directory**: {}", pwd));
+    }
+
+    if !agent_ctx.custom_vars.is_empty() {
+        runtime_context.push_str("\n\n**Custom Variables**:\n");
+        for (key, value) in &agent_ctx.custom_vars {
+            runtime_context.push_str(&format!("- **{}**: {}\n", key, value));
+        }
+    }
+
+    sections.push(runtime_context);
 
     // Sub-agent delegation (conditional)
     if ctx.has_sub_agents {
@@ -141,7 +223,7 @@ pub fn generate_preamble(ctx: &PreambleContext) -> String {
         sections.push(
             "### Bash Access\n\
              You have sandboxed bash access. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
-             run without approval. Write commands (cargo build, git commit, npm, rm, etc.) require user approval.\n\
+             run without approval. Write commands (cargo build, git commit, npm install, rm, etc.) require user approval.\n\
              Network access is blocked.\n\
              \n\
              ### /tmp Scratch Space\n\
@@ -208,7 +290,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_agent_context_new() {
+        let ctx = AgentContext::new();
+        
+        // Should have valid date format (YYYY-MM-DD)
+        assert!(ctx.current_date.chars().filter(|&c| c == '-').count() == 2);
+        
+        // Day should not be empty
+        assert!(!ctx.current_day.is_empty());
+        
+        // Custom vars should be empty initially
+        assert!(ctx.custom_vars.is_empty());
+    }
+
+    #[test]
+    fn test_agent_context_with_custom_var() {
+        let ctx = AgentContext::new()
+            .with_custom_var("ENV", "test")
+            .with_custom_var("PROJECT", "quick-query");
+        
+        assert_eq!(ctx.get_custom_var("ENV"), Some(&"test".to_string()));
+        assert_eq!(ctx.get_custom_var("PROJECT"), Some(&"quick-query".to_string()));
+        assert_eq!(ctx.get_custom_var("NONEXISTENT"), None);
+    }
+
+    #[test]
     fn test_minimal_preamble() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: false,
             has_sub_agents: false,
@@ -217,12 +325,17 @@ mod tests {
             has_preferences: false,
             has_bash: false,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         // Core sections always present
         assert!(preamble.contains("Quick-Query Agent Framework"));
         assert!(preamble.contains("Execution Model"));
         assert!(preamble.contains("Conversation Continuity"));
+        
+        // Runtime context should be present
+        assert!(preamble.contains("Runtime Context"));
+        assert!(preamble.contains("Current Date"));
+        assert!(preamble.contains("Current Day"));
 
         // Conditional sections absent
         assert!(!preamble.contains("Delegating to Sub-Agents"));
@@ -237,6 +350,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_tools() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: false,
@@ -245,7 +359,7 @@ mod tests {
             has_preferences: false,
             has_bash: false,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("Tool Usage Efficiency"));
         assert!(preamble.contains("Resourcefulness"));
@@ -255,6 +369,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_sub_agents() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: false,
             has_sub_agents: true,
@@ -263,7 +378,7 @@ mod tests {
             has_preferences: false,
             has_bash: false,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("Delegating to Sub-Agents"));
         assert!(preamble.contains("new_instance"));
@@ -274,6 +389,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_inform_user() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: false,
             has_sub_agents: false,
@@ -282,7 +398,7 @@ mod tests {
             has_preferences: false,
             has_bash: false,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("Keeping the User Informed"));
         assert!(preamble.contains("inform_user"));
@@ -292,6 +408,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_task_tracking() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: false,
             has_sub_agents: false,
@@ -300,7 +417,7 @@ mod tests {
             has_preferences: false,
             has_bash: false,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("Task Tracking"));
         assert!(preamble.contains("update_my_task"));
@@ -309,6 +426,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_preferences() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: false,
             has_sub_agents: false,
@@ -317,7 +435,7 @@ mod tests {
             has_preferences: true,
             has_bash: false,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("User Preferences"));
         assert!(preamble.contains("read_preference"));
@@ -329,6 +447,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_bash() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: false,
@@ -337,7 +456,7 @@ mod tests {
             has_preferences: false,
             has_bash: true,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("Bash Access"));
         assert!(preamble.contains("sandboxed bash access"));
@@ -349,6 +468,7 @@ mod tests {
 
     #[test]
     fn test_preamble_with_read_only() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: false,
@@ -357,7 +477,7 @@ mod tests {
             has_preferences: false,
             has_bash: false,
             is_read_only: true,
-        });
+        }, &agent_ctx);
 
         assert!(preamble.contains("CRITICAL: Read-Only Agent"));
         assert!(preamble.contains("READ-ONLY agent"));
@@ -368,6 +488,7 @@ mod tests {
 
     #[test]
     fn test_preamble_read_only_with_bash() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: false,
@@ -376,7 +497,7 @@ mod tests {
             has_preferences: false,
             has_bash: true,
             is_read_only: true,
-        });
+        }, &agent_ctx);
 
         // Both sections should appear
         assert!(preamble.contains("Bash Access"));
@@ -385,6 +506,7 @@ mod tests {
 
     #[test]
     fn test_full_preamble() {
+        let agent_ctx = AgentContext::new();
         let preamble = generate_preamble(&PreambleContext {
             has_tools: true,
             has_sub_agents: true,
@@ -393,7 +515,7 @@ mod tests {
             has_preferences: true,
             has_bash: true,
             is_read_only: false,
-        });
+        }, &agent_ctx);
 
         // All sections present
         assert!(preamble.contains("Quick-Query Agent Framework"));
@@ -406,5 +528,28 @@ mod tests {
         assert!(preamble.contains("Task Tracking"));
         assert!(preamble.contains("User Preferences"));
         assert!(preamble.contains("Bash Access"));
+    }
+
+    #[test]
+    fn test_preamble_with_custom_vars() {
+        let agent_ctx = AgentContext::new()
+            .with_custom_var("ENV", "development")
+            .with_custom_var("TEAM", "platform");
+        
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: false,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_preferences: false,
+            has_bash: false,
+            is_read_only: false,
+        }, &agent_ctx);
+
+        assert!(preamble.contains("Custom Variables"));
+        assert!(preamble.contains("ENV"));
+        assert!(preamble.contains("development"));
+        assert!(preamble.contains("TEAM"));
+        assert!(preamble.contains("platform"));
     }
 }
