@@ -22,6 +22,7 @@ pub use project_manager::ProjectManagerAgent;
 pub use coder::CoderAgent;
 pub use config::{AgentDefinition, AgentMemoryStrategy, AgentsConfig, BuiltinAgentOverride};
 pub use preamble::{generate_preamble, PreambleContext};
+pub use preamble::AgentContext;
 pub use explore::ExploreAgent;
 
 /// Default compaction prompt for agent memory summarization.

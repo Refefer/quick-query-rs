@@ -50,6 +50,9 @@ ratatui = "0.30"
 tui-input = "0.15"
 atty = "0.2"
 
+# Date/time
+chrono = "0.4"
+
 # Internal crates
 qq-core = { path = "crates/qq-core" }
 qq-cli = { path = "crates/qq-cli" }

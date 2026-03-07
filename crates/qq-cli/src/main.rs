@@ -568,6 +568,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     let system_prompt = if settings.agent == "pm" || settings.agent == "chat" {
         let pm_agent = ProjectManagerAgent::new();
         let base_prompt = pm_agent.system_prompt();
+        let agent_ctx = qq_agents::AgentContext::new();
         let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
             has_tools: true, // PM has task tracking tools
             has_sub_agents: !disable_agents,
@@ -576,7 +577,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             has_preferences: false,   // PM delegates preference access to sub-agents
             has_bash: false,          // PM delegates bash to sub-agents
             is_read_only: false,
-        });
+        }, &agent_ctx);
         let combined = format!("{}\n\n---\n\n{}", preamble, base_prompt);
         match user_system_prompt {
             Some(user_prompt) => Some(format!(

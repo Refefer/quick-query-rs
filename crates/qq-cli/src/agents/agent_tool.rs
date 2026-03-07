@@ -158,6 +158,7 @@ async fn execute_agent(
     let has_bash = config.tool_names.iter().any(|n| n == "bash");
     let has_preferences = config.tool_names.iter().any(|n| n == "read_preference" || n == "update_preference");
 
+    let agent_ctx = qq_agents::AgentContext::new();
     let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
         has_tools,
         has_sub_agents,
@@ -166,7 +167,7 @@ async fn execute_agent(
         has_preferences,
         has_bash,
         is_read_only: config.is_read_only,
-    });
+    }, &agent_ctx);
     let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
 
     // Prepend task board for non-PM agents
