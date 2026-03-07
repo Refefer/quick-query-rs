@@ -93,6 +93,22 @@ pub struct Cli {
     #[arg(long)]
     pub max_tokens: Option<u32>,
 
+    /// Sampling top-k (integer >= 0, typically 1-100)
+    #[arg(long)]
+    pub top_k: Option<i32>,
+
+    /// Minimum probability threshold (0.0-1.0 range)
+    #[arg(long)]
+    pub min_p: Option<f32>,
+
+    /// Presence penalty (-2.0 to 2.0 range)
+    #[arg(long)]
+    pub presence_penalty: Option<f32>,
+
+    /// Repetition penalty (0.0-2.0 range)
+    #[arg(long)]
+    pub repetition_penalty: Option<f32>,
+
     /// Disable streaming output
     #[arg(long)]
     pub no_stream: bool,
@@ -464,6 +480,21 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
 
         if let Some(max_tokens) = cli.max_tokens {
             request = request.with_max_tokens(max_tokens);
+        }
+        if let Some(top_k) = cli.top_k {
+            request = request.with_top_k(top_k);
+        }
+
+        if let Some(min_p) = cli.min_p {
+            request = request.with_min_p(min_p);
+        }
+
+        if let Some(presence_penalty) = cli.presence_penalty {
+            request = request.with_presence_penalty(presence_penalty);
+        }
+
+        if let Some(repetition_penalty) = cli.repetition_penalty {
+            request = request.with_repetition_penalty(repetition_penalty);
         }
 
         // Add merged parameters
