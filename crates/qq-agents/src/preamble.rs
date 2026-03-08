@@ -149,7 +149,12 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
              The `new_instance` parameter (default: false) controls agent memory:\n\
              - `false`: The agent continues with full context from prior calls.\n\
              - `true`: Clears the agent's memory for a fresh start. Use only when prior\n\
-             context would be misleading for a completely unrelated task."
+             context would be misleading for a completely unrelated task.\n\
+             \n\
+             The `instance_id` parameter isolates agent memory per task. Pass `instance_id`\n\
+             using the format \"{agent}-agent:{task_id}\" (e.g. \"coder-agent:3\") when dispatching\n\
+             agents for tracked tasks. Agents with different instance_ids maintain separate memory,\n\
+             enabling safe parallel dispatch of the same agent type."
                 .to_string(),
         );
     }
