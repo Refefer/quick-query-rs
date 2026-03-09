@@ -1,6 +1,7 @@
 //! Sandbox execution backends: kernel (hakoniwa) and app-level fallback.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -25,6 +26,142 @@ pub enum SandboxExecutor {
     Kernel,
     /// Application-level sandboxing (restricted, no pipes).
     AppLevel,
+}
+
+/// Resolved PATH and mount configuration for the kernel sandbox.
+///
+/// All branching happens at construction time; `execute_kernel` iterates
+/// the lists uniformly with no match arms.
+#[derive(Clone, Debug)]
+pub struct SandboxPathPolicy {
+    /// PATH value to set in the sandbox.
+    pub path_value: String,
+    /// Extra directories to bind-mount read-only.
+    /// User mode: includes $HOME + non-system PATH dirs (/opt/…, /snap/…).
+    /// Agent mode: empty (only baseline system mounts).
+    pub ro_mounts: Vec<PathBuf>,
+    /// Paths to hide behind empty tmpfs (mounted after ro_mounts).
+    /// User mode: sensitive dirs like $HOME/.ssh, $HOME/.aws.
+    /// Agent mode: empty.
+    pub tmpfs_mounts: Vec<PathBuf>,
+    /// Env vars to set in the sandbox. Applied in order (last write wins).
+    /// User mode: all host env vars + sandbox overrides (TMPDIR, TERM, etc.).
+    /// Agent mode: minimal set (HOME=/tmp, TMPDIR=/tmp, TERM, LC_ALL, GIT_TERMINAL_PROMPT).
+    pub env_vars: Vec<(String, String)>,
+}
+
+/// Prefixes already covered by the standard system bind mounts.
+const SYSTEM_MOUNT_PREFIXES: &[&str] = &["/bin", "/usr", "/lib", "/lib64", "/lib32", "/etc", "/sbin"];
+
+/// Directory names under $HOME to hide behind empty tmpfs mounts.
+const SENSITIVE_DIR_NAMES: &[&str] = &[
+    ".ssh", ".gnupg", ".gpg", ".aws", ".kube",
+    ".docker", ".password-store", ".netrc",
+];
+
+impl SandboxPathPolicy {
+    /// Agent-mode policy: empty mount lists, minimal env, HOME=/tmp.
+    pub fn system_only() -> Self {
+        Self {
+            path_value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into(),
+            ro_mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            env_vars: vec![
+                ("HOME".into(), "/tmp".into()),
+                ("TMPDIR".into(), "/tmp".into()),
+                ("TERM".into(), "dumb".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("LC_ALL".into(), "C.UTF-8".into()),
+            ],
+        }
+    }
+
+    /// Build from the host environment: mount $HOME RO, forward all env vars,
+    /// and hide sensitive directories behind empty tmpfs mounts.
+    ///
+    /// Falls back to `system_only()` if `$HOME` or `$PATH` is unset/empty/invalid.
+    pub fn from_host_env() -> Self {
+        let home = match std::env::var("HOME") {
+            Ok(h) if !h.is_empty() && Path::new(&h).is_dir() => PathBuf::from(h),
+            _ => return Self::system_only(),
+        };
+
+        let path_value = match std::env::var("PATH") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return Self::system_only(),
+        };
+
+        // ro_mounts: start with $HOME, then non-system PATH dirs not under $HOME
+        let mut ro_mounts = vec![home.clone()];
+        let mut seen = HashSet::new();
+        seen.insert(home.clone());
+
+        for entry in path_value.split(':') {
+            if entry.is_empty() || is_under_system_prefix(entry) {
+                continue;
+            }
+
+            let path = Path::new(entry);
+            if !path.is_dir() {
+                continue;
+            }
+
+            let canonical = match path.canonicalize() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            if let Some(s) = canonical.to_str() {
+                if is_under_system_prefix(s) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            // Skip if under $HOME (already covered by the $HOME mount)
+            if canonical.starts_with(&home) {
+                continue;
+            }
+
+            if seen.insert(canonical.clone()) {
+                ro_mounts.push(canonical);
+            }
+        }
+
+        // tmpfs_mounts: sensitive dirs that exist under $HOME
+        let tmpfs_mounts: Vec<PathBuf> = SENSITIVE_DIR_NAMES
+            .iter()
+            .map(|name| home.join(name))
+            .filter(|p| p.exists())
+            .collect();
+
+        // env_vars: all host env vars, then overrides (last write wins)
+        let mut env_vars: Vec<(String, String)> = std::env::vars().collect();
+        env_vars.extend([
+            ("TMPDIR".into(), "/tmp".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("TERM".into(), "dumb".into()),
+            ("LC_ALL".into(), "C.UTF-8".into()),
+        ]);
+
+        Self {
+            path_value,
+            ro_mounts,
+            tmpfs_mounts,
+            env_vars,
+        }
+    }
+}
+
+/// Check if a path string starts with any system mount prefix.
+fn is_under_system_prefix(path: &str) -> bool {
+    for prefix in SYSTEM_MOUNT_PREFIXES {
+        if path == *prefix || path.starts_with(&format!("{}/", prefix)) {
+            return true;
+        }
+    }
+    false
 }
 
 impl SandboxExecutor {
@@ -71,14 +208,16 @@ impl SandboxExecutor {
         command: &str,
         mounts: &Arc<SandboxMounts>,
         timeout_secs: u64,
+        path_policy: &SandboxPathPolicy,
     ) -> Result<CommandResult, String> {
         match self {
             #[cfg(feature = "sandbox")]
             SandboxExecutor::Kernel => {
                 let mounts = Arc::clone(mounts);
                 let cmd = command.to_string();
+                let policy = path_policy.clone();
                 tokio::task::spawn_blocking(move || {
-                    execute_kernel(&cmd, &mounts, timeout_secs)
+                    execute_kernel(&cmd, &mounts, timeout_secs, &policy)
                 })
                 .await
                 .map_err(|e| format!("Sandbox task failed: {}", e))?
@@ -141,6 +280,7 @@ pub fn execute_kernel(
     command: &str,
     mounts: &SandboxMounts,
     timeout_secs: u64,
+    policy: &SandboxPathPolicy,
 ) -> Result<CommandResult, String> {
     use hakoniwa::Container;
 
@@ -184,24 +324,56 @@ pub fn execute_kernel(
     // Project root: read-write
     container.bindmount_rw(root_str, root_str);
 
-    // Extra mounts: read-only
-    for mount in mounts.list_extra() {
+    // Extra user mounts: read-only
+    let extra_mounts = mounts.list_extra();
+    let extra_mount_set: HashSet<&Path> = extra_mounts
+        .iter()
+        .map(|m| m.host_path.as_path())
+        .collect();
+    for mount in &extra_mounts {
         if let Some(path_str) = mount.host_path.to_str() {
             container.bindmount_ro(path_str, path_str);
         }
     }
 
-    let output = container
-        .command("/bin/sh")
+    // Policy ro_mounts: $HOME + non-system PATH dirs (user mode) or empty (agent mode).
+    // Skip dirs already covered by project root or extra mounts.
+    for dir in &policy.ro_mounts {
+        if dir.as_path() == root || extra_mount_set.contains(dir.as_path()) {
+            continue;
+        }
+        if let Some(dir_str) = dir.to_str() {
+            container.bindmount_ro(dir_str, dir_str);
+        }
+    }
+
+    // Policy tmpfs_mounts: hide sensitive dirs behind empty tmpfs.
+    // hakoniwa sorts mounts alphabetically, so parent RO mounts apply first.
+    for dir in &policy.tmpfs_mounts {
+        if let Some(dir_str) = dir.to_str() {
+            container.tmpfsmount(dir_str);
+        }
+    }
+
+    // Collect env vars: policy vars first, then PATH override (last write wins)
+    let mut env_vars: Vec<(&str, &str)> = policy
+        .env_vars
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    env_vars.push(("PATH", &policy.path_value));
+
+    let mut cmd = container
+        .command("/bin/sh");
+    let cmd = cmd
         .arg("-c")
         .arg(command)
-        .current_dir(root_str)
-        .env("HOME", "/tmp")
-        .env("TMPDIR", "/tmp")
-        .env("TERM", "dumb")
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C.UTF-8")
+        .current_dir(root_str);
+    for (key, value) in &env_vars {
+        cmd.env(key, value);
+    }
+
+    let output = cmd
         .wait_timeout(timeout_secs)
         .output()
         .map_err(|e| format!("Sandbox execution failed: {}", e))?;
@@ -482,9 +654,90 @@ mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    #[test]
+    fn test_path_policy_filters_system_dirs() {
+        // Test the filtering logic directly without mutating the process env
+        assert!(is_under_system_prefix("/usr/bin"));
+        assert!(is_under_system_prefix("/usr/local/bin"));
+        assert!(is_under_system_prefix("/bin"));
+        assert!(is_under_system_prefix("/lib/x86_64-linux-gnu"));
+        assert!(is_under_system_prefix("/sbin"));
+        assert!(is_under_system_prefix("/etc/alternatives"));
+        assert!(!is_under_system_prefix("/home/user/.cargo/bin"));
+        assert!(!is_under_system_prefix("/opt/local/bin"));
+        assert!(!is_under_system_prefix("/snap/bin"));
+    }
+
+    #[test]
+    fn test_path_policy_from_host_env() {
+        // from_host_env reads $HOME and $PATH which are set in test processes;
+        // just verify it returns a valid struct without panicking
+        let policy = SandboxPathPolicy::from_host_env();
+        assert!(!policy.path_value.is_empty());
+        // All ro_mounts should be non-system
+        for dir in &policy.ro_mounts {
+            let s = dir.to_str().unwrap();
+            assert!(!is_under_system_prefix(s), "system dir leaked: {}", s);
+        }
+        // If $HOME is set, it should be the first ro_mount
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() && Path::new(&home).is_dir() {
+                assert_eq!(policy.ro_mounts[0], PathBuf::from(&home));
+            }
+        }
+    }
+
+    #[test]
+    fn test_path_policy_system_only() {
+        let policy = SandboxPathPolicy::system_only();
+        assert!(policy.ro_mounts.is_empty());
+        assert!(policy.tmpfs_mounts.is_empty());
+        assert_eq!(policy.path_value, "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        // Should have HOME=/tmp in env_vars
+        assert!(policy.env_vars.iter().any(|(k, v)| k == "HOME" && v == "/tmp"));
+    }
+
+    #[test]
+    fn test_path_policy_deduplication() {
+        // Test dedup logic by constructing the policy manually: parse the same
+        // PATH-like string through the same algorithm without env mutation.
+        let tmpdir = std::env::temp_dir();
+        let tmpdir_str = tmpdir.to_str().unwrap();
+
+        // Simulate from_host_env logic inline
+        let fake_path = format!("{}:{}", tmpdir_str, tmpdir_str);
+        let mut seen = std::collections::HashSet::new();
+        let mut extra_dirs = Vec::new();
+        for entry in fake_path.split(':') {
+            if entry.is_empty() || is_under_system_prefix(entry) {
+                continue;
+            }
+            let path = Path::new(entry);
+            if !path.is_dir() {
+                continue;
+            }
+            let canonical = match path.canonicalize() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if let Some(s) = canonical.to_str() {
+                if is_under_system_prefix(s) { continue; }
+            }
+            if seen.insert(canonical.clone()) {
+                extra_dirs.push(canonical);
+            }
+        }
+        // After dedup, should have at most 1 entry for the same tmpdir
+        assert!(extra_dirs.len() <= 1, "Expected deduplication, got {} entries", extra_dirs.len());
+    }
+
     #[cfg(all(feature = "sandbox", target_os = "linux"))]
     mod kernel_tests {
         use super::*;
+
+        fn sys_policy() -> SandboxPathPolicy {
+            SandboxPathPolicy::system_only()
+        }
 
         #[test]
         fn test_kernel_echo() {
@@ -493,7 +746,7 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello", &mounts, 10).unwrap();
+            let result = execute_kernel("echo hello", &mounts, 10, &sys_policy()).unwrap();
             assert_eq!(result.stdout.trim(), "hello");
             assert_eq!(result.exit_code, 0);
         }
@@ -505,7 +758,7 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello | cat", &mounts, 10).unwrap();
+            let result = execute_kernel("echo hello | cat", &mounts, 10, &sys_policy()).unwrap();
             assert_eq!(result.stdout.trim(), "hello");
         }
 
@@ -520,6 +773,7 @@ mod tests {
                 "echo test > /tmp/test.txt && cat /tmp/test.txt",
                 &mounts,
                 10,
+                &sys_policy(),
             )
             .unwrap();
             assert_eq!(result.stdout.trim(), "test");
@@ -532,11 +786,12 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            let policy = sys_policy();
             // Write in first command
-            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10).unwrap();
+            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10, &policy).unwrap();
             assert_eq!(r1.exit_code, 0);
             // Read in second, separate command
-            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10).unwrap();
+            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy).unwrap();
             assert_eq!(r2.stdout.trim(), "persist");
         }
 
@@ -547,9 +802,91 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10).unwrap();
+            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10, &sys_policy()).unwrap();
             // Should either list toml files or say no-match
             assert!(!result.stdout.is_empty());
+        }
+
+        #[test]
+        fn test_kernel_system_only_path() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            let result = execute_kernel("echo $PATH", &mounts, 10, &sys_policy()).unwrap();
+            assert_eq!(
+                result.stdout.trim(),
+                "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            );
+        }
+
+        #[test]
+        fn test_kernel_host_path() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            let custom_path = "/usr/local/bin:/usr/bin:/bin:/custom/path";
+            let policy = SandboxPathPolicy {
+                path_value: custom_path.into(),
+                ..SandboxPathPolicy::system_only()
+            };
+            let result = execute_kernel("echo $PATH", &mounts, 10, &policy).unwrap();
+            assert_eq!(result.stdout.trim(), custom_path);
+        }
+
+        #[test]
+        fn test_kernel_home_dir_mounted() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let home = match std::env::var("HOME") {
+                Ok(h) if Path::new(&h).is_dir() => h,
+                _ => {
+                    eprintln!("Skipping: $HOME not set or not a directory");
+                    return;
+                }
+            };
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            let policy = SandboxPathPolicy::from_host_env();
+            // Should be able to list the home directory contents
+            let cmd = format!("ls -d {}", home);
+            let result = execute_kernel(&cmd, &mounts, 10, &policy).unwrap();
+            assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+            assert!(result.stdout.trim().contains(&home));
+        }
+
+        #[test]
+        fn test_kernel_sensitive_dirs_hidden() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let home = match std::env::var("HOME") {
+                Ok(h) if Path::new(&h).is_dir() => h,
+                _ => {
+                    eprintln!("Skipping: $HOME not set or not a directory");
+                    return;
+                }
+            };
+            let ssh_dir = PathBuf::from(&home).join(".ssh");
+            if !ssh_dir.exists() {
+                eprintln!("Skipping: ~/.ssh does not exist");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            let policy = SandboxPathPolicy::from_host_env();
+            // .ssh should be empty (hidden by tmpfs)
+            let cmd = format!("ls -A {}/.ssh 2>&1", home);
+            let result = execute_kernel(&cmd, &mounts, 10, &policy).unwrap();
+            assert!(
+                result.stdout.trim().is_empty(),
+                "Expected ~/.ssh to be empty in sandbox, got: {}",
+                result.stdout.trim()
+            );
         }
     }
 }

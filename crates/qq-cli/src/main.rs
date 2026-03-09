@@ -157,6 +157,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "classic")]
     pub insecure: bool,
 
+    /// Restrict sandbox to system-only binaries (no user toolchains like cargo, node, etc.)
+    #[arg(long)]
+    pub agent_mode: bool,
+
     /// Primary agent to use for interactive sessions (overrides profile)
     /// Can be any internal agent: pm, explore, researcher, coder, reviewer, summarizer, planner, writer
     #[arg(short = 'A', long)]
@@ -270,7 +274,7 @@ struct BashResources {
 /// - Default: requires kernel sandbox, exits if unavailable
 /// - `--classic`: no bash tools, built-in search tools instead
 /// - `--insecure`: bash tools without kernel sandbox
-fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Result<(ToolRegistry, Option<BashResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
+fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mode: bool) -> Result<(ToolRegistry, Option<BashResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
     // Resolve root directory: config > $PWD
     let root = config.tools.root.as_ref()
         .map(|s| expand_path(s))
@@ -410,10 +414,17 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool) -> Resul
         // approval_tx is guaranteed Some when use_bash is true
         let approval_tx = approval_tx.clone().expect("approval_tx must exist when bash is enabled");
 
+        let path_policy = if agent_mode {
+            qq_tools::SandboxPathPolicy::system_only()
+        } else {
+            qq_tools::SandboxPathPolicy::from_host_env()
+        };
+
         for tool in qq_tools::create_bash_tools(
             Arc::clone(&mounts),
             Arc::clone(&permissions),
             approval_tx,
+            path_policy,
         ) {
             registry.register(tool);
         }
@@ -441,7 +452,7 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let (mut tools_registry, _bash_resources, _approval_rx) = build_tools_registry(config, cli.classic, cli.insecure)?;
+    let (mut tools_registry, _bash_resources, _approval_rx) = build_tools_registry(config, cli.classic, cli.insecure, cli.agent_mode)?;
 
     // Set up chunk processor for large tool outputs
     let chunker_config = config.tools.chunker.to_chunker_config();
@@ -626,7 +637,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
         (ToolRegistry::new(), None, None)
     } else {
-        build_tools_registry(config, cli.classic, cli.insecure)?
+        build_tools_registry(config, cli.classic, cli.insecure, cli.agent_mode)?
     };
 
     // Register task tracking tools (session-scoped, in-memory)

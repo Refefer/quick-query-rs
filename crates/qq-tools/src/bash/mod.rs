@@ -19,7 +19,7 @@ pub use permissions::{
     create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse,
     PermissionStore, Tier,
 };
-pub use sandbox::SandboxExecutor;
+pub use sandbox::{SandboxExecutor, SandboxPathPolicy};
 
 /// Default command timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -33,6 +33,7 @@ pub struct BashTool {
     permissions: Arc<PermissionStore>,
     approval: ApprovalChannel,
     executor: SandboxExecutor,
+    path_policy: SandboxPathPolicy,
     tool_desc: String,
     timeout_secs: u64,
     max_output_bytes: usize,
@@ -52,6 +53,7 @@ impl BashTool {
         mounts: Arc<SandboxMounts>,
         permissions: Arc<PermissionStore>,
         approval: ApprovalChannel,
+        path_policy: SandboxPathPolicy,
     ) -> Self {
         let executor = SandboxExecutor::detect();
         let tool_desc = build_tool_description(&mounts, &executor);
@@ -60,6 +62,7 @@ impl BashTool {
             permissions,
             approval,
             executor,
+            path_policy,
             tool_desc,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_output_bytes: MAX_OUTPUT_BYTES,
@@ -190,7 +193,7 @@ impl Tool for BashTool {
         }
 
         // 4. Execute in sandbox
-        let result = match self.executor.execute(command, &self.mounts, timeout).await {
+        let result = match self.executor.execute(command, &self.mounts, timeout, &self.path_policy).await {
             Ok(result) => result,
             Err(e) => return Ok(ToolOutput::error(format!("Execution failed: {}", e))),
         };
@@ -316,11 +319,13 @@ pub fn create_bash_tools(
     mounts: Arc<SandboxMounts>,
     permissions: Arc<PermissionStore>,
     approval: ApprovalChannel,
+    path_policy: SandboxPathPolicy,
 ) -> Vec<Arc<dyn Tool>> {
     let bash = Arc::new(BashTool::new(
         Arc::clone(&mounts),
         Arc::clone(&permissions),
         approval.clone(),
+        path_policy,
     ));
     let mount_ext = Arc::new(MountExternalTool::new(mounts, approval));
     vec![bash, mount_ext]
