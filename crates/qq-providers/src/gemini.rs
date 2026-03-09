@@ -164,6 +164,10 @@ impl GeminiProvider {
             temperature: request.temperature,
             top_p: request.top_p,
             max_output_tokens: request.max_tokens,
+            top_k: request.top_k,
+            presence_penalty: request.presence_penalty,
+            min_p: request.min_p,
+            repetition_penalty: request.repetition_penalty,
         };
 
         GeminiRequest {
@@ -631,6 +635,14 @@ struct GeminiGenerationConfig {
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repetition_penalty: Option<f32>,
 }
 
 // ── Response types ───────────────────────────────────────────────────────────

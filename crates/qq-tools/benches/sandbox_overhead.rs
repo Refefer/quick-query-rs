@@ -15,7 +15,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::process::Command;
 
 use qq_tools::bash::mounts::SandboxMounts;
-use qq_tools::bash::sandbox::probe_user_namespaces;
+use qq_tools::bash::sandbox::{probe_user_namespaces, SandboxPathPolicy};
 
 /// Native (unsandboxed) command execution via std::process::Command + /bin/sh.
 /// This is the baseline: fork + exec + wait with no namespace isolation.
@@ -73,13 +73,14 @@ fn bench_sandbox(c: &mut Criterion) {
 
     let project_root = std::env::current_dir().expect("failed to get cwd");
     let mounts = SandboxMounts::new(project_root).expect("failed to create instance tmp dir");
+    let policy = SandboxPathPolicy::system_only();
 
     let mut group = c.benchmark_group("sandbox");
 
     for &(label, cmd) in COMMANDS {
         group.bench_with_input(BenchmarkId::from_parameter(label), &cmd, |b, &cmd| {
             b.iter(|| {
-                let result = execute_kernel(black_box(cmd), &mounts, 30)
+                let result = execute_kernel(black_box(cmd), &mounts, 30, &policy)
                     .expect("sandbox execution failed");
                 black_box(result);
             });

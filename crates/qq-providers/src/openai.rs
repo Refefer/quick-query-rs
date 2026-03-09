@@ -108,6 +108,10 @@ impl OpenAIProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             top_p: request.top_p,
+            top_k: request.top_k,
+            min_p: request.min_p,
+            presence_penalty: request.presence_penalty,
+            frequency_penalty: request.repetition_penalty,
             stream: Some(request.stream),
             tools,
             stream_options: if request.stream {
@@ -604,6 +608,18 @@ struct OpenAIChatRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    /// Sampling top-k (supported by Ollama, vLLM, some compatible servers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<i32>,
+    /// Minimum probability threshold (for compatible servers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f32>,
+    /// Presence penalty (OpenAI native support, -2.0 to 2.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    /// Frequency penalty - mapped from repetition_penalty (OpenAI uses -2.0 to 2.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

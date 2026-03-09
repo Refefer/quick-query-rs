@@ -60,6 +60,16 @@ fn agent_tool_definition(name: &str, description: &str) -> ToolDefinition {
                      Default: false (reuses history from prior calls)."
                 ).with_default(serde_json::Value::Bool(false)),
                 false,
+            )
+            .add_property(
+                "instance_id",
+                PropertySchema::string(
+                    "Unique identifier for this agent instance. Use the format \
+                     '{agent}-agent:{task_id}' (e.g. 'coder-agent:3') when dispatching \
+                     for a tracked task. Agents with different instance_ids maintain \
+                     separate memory, enabling parallel dispatch of the same agent type."
+                ),
+                false,
             ),
     )
 }
@@ -75,6 +85,7 @@ async fn execute_agent(
     config: AgentToolConfig,
     task: String,
     new_instance: bool,
+    instance_id: Option<String>,
     base_tools: &Arc<ToolRegistry>,
     provider: &Arc<dyn Provider>,
     external_agents: &AgentsConfig,
@@ -89,7 +100,10 @@ async fn execute_agent(
     compactor: &Option<Arc<dyn ContextCompactor>>,
     context_window: Option<u32>,
 ) -> Result<ToolOutput, Error> {
-    let child_scope = format!("{}/{}", scope, config.agent_name);
+    let child_scope = match &instance_id {
+        Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, config.agent_name, id),
+        _ => format!("{}/{}", scope, config.agent_name),
+    };
 
     // Clear scope if fresh instance requested
     if new_instance {
@@ -428,6 +442,7 @@ struct AgentArgs {
     task: String,
     #[serde(default)]
     new_instance: bool,
+    instance_id: Option<String>,
 }
 
 #[async_trait]
@@ -517,6 +532,7 @@ impl Tool for InternalAgentTool {
             config,
             args.task,
             args.new_instance,
+            args.instance_id,
             &self.base_tools,
             &self.provider,
             &self.external_agents,
@@ -716,6 +732,7 @@ impl Tool for ExternalAgentTool {
             config,
             args.task,
             args.new_instance,
+            args.instance_id,
             &self.base_tools,
             &self.provider,
             &self.external_agents,
@@ -967,7 +984,58 @@ mod tests {
         assert_eq!(def.description, "Test agent description");
         assert!(def.parameters.required.contains(&"task".to_string()));
         assert!(!def.parameters.required.contains(&"new_instance".to_string()));
+        assert!(!def.parameters.required.contains(&"instance_id".to_string()));
         assert!(def.parameters.properties.contains_key("task"));
         assert!(def.parameters.properties.contains_key("new_instance"));
+        assert!(def.parameters.properties.contains_key("instance_id"));
+    }
+
+    #[test]
+    fn test_child_scope_without_instance_id() {
+        let scope = "pm";
+        let agent_name = "coder";
+        let instance_id: Option<String> = None;
+        let child_scope = match &instance_id {
+            Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, agent_name, id),
+            _ => format!("{}/{}", scope, agent_name),
+        };
+        assert_eq!(child_scope, "pm/coder");
+    }
+
+    #[test]
+    fn test_child_scope_with_instance_id() {
+        let scope = "pm";
+        let agent_name = "coder";
+        let instance_id = Some("coder-agent:3".to_string());
+        let child_scope = match &instance_id {
+            Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, agent_name, id),
+            _ => format!("{}/{}", scope, agent_name),
+        };
+        assert_eq!(child_scope, "pm/coder:coder-agent:3");
+    }
+
+    #[test]
+    fn test_child_scope_with_empty_instance_id() {
+        let scope = "pm";
+        let agent_name = "coder";
+        let instance_id = Some("".to_string());
+        let child_scope = match &instance_id {
+            Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, agent_name, id),
+            _ => format!("{}/{}", scope, agent_name),
+        };
+        assert_eq!(child_scope, "pm/coder");
+    }
+
+    #[test]
+    fn test_child_scope_nested_with_instance_id() {
+        // Sub-agents of an instance-scoped parent inherit the scoped parent
+        let scope = "pm/coder:coder-agent:3";
+        let agent_name = "explore";
+        let instance_id: Option<String> = None;
+        let child_scope = match &instance_id {
+            Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, agent_name, id),
+            _ => format!("{}/{}", scope, agent_name),
+        };
+        assert_eq!(child_scope, "pm/coder:coder-agent:3/explore");
     }
 }

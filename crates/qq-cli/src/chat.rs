@@ -875,6 +875,21 @@ async fn run_completion(
         if let Some(max_tokens) = cli.max_tokens {
             request = request.with_max_tokens(max_tokens);
         }
+        if let Some(top_k) = cli.top_k {
+            request = request.with_top_k(top_k);
+        }
+
+        if let Some(min_p) = cli.min_p {
+            request = request.with_min_p(min_p);
+        }
+
+        if let Some(presence_penalty) = cli.presence_penalty {
+            request = request.with_presence_penalty(presence_penalty);
+        }
+
+        if let Some(repetition_penalty) = cli.repetition_penalty {
+            request = request.with_repetition_penalty(repetition_penalty);
+        }
 
         if !extra_params.is_empty() {
             request = request.with_extra(extra_params.clone());

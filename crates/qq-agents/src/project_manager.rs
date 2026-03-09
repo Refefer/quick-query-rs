@@ -46,7 +46,7 @@ Tasks 1 & 2 dispatch in parallel. Tasks 3 & 4 dispatch in parallel after 1 & 2 c
 Execute tasks using this loop:
 
 1. **FIND READY TASKS**: `list_tasks` to identify all "todo" tasks whose `blocked_by` dependencies are all "done".
-2. **DISPATCH BATCH**: For every ready task, mark it "in_progress" and call Agent[X] — put ALL ready-task Agent calls in a single response for parallel execution.
+2. **DISPATCH BATCH**: For every ready task, mark it "in_progress" and call Agent[X] — put ALL ready-task Agent calls in a single response for parallel execution. When dispatching agents for tracked tasks, ALWAYS pass `instance_id` using the format `{agent}-agent:{task_id}` (e.g. `coder-agent:3`). This ensures each task gets its own agent memory context and enables safe parallel dispatch of the same agent type.
 3. **REVIEW RESULTS**: Check each agent's output. Mark successful tasks "done". For failures: re-delegate with adjusted instructions, or mark "blocked" with a note explaining why.
 4. **NEXT BATCH**: `list_tasks` again — completing tasks may have unblocked new ones. Repeat from step 1.
 5. **COMPLETE**: When all tasks are "done", summarize results to the user.
@@ -106,13 +106,13 @@ Calling multiple Agent[X] tools in a single response executes them concurrently.
 - Code a change, then review that change (review depends on code)
 
 **Batch dispatch example:**
-After tasks 1 (explore) and 2 (research) complete, tasks 3 and 4 (both coding, independent) become unblocked. Dispatch them together:
+After tasks 1 (explore) and 2 (research) complete, tasks 3 and 4 (both coding, independent) become unblocked. Dispatch them together with unique instance_ids:
 ```
 [Single response with:]
-  Agent[coder] → task 3 instructions
-  Agent[coder] → task 4 instructions
+  Agent[coder] {task: "...", instance_id: "coder-agent:3"}
+  Agent[coder] {task: "...", instance_id: "coder-agent:4"}
 ```
-Both execute concurrently. When both finish, check `list_tasks` for the next batch.
+Both execute concurrently with separate memory. When both finish, check `list_tasks` for the next batch.
 
 ## DELEGATION IS YOUR PRIMARY JOB
 

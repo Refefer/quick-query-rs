@@ -1165,11 +1165,14 @@ pub async fn run_tui(
                                         let debug = debug_logger.clone();
                                         let temp = cli.temperature;
                                         let max_tok = cli.max_tokens;
+                                        let top_k = cli.top_k;
+                                        let min_p = cli.min_p;
+                                        let presence_pen = cli.presence_penalty;
+                                        let rep_pen = cli.repetition_penalty;
                                         let exec_ctx = execution_context.clone();
                                         let chunker_cfg = chunker_config.clone();
                                         let original_query = input.clone();
                                         let no_stream = cli.no_stream;
-
                                         // Clone cancel token for the spawned task
                                         let cancel = cancel_token.clone();
 
@@ -1189,6 +1192,10 @@ pub async fn run_tui(
                                                 debug,
                                                 temp,
                                                 max_tok,
+                                                top_k,
+                                                min_p,
+                                                presence_pen,
+                                                rep_pen,
                                                 exec_ctx,
                                                 chunker_cfg,
                                                 original_query,
@@ -1443,6 +1450,10 @@ async fn run_streaming_completion(
     debug_logger: Option<Arc<DebugLogger>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    top_k: Option<i32>,
+    min_p: Option<f32>,
+    presence_penalty: Option<f32>,
+    repetition_penalty: Option<f32>,
     execution_context: ExecutionContext,
     chunker_config: ChunkerConfig,
     original_query: String,
@@ -1515,6 +1526,21 @@ async fn run_streaming_completion(
 
         if let Some(max_tok) = max_tokens {
             request = request.with_max_tokens(max_tok);
+        }
+        if let Some(top) = top_k {
+            request = request.with_top_k(top);
+        }
+
+        if let Some(min_p) = min_p {
+            request = request.with_min_p(min_p);
+        }
+
+        if let Some(presence_pen) = presence_penalty {
+            request = request.with_presence_penalty(presence_pen);
+        }
+
+        if let Some(rep_pen) = repetition_penalty {
+            request = request.with_repetition_penalty(rep_pen);
         }
 
         if !extra_params.is_empty() {
