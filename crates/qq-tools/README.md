@@ -25,7 +25,10 @@ Sandboxed file operations with configurable root directory.
 | `find_files` | Recursive file discovery with gitignore support | No |
 | `search_files` | Search file contents with regex | No |
 | `write_file` | Write full content to a file (creates or overwrites) | Yes |
-| `edit_file` | Precision editing: search/replace, insert, delete, replace_lines | Yes |
+| `replace_in_file` | Search/replace (literal or regex) | Yes |
+| `insert_in_file` | Insert text at a line | Yes |
+| `delete_lines` | Delete a range of lines | Yes |
+| `replace_lines` | Replace a range of lines with new content | Yes |
 | `move_file` | Move or rename a file or directory | Yes |
 | `copy_file` | Copy a file to a new location | Yes |
 | `create_directory` | Create a new directory (recursive by default) | Yes |
@@ -491,75 +494,52 @@ registry.register(Arc::new(MyCustomTool::new()));
 - `glob` - File pattern matching
 - `regex` - Content search
 - `hakoniwa` (optional, Linux only) - Kernel sandbox for bash tools
-### edit_file
+### replace_in_file
 
-*Precision file editing tool that supports replace, insert, delete, and replace_lines operations.*
-
-```json
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "EditFileParams",
-  "type": "object",
-  "required": ["path", "edits"],
-  "properties": {
-    "path": { "type": "string" },
-    "create_if_missing": { "type": "boolean", "default": false },
-    "dry_run": { "type": "boolean", "default": false },
-    "show_diff": { "type": "boolean", "default": false },
-    "edits": {
-      "type": "array",
-      "items": { "$ref": "#/definitions/editOperation" }
-    }
-  },
-  "additionalProperties": false,
-  "definitions": {
-    "editOperation": {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": { "enum": ["replace", "insert", "delete"] },
-
-        "old":   { "type": "string" },
-        "new":   { "type": "string" },
-        "search":{ "type": "string" },
-
-        "after_line": { "type": "integer", "minimum": 1 },
-        "content":    { "type": "string" },
-
-        "start_line": { "type": "integer", "minimum": 1 },
-        "end_line":   { "type": "integer", "minimum": 1 }
-      },
-      "oneOf": [
-        {
-          "properties": { "type": { "const": "replace" } },
-          "required": ["old", "new"]
-        },
-        {
-          "properties": { "type": { "const": "insert" } },
-          "required": ["after_line", "content"]
-        },
-        {
-          "properties": { "type": { "const": "delete" } },
-          "required": ["start_line", "end_line"]
-        }
-      ],
-      "additionalProperties": false
-    }
-  }
-}
-```
-
-#### Example edits
+*Search and replace text in a file (literal or regex).*
 
 ```json
 {
   "path": "src/main.rs",
-  "edits": [
-    { "type": "replace", "old": "fn old_name()", "new": "fn new_name()" },
-    { "type": "insert", "after_line": 10, "content": "// added comment" },
-    { "type": "delete", "start_line": 5, "end_line": 8 },
-    { "type": "replace_lines", "old": "let x = 1;", "new": "let x = 42;" }
-  ],
-  "show_diff": true
+  "old": "fn old_name()",
+  "new": "fn new_name()",
+  "regex": false
+}
+```
+
+### insert_in_file
+
+*Insert text at a specific line number.*
+
+```json
+{
+  "path": "src/main.rs",
+  "after_line": 10,
+  "content": "// added comment"
+}
+```
+
+### delete_lines
+
+*Delete a range of lines from a file.*
+
+```json
+{
+  "path": "src/main.rs",
+  "start_line": 5,
+  "end_line": 8
+}
+```
+
+### replace_lines
+
+*Replace a range of lines with new content.*
+
+```json
+{
+  "path": "src/main.rs",
+  "start_line": 5,
+  "end_line": 8,
+  "content": "let x = 42;\nlet y = 100;"
 }
 ```

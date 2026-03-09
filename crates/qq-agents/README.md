@@ -19,11 +19,11 @@ Agents are LLM-powered assistants with specific system prompts and tool access. 
 | **pm** | Project manager: coordinates agents, tracks tasks, ensures delivery | `create_task`, `update_task`, `list_tasks`, `delete_task` |
 | **explore** | Filesystem exploration and discovery | `read_file`, `find_files`, `search_files` |
 | **researcher** | Web research and synthesis | `web_search`, `fetch_webpage`, `read_preference` |
-| **coder** | Code generation and modification | `read_file`, `edit_file`, `write_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`, `find_files`, `search_files` |
+| **coder** | Code generation and modification | `read_file`, `replace_in_file`, `insert_in_file`, `delete_lines`, `replace_lines`, `write_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`, `find_files`, `search_files` |
 | **reviewer** | Code review and analysis | `read_file`, `find_files`, `search_files` |
 | **summarizer** | Content summarization | (none — pure LLM) |
 | **planner** | Task decomposition and planning | `read_preference` (plus agent delegation tools) |
-| **writer** | Documentation and content creation | `read_file`, `write_file`, `edit_file`, `copy_file`, `create_directory`, `find_files`, `search_files` |
+| **writer** | Documentation and content creation | `read_file`, `write_file`, `replace_in_file`, `insert_in_file`, `delete_lines`, `replace_lines`, `copy_file`, `create_directory`, `find_files`, `search_files` |
 
 ## Agent Details
 

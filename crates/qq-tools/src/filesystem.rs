@@ -1010,7 +1010,7 @@ impl Tool for WriteFileTool {
         "Write full content to a file (creates or overwrites).\n\n\
          Usage guidance:\n\
          - Use ONLY for creating NEW files.\n\
-         - For modifying existing files, ALWAYS use edit_file instead (more precise, shows diff).\n\
+         - For modifying existing files, use replace_in_file, insert_in_file, delete_lines, or replace_lines.\n\
          - Never overwrite a file you haven't read first."
     }
 
@@ -1059,115 +1059,111 @@ impl Tool for WriteFileTool {
 }
 
 // =============================================================================
-// Edit File Tool (NEW)
+// File Edit Tools
 // =============================================================================
 
-pub struct EditFileTool {
+/// Read and resolve a file path for editing.
+/// Returns (resolved_path, file_content).
+async fn read_file_for_edit(config: &FileSystemConfig, path_str: &str) -> Result<(PathBuf, String), Error> {
+    let path = config.resolve_path(path_str)?;
+    let content = fs::read_to_string(&path)
+        .await
+        .map_err(|e| Error::tool("filesystem", format!("Failed to read '{}': {}", path_str, e)))?;
+    Ok((path, content))
+}
+
+/// Write content atomically (temp + rename) and return a diff string.
+async fn atomic_write_with_diff(
+    path: &Path,
+    path_str: &str,
+    original: &str,
+    new_content: &str,
+) -> Result<String, Error> {
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, new_content)
+        .await
+        .map_err(|e| Error::tool("filesystem", format!("Failed to write temp file: {}", e)))?;
+    fs::rename(&temp_path, path)
+        .await
+        .map_err(|e| Error::tool("filesystem", format!("Failed to rename temp file: {}", e)))?;
+    Ok(generate_diff(original, new_content, path_str))
+}
+
+/// Reconstruct file content from lines, preserving trailing newline behavior.
+fn reconstruct_content(lines: &[String], original: &str) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut result = lines.join("\n");
+    if original.ends_with('\n') || original.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+// =============================================================================
+// Replace In File Tool
+// =============================================================================
+
+pub struct ReplaceInFileTool {
     config: FileSystemConfig,
 }
 
-impl EditFileTool {
+impl ReplaceInFileTool {
     pub fn new(config: FileSystemConfig) -> Self {
         Self { config }
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum EditOperation {
-    /// Replace text (literal or regex)
-    Replace {
-        search: String,
-        replace: String,
-        #[serde(default)]
-        regex: bool,
-        #[serde(default)]
-        all: bool,
-        #[serde(default = "default_true")]
-        must_match: bool,
-    },
-    /// Insert at line (1-indexed, 0 or omit to append)
-    Insert {
-        #[serde(default)]
-        line: usize,
-        content: String,
-    },
-    /// Delete lines (1-indexed)
-    Delete {
-        start_line: usize,
-        #[serde(default)]
-        end_line: Option<usize>,
-    },
-    /// Replace line range (1-indexed)
-    ReplaceLines {
-        start_line: usize,
-        end_line: usize,
-        content: String,
-    },
-}
-
 #[derive(Deserialize)]
-struct EditFileArgs {
+struct ReplaceInFileArgs {
     path: String,
-    edits: Vec<EditOperation>,
+    search: String,
+    replacement: String,
     #[serde(default)]
-    create_if_missing: bool,
+    regex: bool,
     #[serde(default)]
-    show_diff: bool,
-    #[serde(default)]
-    dry_run: bool,
+    all: bool,
+    #[serde(default = "default_true")]
+    must_match: bool,
 }
 
 #[async_trait]
-impl Tool for EditFileTool {
+impl Tool for ReplaceInFileTool {
     fn name(&self) -> &str {
-        "edit_file"
+        "replace_in_file"
     }
 
     fn description(&self) -> &str {
-        "Edit files with search/replace, insert, delete operations"
+        "Search and replace text in a file (literal or regex)"
     }
 
     fn tool_description(&self) -> &str {
-        "Precision file editing: search/replace, insert, delete, and replace_lines operations.\n\n\
-         Usage guidance:\n\
-         - PREFERRED tool for modifying existing files (more precise than write_file, shows diff).\n\
-         - The edits array accepts multiple operations in sequence — batch all edits to a file \
-         into one call instead of calling edit_file repeatedly for each change.\n\
-         - Operation types: replace (literal or regex), insert (at line), delete (line range), \
-         replace_lines (replace entire line range).\n\
-         - Pattern: search first, read second, modify third."
-    }
-
-    fn is_blocking(&self) -> bool {
-        true
+        "Search and replace text in a file. Supports literal strings and regex patterns.\n\n\
+         By default replaces the first match only. Set all=true to replace every occurrence.\n\
+         Errors if no match is found (set must_match=false to suppress).\n\
+         Returns a unified diff of the changes."
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
             ToolParameters::new()
-                .add_property("path", PropertySchema::string("Path to the file to edit"), true)
+                .add_property("path", PropertySchema::string("Path to the file"), true)
+                .add_property("search", PropertySchema::string("Text or regex pattern to find"), true)
+                .add_property("replacement", PropertySchema::string("Replacement text"), true)
                 .add_property(
-                    "edits",
-                    PropertySchema::array(
-                        "List of edit operations to apply in order",
-                        PropertySchema::string("Edit operation object (replace, insert, delete, replace_lines)"),
-                    ),
-                    true,
-                )
-                .add_property(
-                    "create_if_missing",
-                    PropertySchema::boolean("Create file if it doesn't exist (default: false)"),
+                    "regex",
+                    PropertySchema::boolean("Treat search as a regex (default: false)"),
                     false,
                 )
                 .add_property(
-                    "show_diff",
-                    PropertySchema::boolean("Return unified diff (default: false)"),
+                    "all",
+                    PropertySchema::boolean("Replace all occurrences (default: false)"),
                     false,
                 )
                 .add_property(
-                    "dry_run",
-                    PropertySchema::boolean("Validate without applying changes (default: false)"),
+                    "must_match",
+                    PropertySchema::boolean("Error if search not found (default: true)"),
                     false,
                 ),
         )
@@ -1175,266 +1171,366 @@ impl Tool for EditFileTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
         if !self.config.allow_write {
-            return Err(Error::tool("edit_file", "Write operations are disabled"));
+            return Err(Error::tool("replace_in_file", "Write operations are disabled"));
         }
 
-        let args: EditFileArgs = serde_json::from_value(arguments)
-            .map_err(|e| Error::tool("edit_file", format!("Invalid arguments: {}", e)))?;
+        let args: ReplaceInFileArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("replace_in_file", format!("Invalid arguments: {}", e)))?;
 
-        if args.edits.is_empty() {
-            return Err(Error::tool("edit_file", "No edits specified"));
+        if args.search.is_empty() {
+            return Err(Error::tool("replace_in_file", "search string must not be empty"));
         }
 
-        // dry_run is read-only validation — skip approval
-        if !args.dry_run {
-            if let Err(denied) = self.config.require_approval(
-                "edit_file",
-                format!("edit_file: {} ({} edits)", args.path, args.edits.len()),
-            ).await {
-                return Ok(denied);
-            }
+        if let Err(denied) = self.config.require_approval(
+            "replace_in_file",
+            format!("replace_in_file: {}", args.path),
+        ).await {
+            return Ok(denied);
         }
 
-        // Resolve path
-        let path = if args.create_if_missing {
-            // Allow non-existent files if create_if_missing is true
-            let requested = Path::new(&args.path);
-            let resolved = if requested.is_absolute() {
-                self.config.remap_tmp(requested)
+        let (path, original) = read_file_for_edit(&self.config, &args.path).await?;
+
+        let (new_content, count) = if args.regex {
+            let re = Regex::new(&args.search).map_err(|e| {
+                Error::tool("replace_in_file", format!("Invalid regex: {}", e))
+            })?;
+            if args.all {
+                let count = re.find_iter(&original).count();
+                let new = re.replace_all(&original, args.replacement.as_str()).to_string();
+                (new, count)
             } else {
-                self.config.root.join(requested)
-            };
-
-            // Validate parent exists and is within allowed roots
-            if let Some(parent) = resolved.parent() {
-                let canonical_parent = parent.canonicalize().map_err(|e| {
-                    Error::tool("edit_file", format!("Parent directory doesn't exist: {}", e))
-                })?;
-                if !self.config.is_within_allowed_roots(&canonical_parent) {
-                    return Err(Error::tool(
-                        "edit_file",
-                        format!("Path '{}' is outside allowed root", args.path),
-                    ));
-                }
+                let count = if re.is_match(&original) { 1 } else { 0 };
+                let new = re.replace(&original, args.replacement.as_str()).to_string();
+                (new, count)
             }
-            resolved
+        } else if args.all {
+            let count = original.matches(&args.search).count();
+            (original.replace(&args.search, &args.replacement), count)
         } else {
-            self.config.resolve_path(&args.path)?
+            let count = if original.contains(&args.search) { 1 } else { 0 };
+            (original.replacen(&args.search, &args.replacement, 1), count)
         };
 
-        // Read existing content or start empty
-        let original_content = if path.exists() {
-            fs::read_to_string(&path)
-                .await
-                .map_err(|e| Error::tool("edit_file", format!("Failed to read '{}': {}", args.path, e)))?
-        } else if args.create_if_missing {
-            String::new()
-        } else {
+        if count == 0 && args.must_match {
             return Err(Error::tool(
-                "edit_file",
-                format!("File '{}' does not exist (use create_if_missing: true)", args.path),
+                "replace_in_file",
+                format!("search string '{}' not found in {}", args.search, args.path),
             ));
-        };
-
-        // Apply edits
-        let edits = args.edits.clone();
-        let path_display = args.path.clone();
-        let original_for_diff = if args.show_diff {
-            Some(original_content.clone())
-        } else {
-            None
-        };
-        let (new_content, applied_count) =
-            qq_core::run_blocking(move || apply_edits(&original_content, &edits, &path_display)).await??;
-
-        // Generate diff if requested
-        let diff = if let Some(orig) = original_for_diff {
-            Some(generate_diff(&orig, &new_content, &args.path))
-        } else {
-            None
-        };
-
-        // Write if not dry run
-        if !args.dry_run {
-            // Create parent directories if needed
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| Error::tool("edit_file", format!("Failed to create directories: {}", e)))?;
-            }
-
-            // Write atomically via temp file
-            let temp_path = path.with_extension("tmp");
-            fs::write(&temp_path, &new_content)
-                .await
-                .map_err(|e| Error::tool("edit_file", format!("Failed to write temp file: {}", e)))?;
-            fs::rename(&temp_path, &path)
-                .await
-                .map_err(|e| Error::tool("edit_file", format!("Failed to rename temp file: {}", e)))?;
         }
 
-        let mut result = format!(
-            "{} edit(s) applied to {}{}",
-            applied_count,
-            args.path,
-            if args.dry_run { " (dry run)" } else { "" }
-        );
-
-        if let Some(diff_str) = diff {
-            result.push_str("\n\n");
-            result.push_str(&diff_str);
+        if count == 0 {
+            return Ok(ToolOutput::success(format!(
+                "No matches found in {} (no changes made)",
+                args.path
+            )));
         }
 
-        Ok(ToolOutput::success(result))
+        let diff = atomic_write_with_diff(&path, &args.path, &original, &new_content).await?;
+
+        Ok(ToolOutput::success(format!(
+            "Replaced {} occurrence(s) in {}\n\n{}",
+            count, args.path, diff
+        )))
     }
 }
 
-fn apply_edits(content: &str, edits: &[EditOperation], path: &str) -> Result<(String, usize), Error> {
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+// =============================================================================
+// Insert In File Tool
+// =============================================================================
 
-    // Track if content ends with newline
-    let ends_with_newline = content.ends_with('\n');
+pub struct InsertInFileTool {
+    config: FileSystemConfig,
+}
 
-    let mut applied = 0;
+impl InsertInFileTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
 
-    for (edit_idx, edit) in edits.iter().enumerate() {
-        match edit {
-            EditOperation::Replace {
-                search,
-                replace,
-                regex,
-                all,
-                must_match,
-            } => {
-                let full_content = lines.join("\n");
-                let (new_content, count) = if *regex {
-                    let re = Regex::new(search).map_err(|e| {
-                        Error::tool("edit_file", format!("Invalid regex in edit {}: {}", edit_idx + 1, e))
-                    })?;
-                    if *all {
-                        let new = re.replace_all(&full_content, replace.as_str()).to_string();
-                        let count = re.find_iter(&full_content).count();
-                        (new, count)
-                    } else {
-                        let count = if re.is_match(&full_content) { 1 } else { 0 };
-                        let new = re.replace(&full_content, replace.as_str()).to_string();
-                        (new, count)
-                    }
-                } else if *all {
-                    let count = full_content.matches(search).count();
-                    (full_content.replace(search, replace), count)
-                } else {
-                    let count = if full_content.contains(search) { 1 } else { 0 };
-                    (full_content.replacen(search, replace, 1), count)
-                };
+#[derive(Deserialize)]
+struct InsertInFileArgs {
+    path: String,
+    content: String,
+    #[serde(default)]
+    line: usize,
+}
 
-                if count == 0 && *must_match {
-                    return Err(Error::tool(
-                        "edit_file",
-                        format!(
-                            "Edit {} failed: search string '{}' not found in {}",
-                            edit_idx + 1,
-                            search,
-                            path
-                        ),
-                    ));
-                }
+#[async_trait]
+impl Tool for InsertInFileTool {
+    fn name(&self) -> &str {
+        "insert_in_file"
+    }
 
-                lines = new_content.lines().map(|s| s.to_string()).collect();
-                if count > 0 {
-                    applied += 1;
-                }
-            }
+    fn description(&self) -> &str {
+        "Insert text at a specific line in a file"
+    }
 
-            EditOperation::Insert { line, content: text } => {
-                let insert_lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
-                if *line == 0 || *line > lines.len() {
-                    // Append at end
-                    lines.extend(insert_lines);
-                } else {
-                    // Insert before line (1-indexed)
-                    let idx = line - 1;
-                    for (i, l) in insert_lines.into_iter().enumerate() {
-                        lines.insert(idx + i, l);
-                    }
-                }
-                applied += 1;
-            }
+    fn tool_description(&self) -> &str {
+        "Insert text before a given line number (1-indexed). Set line=0 or omit to append at end.\n\n\
+         Returns a unified diff of the changes."
+    }
 
-            EditOperation::Delete { start_line, end_line } => {
-                let start_idx = start_line.saturating_sub(1);
-                let end_idx = end_line.unwrap_or(*start_line).saturating_sub(1);
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
+            ToolParameters::new()
+                .add_property("path", PropertySchema::string("Path to the file"), true)
+                .add_property("content", PropertySchema::string("Text to insert"), true)
+                .add_property(
+                    "line",
+                    PropertySchema::integer("Line to insert before (1-indexed, 0 or omit to append)"),
+                    false,
+                ),
+        )
+    }
 
-                if start_idx >= lines.len() {
-                    return Err(Error::tool(
-                        "edit_file",
-                        format!(
-                            "Edit {} failed: start_line {} is beyond file length {}",
-                            edit_idx + 1,
-                            start_line,
-                            lines.len()
-                        ),
-                    ));
-                }
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool("insert_in_file", "Write operations are disabled"));
+        }
 
-                let actual_end = end_idx.min(lines.len().saturating_sub(1));
-                if start_idx <= actual_end {
-                    lines.drain(start_idx..=actual_end);
-                    applied += 1;
-                }
-            }
+        let args: InsertInFileArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("insert_in_file", format!("Invalid arguments: {}", e)))?;
 
-            EditOperation::ReplaceLines {
-                start_line,
-                end_line,
-                content: text,
-            } => {
-                let start_idx = start_line.saturating_sub(1);
-                let end_idx = end_line.saturating_sub(1);
+        if let Err(denied) = self.config.require_approval(
+            "insert_in_file",
+            format!("insert_in_file: {} (line {})", args.path, args.line),
+        ).await {
+            return Ok(denied);
+        }
 
-                if start_idx >= lines.len() {
-                    return Err(Error::tool(
-                        "edit_file",
-                        format!(
-                            "Edit {} failed: start_line {} is beyond file length {}",
-                            edit_idx + 1,
-                            start_line,
-                            lines.len()
-                        ),
-                    ));
-                }
+        let (path, original) = read_file_for_edit(&self.config, &args.path).await?;
 
-                let actual_end = end_idx.min(lines.len().saturating_sub(1));
-                let replacement: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+        let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+        let insert_lines: Vec<String> = args.content.lines().map(|s| s.to_string()).collect();
 
-                // Remove old lines and insert new
-                if start_idx <= actual_end {
-                    lines.drain(start_idx..=actual_end);
-                }
-                for (i, l) in replacement.into_iter().enumerate() {
-                    lines.insert(start_idx + i, l);
-                }
-                applied += 1;
+        if args.line == 0 || args.line > lines.len() {
+            lines.extend(insert_lines);
+        } else {
+            let idx = args.line - 1;
+            for (i, l) in insert_lines.into_iter().enumerate() {
+                lines.insert(idx + i, l);
             }
         }
-    }
 
-    // Reconstruct content preserving trailing newline behavior
-    let mut result = lines.join("\n");
-    if ends_with_newline
-        || (!content.is_empty() && result.is_empty())
-        || (!content.is_empty() && !result.is_empty() && content.ends_with('\n'))
-    {
-        result.push('\n');
-    }
+        let new_content = reconstruct_content(&lines, &original);
+        let diff = atomic_write_with_diff(&path, &args.path, &original, &new_content).await?;
 
-    // Handle empty content case
-    if content.is_empty() && !result.is_empty() && !result.ends_with('\n') {
-        result.push('\n');
+        let loc = if args.line == 0 { "end".to_string() } else { format!("line {}", args.line) };
+        Ok(ToolOutput::success(format!(
+            "Inserted text at {} of {}\n\n{}",
+            loc, args.path, diff
+        )))
     }
-
-    Ok((result, applied))
 }
+
+// =============================================================================
+// Delete Lines Tool
+// =============================================================================
+
+pub struct DeleteLinesTool {
+    config: FileSystemConfig,
+}
+
+impl DeleteLinesTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteLinesArgs {
+    path: String,
+    start_line: usize,
+    #[serde(default)]
+    end_line: Option<usize>,
+}
+
+#[async_trait]
+impl Tool for DeleteLinesTool {
+    fn name(&self) -> &str {
+        "delete_lines"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a line or range of lines from a file"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Delete one or more lines from a file (1-indexed, inclusive). Omit end_line to delete a single line.\n\n\
+         Returns a unified diff of the changes."
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
+            ToolParameters::new()
+                .add_property("path", PropertySchema::string("Path to the file"), true)
+                .add_property(
+                    "start_line",
+                    PropertySchema::integer("First line to delete (1-indexed)"),
+                    true,
+                )
+                .add_property(
+                    "end_line",
+                    PropertySchema::integer("Last line to delete (inclusive, omit for single line)"),
+                    false,
+                ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool("delete_lines", "Write operations are disabled"));
+        }
+
+        let args: DeleteLinesArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("delete_lines", format!("Invalid arguments: {}", e)))?;
+
+        let end_line = args.end_line.unwrap_or(args.start_line);
+        if end_line < args.start_line {
+            return Err(Error::tool("delete_lines", "end_line must be >= start_line"));
+        }
+
+        if let Err(denied) = self.config.require_approval(
+            "delete_lines",
+            format!("delete_lines: {} (lines {}-{})", args.path, args.start_line, end_line),
+        ).await {
+            return Ok(denied);
+        }
+
+        let (path, original) = read_file_for_edit(&self.config, &args.path).await?;
+
+        let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+
+        let start_idx = args.start_line.saturating_sub(1);
+        if start_idx >= lines.len() {
+            return Err(Error::tool(
+                "delete_lines",
+                format!("start_line {} is beyond file length {}", args.start_line, lines.len()),
+            ));
+        }
+        let end_idx = (end_line.saturating_sub(1)).min(lines.len().saturating_sub(1));
+        let deleted = end_idx - start_idx + 1;
+        lines.drain(start_idx..=end_idx);
+
+        let new_content = reconstruct_content(&lines, &original);
+        let diff = atomic_write_with_diff(&path, &args.path, &original, &new_content).await?;
+
+        Ok(ToolOutput::success(format!(
+            "Deleted {} line(s) from {}\n\n{}",
+            deleted, args.path, diff
+        )))
+    }
+}
+
+// =============================================================================
+// Replace Lines Tool
+// =============================================================================
+
+pub struct ReplaceLinesTool {
+    config: FileSystemConfig,
+}
+
+impl ReplaceLinesTool {
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[derive(Deserialize)]
+struct ReplaceLinesArgs {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    content: String,
+}
+
+#[async_trait]
+impl Tool for ReplaceLinesTool {
+    fn name(&self) -> &str {
+        "replace_lines"
+    }
+
+    fn description(&self) -> &str {
+        "Replace a range of lines with new content"
+    }
+
+    fn tool_description(&self) -> &str {
+        "Replace a range of lines (1-indexed, inclusive) with new content.\n\n\
+         The replacement can have a different number of lines than the range being replaced.\n\
+         Returns a unified diff of the changes."
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
+            ToolParameters::new()
+                .add_property("path", PropertySchema::string("Path to the file"), true)
+                .add_property(
+                    "start_line",
+                    PropertySchema::integer("First line to replace (1-indexed)"),
+                    true,
+                )
+                .add_property(
+                    "end_line",
+                    PropertySchema::integer("Last line to replace (inclusive)"),
+                    true,
+                )
+                .add_property(
+                    "content",
+                    PropertySchema::string("Replacement text"),
+                    true,
+                ),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        if !self.config.allow_write {
+            return Err(Error::tool("replace_lines", "Write operations are disabled"));
+        }
+
+        let args: ReplaceLinesArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("replace_lines", format!("Invalid arguments: {}", e)))?;
+
+        if args.end_line < args.start_line {
+            return Err(Error::tool("replace_lines", "end_line must be >= start_line"));
+        }
+
+        if let Err(denied) = self.config.require_approval(
+            "replace_lines",
+            format!("replace_lines: {} (lines {}-{})", args.path, args.start_line, args.end_line),
+        ).await {
+            return Ok(denied);
+        }
+
+        let (path, original) = read_file_for_edit(&self.config, &args.path).await?;
+
+        let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+
+        let start_idx = args.start_line.saturating_sub(1);
+        if start_idx >= lines.len() {
+            return Err(Error::tool(
+                "replace_lines",
+                format!("start_line {} is beyond file length {}", args.start_line, lines.len()),
+            ));
+        }
+        let end_idx = (args.end_line.saturating_sub(1)).min(lines.len().saturating_sub(1));
+
+        let replacement: Vec<String> = args.content.lines().map(|s| s.to_string()).collect();
+        lines.drain(start_idx..=end_idx);
+        for (i, l) in replacement.into_iter().enumerate() {
+            lines.insert(start_idx + i, l);
+        }
+
+        let new_content = reconstruct_content(&lines, &original);
+        let diff = atomic_write_with_diff(&path, &args.path, &original, &new_content).await?;
+
+        Ok(ToolOutput::success(format!(
+            "Replaced lines {}-{} in {}\n\n{}",
+            args.start_line, args.end_line, args.path, diff
+        )))
+    }
+}
+
 
 fn generate_diff(old: &str, new: &str, path: &str) -> String {
     let old_lines: Vec<&str> = old.lines().collect();
@@ -2068,7 +2164,10 @@ pub fn create_filesystem_tools(config: FileSystemConfig) -> Vec<Box<dyn Tool>> {
 
     if config.allow_write {
         tools.push(Box::new(WriteFileTool::new(config.clone())));
-        tools.push(Box::new(EditFileTool::new(config.clone())));
+        tools.push(Box::new(ReplaceInFileTool::new(config.clone())));
+        tools.push(Box::new(InsertInFileTool::new(config.clone())));
+        tools.push(Box::new(DeleteLinesTool::new(config.clone())));
+        tools.push(Box::new(ReplaceLinesTool::new(config.clone())));
         tools.push(Box::new(MoveFileTool::new(config.clone())));
         tools.push(Box::new(CreateDirectoryTool::new(config.clone())));
         tools.push(Box::new(RemoveFileTool::new(config.clone())));
@@ -2092,7 +2191,10 @@ pub fn create_filesystem_tools_arc(config: FileSystemConfig) -> Vec<Arc<dyn Tool
 
     if config.allow_write {
         tools.push(Arc::new(WriteFileTool::new(config.clone())));
-        tools.push(Arc::new(EditFileTool::new(config.clone())));
+        tools.push(Arc::new(ReplaceInFileTool::new(config.clone())));
+        tools.push(Arc::new(InsertInFileTool::new(config.clone())));
+        tools.push(Arc::new(DeleteLinesTool::new(config.clone())));
+        tools.push(Arc::new(ReplaceLinesTool::new(config.clone())));
         tools.push(Arc::new(MoveFileTool::new(config.clone())));
         tools.push(Arc::new(CopyFileTool::new(config.clone())));
         tools.push(Arc::new(CreateDirectoryTool::new(config.clone())));
@@ -2527,74 +2629,76 @@ mod tests {
     }
 
     // =========================================================================
-    // Edit File Tests
+    // Replace In File Tests
     // =========================================================================
 
     #[tokio::test]
-    async fn test_edit_file_replace() {
+    async fn test_replace_in_file_literal() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "Hello World\nGoodbye World\n").unwrap();
 
         let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
+        let tool = ReplaceInFileTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
                 "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "World", "replace": "Universe"}
-                ]
+                "search": "World",
+                "replacement": "Universe"
             }))
             .await
             .unwrap();
 
         assert!(!result.is_error);
+        assert!(result.content.contains("Replaced 1 occurrence"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Hello Universe\nGoodbye World\n");
     }
 
     #[tokio::test]
-    async fn test_edit_file_replace_all() {
+    async fn test_replace_in_file_all() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "Hello World\nGoodbye World\n").unwrap();
 
         let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
+        let tool = ReplaceInFileTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
                 "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "World", "replace": "Universe", "all": true}
-                ]
+                "search": "World",
+                "replacement": "Universe",
+                "all": true
             }))
             .await
             .unwrap();
 
         assert!(!result.is_error);
+        assert!(result.content.contains("Replaced 2 occurrence"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Hello Universe\nGoodbye Universe\n");
     }
 
     #[tokio::test]
-    async fn test_edit_file_replace_regex() {
+    async fn test_replace_in_file_regex() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "foo123bar\nfoo456bar\n").unwrap();
 
         let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
+        let tool = ReplaceInFileTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
                 "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "\\d+", "replace": "XXX", "regex": true, "all": true}
-                ]
+                "search": "\\d+",
+                "replacement": "XXX",
+                "regex": true,
+                "all": true
             }))
             .await
             .unwrap();
@@ -2606,174 +2710,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_file_insert() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Line 1\nLine 3\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "insert", "line": 2, "content": "Line 2"}
-                ]
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Line 1\nLine 2\nLine 3\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_insert_append() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "insert", "line": 0, "content": "Line 3"}
-                ]
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Line 1\nLine 2\nLine 3\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_delete() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "delete", "start_line": 2}
-                ]
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Line 1\nLine 3\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_delete_range() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "delete", "start_line": 2, "end_line": 3}
-                ]
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Line 1\nLine 4\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_replace_lines() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Line 1\nOld 2\nOld 3\nLine 4\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "replace_lines", "start_line": 2, "end_line": 3, "content": "New 2\nNew 3"}
-                ]
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Line 1\nNew 2\nNew 3\nLine 4\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_dry_run() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Original content\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "Original", "replace": "Modified"}
-                ],
-                "dry_run": true
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error);
-        assert!(result.content.contains("dry run"));
-
-        // File should be unchanged
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Original content\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_show_diff() {
+    async fn test_replace_in_file_must_match_failure() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "Hello World\n").unwrap();
 
         let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
+        let tool = ReplaceInFileTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
                 "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "World", "replace": "Universe"}
-                ],
-                "show_diff": true
+                "search": "NotFound",
+                "replacement": "Something"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_in_file_must_match_false() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Hello World\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "search": "NotFound",
+                "replacement": "Something",
+                "must_match": false
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("No matches"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Hello World\n");
+    }
+
+    #[tokio::test]
+    async fn test_replace_in_file_shows_diff() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Hello World\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "search": "World",
+                "replacement": "Universe"
             }))
             .await
             .unwrap();
@@ -2786,115 +2783,282 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_file_create_if_missing() {
+    async fn test_replace_in_file_disabled() {
         let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Hello World\n").unwrap();
 
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
+        let config = FileSystemConfig::new(dir.path());
+        let tool = ReplaceInFileTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
-                "path": "new_file.txt",
-                "edits": [
-                    {"type": "insert", "line": 0, "content": "New content"}
-                ],
-                "create_if_missing": true
+                "path": "test.txt",
+                "search": "Hello",
+                "replacement": "Hi"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_in_file_empty_search() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Hello World\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "search": "",
+                "replacement": "Something"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    // =========================================================================
+    // Insert In File Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_insert_in_file_at_line() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 3\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = InsertInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "content": "Line 2",
+                "line": 2
             }))
             .await
             .unwrap();
 
         assert!(!result.is_error);
 
-        let content = std::fs::read_to_string(dir.path().join("new_file.txt")).unwrap();
-        assert_eq!(content, "New content\n");
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_missing_without_create() {
-        let dir = TempDir::new().unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "nonexistent.txt",
-                "edits": [
-                    {"type": "replace", "search": "foo", "replace": "bar"}
-                ]
-            }))
-            .await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("does not exist"));
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_must_match_failure() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Hello World\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "NotFound", "replace": "Something", "must_match": true}
-                ]
-            }))
-            .await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_edit_file_must_match_false() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Hello World\n").unwrap();
-
-        let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "NotFound", "replace": "Something", "must_match": false}
-                ]
-            }))
-            .await
-            .unwrap();
-
-        // Should succeed but report 0 edits applied
-        assert!(!result.is_error);
-        // File unchanged
         let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Hello World\n");
+        assert_eq!(content, "Line 1\nLine 2\nLine 3\n");
     }
 
     #[tokio::test]
-    async fn test_edit_file_multiple_edits() {
+    async fn test_insert_in_file_append() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = InsertInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "content": "Line 3"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Line 1\nLine 2\nLine 3\n");
+    }
+
+    #[tokio::test]
+    async fn test_insert_in_file_shows_diff() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = InsertInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "content": "Inserted",
+                "line": 2
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("---"));
+        assert!(result.content.contains("+++"));
+        assert!(result.content.contains("+Inserted"));
+    }
+
+    #[tokio::test]
+    async fn test_insert_in_file_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path());
+        let tool = InsertInFileTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "content": "New line"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    // =========================================================================
+    // Delete Lines Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_delete_lines_single() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\n").unwrap();
 
         let config = FileSystemConfig::new(dir.path()).with_write(true);
-        let tool = EditFileTool::new(config);
+        let tool = DeleteLinesTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
                 "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "Line 2", "replace": "Modified 2"},
-                    {"type": "insert", "line": 0, "content": "Line 4"}
-                ]
+                "start_line": 2
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Deleted 1 line"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Line 1\nLine 3\n");
+    }
+
+    #[tokio::test]
+    async fn test_delete_lines_range() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = DeleteLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 2,
+                "end_line": 3
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Deleted 2 line"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Line 1\nLine 4\n");
+    }
+
+    #[tokio::test]
+    async fn test_delete_lines_beyond_eof() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = DeleteLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 10
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("beyond file length"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_lines_shows_diff() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = DeleteLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 2
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("---"));
+        assert!(result.content.contains("+++"));
+        assert!(result.content.contains("-Line 2"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_lines_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path());
+        let tool = DeleteLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 1
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write operations are disabled"));
+    }
+
+    // =========================================================================
+    // Replace Lines Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_replace_lines_basic() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nOld 2\nOld 3\nLine 4\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 2,
+                "end_line": 3,
+                "content": "New 2\nNew 3"
             }))
             .await
             .unwrap();
@@ -2902,24 +3066,99 @@ mod tests {
         assert!(!result.is_error);
 
         let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Line 1\nModified 2\nLine 3\nLine 4\n");
+        assert_eq!(content, "Line 1\nNew 2\nNew 3\nLine 4\n");
     }
 
     #[tokio::test]
-    async fn test_edit_file_disabled() {
+    async fn test_replace_lines_different_size() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Hello World\n").unwrap();
+        std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4\n").unwrap();
 
-        let config = FileSystemConfig::new(dir.path()); // allow_write = false
-        let tool = EditFileTool::new(config);
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceLinesTool::new(config);
+
+        // Replace 2 lines with 1 line
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 2,
+                "end_line": 3,
+                "content": "Merged"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Line 1\nMerged\nLine 4\n");
+    }
+
+    #[tokio::test]
+    async fn test_replace_lines_beyond_eof() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceLinesTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
                 "path": "test.txt",
-                "edits": [
-                    {"type": "replace", "search": "Hello", "replace": "Hi"}
-                ]
+                "start_line": 10,
+                "end_line": 12,
+                "content": "New"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("beyond file length"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_lines_shows_diff() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path()).with_write(true);
+        let tool = ReplaceLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 2,
+                "end_line": 2,
+                "content": "Modified 2"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("---"));
+        assert!(result.content.contains("+++"));
+        assert!(result.content.contains("-Line 2"));
+        assert!(result.content.contains("+Modified 2"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_lines_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
+
+        let config = FileSystemConfig::new(dir.path());
+        let tool = ReplaceLinesTool::new(config);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "test.txt",
+                "start_line": 1,
+                "end_line": 1,
+                "content": "New"
             }))
             .await;
 
@@ -3550,26 +3789,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_file_create_in_sandbox_tmp() {
+    async fn test_replace_in_file_sandbox_tmp() {
         let root = TempDir::new().unwrap();
         let sandbox_tmp = TempDir::new().unwrap();
+        // Create the file in sandbox tmp so resolve_path can find it
+        std::fs::write(sandbox_tmp.path().join("test.txt"), "hello sandbox\n").unwrap();
 
         let config = FileSystemConfig::new(root.path())
             .with_write(true)
             .with_sandbox_tmp(sandbox_tmp.path().to_path_buf());
-        let tool = EditFileTool::new(config);
+        let tool = ReplaceInFileTool::new(config);
 
         let result = tool
             .execute(serde_json::json!({
-                "path": "/tmp/new.txt",
-                "create_if_missing": true,
-                "edits": [{"type": "insert", "line": 0, "content": "hello sandbox"}]
+                "path": "/tmp/test.txt",
+                "search": "hello",
+                "replacement": "goodbye"
             }))
             .await
             .unwrap();
 
         assert!(!result.is_error);
-        let written = std::fs::read_to_string(sandbox_tmp.path().join("new.txt")).unwrap();
-        assert!(written.contains("hello sandbox"));
+        let written = std::fs::read_to_string(sandbox_tmp.path().join("test.txt")).unwrap();
+        assert!(written.contains("goodbye sandbox"));
     }
 }
