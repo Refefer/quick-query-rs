@@ -783,9 +783,9 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("\"id\": \"1\""));
-        assert!(result.content.contains("Write tests"));
-        assert!(result.content.contains("todo"));
+        assert!(result.text_content().contains("\"id\": \"1\""));
+        assert!(result.text_content().contains("Write tests"));
+        assert!(result.text_content().contains("todo"));
     }
 
     #[tokio::test]
@@ -803,8 +803,8 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("in_progress"));
-        assert!(result.content.contains("coder"));
+        assert!(result.text_content().contains("in_progress"));
+        assert!(result.text_content().contains("coder"));
     }
 
     #[tokio::test]
@@ -819,13 +819,13 @@ mod tests {
             .execute(serde_json::json!({"title": "Task 2"}))
             .await
             .unwrap();
-        assert!(result.content.contains("\"id\": \"2\""));
+        assert!(result.text_content().contains("\"id\": \"2\""));
 
         let result = tool
             .execute(serde_json::json!({"title": "Task 3"}))
             .await
             .unwrap();
-        assert!(result.content.contains("\"id\": \"3\""));
+        assert!(result.text_content().contains("\"id\": \"3\""));
     }
 
     #[tokio::test]
@@ -849,9 +849,9 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("Updated"));
-        assert!(result.content.contains("done"));
-        assert!(result.content.contains("reviewer"));
+        assert!(result.text_content().contains("Updated"));
+        assert!(result.text_content().contains("done"));
+        assert!(result.text_content().contains("reviewer"));
     }
 
     #[tokio::test]
@@ -864,7 +864,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not found"));
+        assert!(result.text_content().contains("not found"));
     }
 
     #[tokio::test]
@@ -873,7 +873,7 @@ mod tests {
         let tool = ListTasksTool::new(store.clone());
 
         let result = tool.execute(serde_json::json!({})).await.unwrap();
-        assert_eq!(result.content, "No tasks found.");
+        assert_eq!(result.text_content(), "No tasks found.");
     }
 
     #[tokio::test]
@@ -900,17 +900,17 @@ mod tests {
             .execute(serde_json::json!({"status": "todo"}))
             .await
             .unwrap();
-        assert!(result.content.contains("\"A\""));
-        assert!(result.content.contains("\"C\""));
-        assert!(!result.content.contains("\"B\""));
+        assert!(result.text_content().contains("\"A\""));
+        assert!(result.text_content().contains("\"C\""));
+        assert!(!result.text_content().contains("\"B\""));
 
         // Filter by assignee
         let result = list
             .execute(serde_json::json!({"assignee": "coder"}))
             .await
             .unwrap();
-        assert!(result.content.contains("\"C\""));
-        assert!(!result.content.contains("\"A\""));
+        assert!(result.text_content().contains("\"C\""));
+        assert!(!result.text_content().contains("\"A\""));
     }
 
     #[tokio::test]
@@ -930,10 +930,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("deleted"));
+        assert!(result.text_content().contains("deleted"));
 
         let result = list.execute(serde_json::json!({})).await.unwrap();
-        assert_eq!(result.content, "No tasks found.");
+        assert_eq!(result.text_content(), "No tasks found.");
     }
 
     #[tokio::test]
@@ -946,7 +946,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not found"));
+        assert!(result.text_content().contains("not found"));
     }
 
     #[tokio::test]
@@ -996,8 +996,8 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("blocked_by"));
-        assert!(result.content.contains("\"1\""));
+        assert!(result.text_content().contains("blocked_by"));
+        assert!(result.text_content().contains("\"1\""));
     }
 
     #[tokio::test]
@@ -1010,7 +1010,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not found"));
+        assert!(result.text_content().contains("not found"));
     }
 
     #[tokio::test]
@@ -1029,7 +1029,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("cannot depend on itself"));
+        assert!(result.text_content().contains("cannot depend on itself"));
     }
 
     #[tokio::test]
@@ -1048,7 +1048,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not found"));
+        assert!(result.text_content().contains("not found"));
     }
 
     #[tokio::test]
@@ -1072,7 +1072,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("blocked_by"));
+        assert!(result.text_content().contains("blocked_by"));
 
         // Clear dependency
         let result = update
@@ -1080,7 +1080,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(!result.content.contains("blocked_by"));
+        assert!(!result.text_content().contains("blocked_by"));
     }
 
     // --- Notes tests ---
@@ -1101,7 +1101,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("Found 3 files to modify"));
+        assert!(result.text_content().contains("Found 3 files to modify"));
     }
 
     #[tokio::test]
@@ -1123,8 +1123,8 @@ mod tests {
             .execute(serde_json::json!({"id": "1", "add_note": "Note 2"}))
             .await
             .unwrap();
-        assert!(result.content.contains("Note 1"));
-        assert!(result.content.contains("Note 2"));
+        assert!(result.text_content().contains("Note 1"));
+        assert!(result.text_content().contains("Note 2"));
     }
 
     // --- List tasks with blocks ---
@@ -1145,7 +1145,7 @@ mod tests {
             .unwrap();
 
         let result = list.execute(serde_json::json!({})).await.unwrap();
-        assert!(result.content.contains("blocks"));
+        assert!(result.text_content().contains("blocks"));
     }
 
     // --- format_board tests ---
@@ -1201,7 +1201,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("done"));
+        assert!(result.text_content().contains("done"));
     }
 
     #[tokio::test]
@@ -1220,7 +1220,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("Found the issue"));
+        assert!(result.text_content().contains("Found the issue"));
     }
 
     #[tokio::test]
@@ -1239,7 +1239,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("At least one"));
+        assert!(result.text_content().contains("At least one"));
     }
 
     #[tokio::test]
@@ -1252,7 +1252,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not found"));
+        assert!(result.text_content().contains("not found"));
     }
 
     #[tokio::test]
@@ -1280,6 +1280,6 @@ mod tests {
             .execute(serde_json::json!({"title": "After clear"}))
             .await
             .unwrap();
-        assert!(result.content.contains("\"id\": \"1\""));
+        assert!(result.text_content().contains("\"id\": \"1\""));
     }
 }

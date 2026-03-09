@@ -7,11 +7,11 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 use qq_core::{
-    CompletionRequest, CompletionResponse, Error, FinishReason, Message, Provider, Role,
-    StreamChunk, StreamResult, ToolCall, ToolDefinition, Usage,
+    CompletionRequest, CompletionResponse, Content, ContentPart, Error, FinishReason, Message,
+    Provider, Role, StreamChunk, StreamResult, ToolCall, ToolDefinition, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -23,6 +23,7 @@ pub struct GeminiProvider {
     default_model: Option<String>,
     include_tool_reasoning: bool,
     context_window: Option<u32>,
+    supported_content_types: Option<Vec<String>>,
 }
 
 impl GeminiProvider {
@@ -38,6 +39,7 @@ impl GeminiProvider {
             default_model: None,
             include_tool_reasoning: true,
             context_window: None,
+            supported_content_types: None,
         }
     }
 
@@ -61,6 +63,11 @@ impl GeminiProvider {
         self
     }
 
+    pub fn with_supported_content_types(mut self, types: Vec<String>) -> Self {
+        self.supported_content_types = Some(types);
+        self
+    }
+
     fn resolve_model(&self, request: &CompletionRequest) -> String {
         request
             .model
@@ -72,6 +79,7 @@ impl GeminiProvider {
     fn build_request(&self, request: &CompletionRequest) -> GeminiRequest {
         let mut system_instruction: Option<GeminiContent> = None;
         let mut contents: Vec<GeminiContent> = Vec::new();
+        let strip_images = !crate::supports_images(&self.supported_content_types);
 
         for msg in &request.messages {
             match msg.role {
@@ -90,11 +98,16 @@ impl GeminiProvider {
                     }
                 }
                 Role::User => {
-                    let text = msg.content.to_string_lossy();
-                    let mut parts = Vec::new();
-                    if !text.is_empty() {
-                        parts.push(GeminiPart::Text { text });
-                    }
+                    let effective_content = if strip_images {
+                        let stripped = crate::strip_unsupported_content(&msg.content, &self.supported_content_types);
+                        if crate::content_has_images(&msg.content) {
+                            warn!("Stripping unsupported image content for text-only provider");
+                        }
+                        stripped
+                    } else {
+                        msg.content.clone()
+                    };
+                    let parts = self.convert_user_parts(&effective_content);
                     contents.push(GeminiContent {
                         role: Some("user".to_string()),
                         parts,
@@ -175,6 +188,40 @@ impl GeminiProvider {
             system_instruction,
             tools,
             generation_config: Some(generation_config),
+        }
+    }
+
+    fn convert_user_parts(&self, content: &Content) -> Vec<GeminiPart> {
+        match content {
+            Content::Text(s) => {
+                if s.is_empty() {
+                    vec![]
+                } else {
+                    vec![GeminiPart::Text { text: s.clone() }]
+                }
+            }
+            Content::Parts(parts) => {
+                let mut gemini_parts = Vec::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => {
+                            if !text.is_empty() {
+                                gemini_parts.push(GeminiPart::Text { text: text.clone() });
+                            }
+                        }
+                        ContentPart::Image { image } => {
+                            gemini_parts.push(GeminiPart::InlineData {
+                                inline_data: GeminiInlineData {
+                                    mime_type: image.media_type.clone(),
+                                    data: image.data.clone(),
+                                },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                gemini_parts
+            }
         }
     }
 
@@ -596,9 +643,20 @@ enum GeminiPart {
         #[serde(rename = "functionResponse")]
         function_response: GeminiFunctionResponse,
     },
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: GeminiInlineData,
+    },
     Text {
         text: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiInlineData {
+    mime_type: String,
+    data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

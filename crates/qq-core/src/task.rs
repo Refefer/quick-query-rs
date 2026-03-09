@@ -309,10 +309,24 @@ impl TaskManager {
 pub struct ToolExecutionResult {
     /// The tool call ID.
     pub tool_call_id: String,
-    /// The result content or error message.
-    pub content: String,
+    /// The result content (text, images, etc.).
+    pub content: Vec<crate::message::TypedContent>,
     /// Whether the result is an error.
     pub is_error: bool,
+}
+
+impl ToolExecutionResult {
+    /// Extract text content, concatenating text parts only.
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                crate::message::TypedContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }
 
 /// Execute multiple tool calls in parallel.
@@ -342,6 +356,8 @@ pub async fn execute_tools_parallel_with_chunker(
 ) -> Vec<ToolExecutionResult> {
     use futures::future::join_all;
 
+    use crate::message::TypedContent;
+
     let futures: Vec<_> = tool_calls
         .into_iter()
         .map(|tool_call| {
@@ -353,24 +369,29 @@ pub async fn execute_tools_parallel_with_chunker(
                 let Some(tool) = registry.get_arc(&tool_name) else {
                     return ToolExecutionResult {
                         tool_call_id,
-                        content: format!("Error: Unknown tool '{}'", tool_name),
+                        content: vec![TypedContent::text(format!("Error: Unknown tool '{}'", tool_name))],
                         is_error: true,
                     };
                 };
 
                 match crate::tool::execute_tool_dispatch(tool, arguments).await {
-                    Ok(output) => ToolExecutionResult {
-                        tool_call_id,
-                        content: if output.is_error {
-                            format!("Error: {}", output.content)
+                    Ok(output) => {
+                        let content = if output.is_error {
+                            // Prepend "Error: " to the text content for error outputs
+                            let error_text = format!("Error: {}", output.text_content());
+                            vec![TypedContent::text(error_text)]
                         } else {
                             output.content
-                        },
-                        is_error: output.is_error,
-                    },
+                        };
+                        ToolExecutionResult {
+                            tool_call_id,
+                            content,
+                            is_error: output.is_error,
+                        }
+                    }
                     Err(e) => ToolExecutionResult {
                         tool_call_id,
-                        content: format!("Error executing tool: {}", e),
+                        content: vec![TypedContent::text(format!("Error executing tool: {}", e))],
                         is_error: true,
                     },
                 }
@@ -380,7 +401,7 @@ pub async fn execute_tools_parallel_with_chunker(
 
     let mut results = join_all(futures).await;
 
-    // Apply chunking to large outputs if processor is provided
+    // Apply chunking to large text outputs if processor is provided
     if let Some(processor) = chunk_processor {
         for result in &mut results {
             // Skip error results - keep them readable
@@ -388,14 +409,23 @@ pub async fn execute_tools_parallel_with_chunker(
                 continue;
             }
 
-            // Check if content should be chunked
-            if processor.should_chunk(&result.content) {
+            // Only chunk text content; pass images through unchanged
+            let text = result.text_content();
+            if processor.should_chunk(&text) {
                 match processor
-                    .process_large_content(&result.content, original_query)
+                    .process_large_content(&text, original_query)
                     .await
                 {
                     Ok(processed) => {
-                        result.content = processed;
+                        // Replace text parts with chunked version, keep non-text parts
+                        let mut new_content: Vec<TypedContent> = result
+                            .content
+                            .iter()
+                            .filter(|c| !matches!(c, TypedContent::Text { .. }))
+                            .cloned()
+                            .collect();
+                        new_content.insert(0, TypedContent::text(processed));
+                        result.content = new_content;
                     }
                     Err(e) => {
                         // Log warning but keep original content
@@ -405,13 +435,20 @@ pub async fn execute_tools_parallel_with_chunker(
                         );
                         // Truncate with a note instead
                         let truncate_at = processor.config().threshold_bytes;
-                        if result.content.len() > truncate_at {
-                            result.content = format!(
+                        if text.len() > truncate_at {
+                            let mut new_content: Vec<TypedContent> = result
+                                .content
+                                .iter()
+                                .filter(|c| !matches!(c, TypedContent::Text { .. }))
+                                .cloned()
+                                .collect();
+                            new_content.insert(0, TypedContent::text(format!(
                                 "[Large output: {} bytes, showing first {} bytes]\n\n{}",
-                                result.content.len(),
+                                text.len(),
                                 truncate_at,
-                                &result.content[..truncate_at]
-                            );
+                                &text[..truncate_at]
+                            )));
+                            result.content = new_content;
                         }
                     }
                 }

@@ -11,7 +11,7 @@ use tokio::fs;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
-use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
+use qq_core::{Error, ImageData, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, TypedContent};
 
 use crate::approval::{ApprovalChannel, ApprovalResponse};
 
@@ -310,7 +310,8 @@ impl Tool for ReadFileTool {
     }
 
     fn tool_description(&self) -> &str {
-        "Read file contents with optional line ranges, grep filtering, and head/tail.\n\n\
+        "Read file contents with optional line ranges, grep filtering, and head/tail.\n\
+         Automatically detects image files (PNG, JPEG, GIF, WebP) and returns them as image content.\n\n\
          Usage guidance:\n\
          - The grep param accepts regex — use alternation to filter for multiple patterns at once: \
          grep=\"(TODO|FIXME|HACK)\" instead of calling read_file multiple times.\n\
@@ -376,9 +377,25 @@ impl Tool for ReadFileTool {
             .map_err(|e| Error::tool("read_file", format!("Invalid arguments: {}", e)))?;
 
         let path = self.config.resolve_path(&args.path)?;
-        let content = fs::read_to_string(&path)
+        let bytes = fs::read(&path)
             .await
             .map_err(|e| Error::tool("read_file", format!("Failed to read '{}': {}", args.path, e)))?;
+
+        // Try to detect image files and return them directly
+        if let Ok(image) = ImageData::from_bytes(&bytes) {
+            let metadata = format!(
+                "Image: {} ({}, {}x{})",
+                args.path, image.media_type, image.width, image.height
+            );
+            return Ok(ToolOutput::with_content(
+                vec![TypedContent::text(metadata), TypedContent::image(image)],
+                false,
+            ));
+        }
+
+        // Not an image — treat as text
+        let content = String::from_utf8(bytes)
+            .map_err(|e| Error::tool("read_file", format!("Failed to read '{}' as text: {}", args.path, e)))?;
 
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
@@ -2229,7 +2246,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Hello, world!"));
+        assert!(result.text_content().contains("Hello, world!"));
     }
 
     #[tokio::test]
@@ -2247,9 +2264,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("1│"));
-        assert!(result.content.contains("2│"));
-        assert!(result.content.contains("3│"));
+        assert!(result.text_content().contains("1│"));
+        assert!(result.text_content().contains("2│"));
+        assert!(result.text_content().contains("3│"));
     }
 
     #[tokio::test]
@@ -2267,7 +2284,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "Line 1\nLine 2");
+        assert_eq!(result.text_content(), "Line 1\nLine 2");
     }
 
     #[tokio::test]
@@ -2285,7 +2302,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "Line 4\nLine 5");
+        assert_eq!(result.text_content(), "Line 4\nLine 5");
     }
 
     #[tokio::test]
@@ -2308,7 +2325,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "Line 2\nLine 3\nLine 4");
+        assert_eq!(result.text_content(), "Line 2\nLine 3\nLine 4");
     }
 
     #[tokio::test]
@@ -2334,7 +2351,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "apple\napricot\navocado");
+        assert_eq!(result.text_content(), "apple\napricot\navocado");
     }
 
     #[tokio::test]
@@ -2357,7 +2374,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "3\nMATCH\n5");
+        assert_eq!(result.text_content(), "3\nMATCH\n5");
     }
 
     #[tokio::test]
@@ -2381,7 +2398,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "Line 3\nLine 4");
+        assert_eq!(result.text_content(), "Line 3\nLine 4");
     }
 
     // =========================================================================
@@ -2403,8 +2420,8 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("file1.txt"));
-        assert!(!result.content.contains("file2.rs"));
+        assert!(result.text_content().contains("file1.txt"));
+        assert!(!result.text_content().contains("file2.rs"));
     }
 
     // =========================================================================
@@ -2427,9 +2444,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("file1.rs"));
-        assert!(result.content.contains("file2.rs"));
-        assert!(!result.content.contains("file3.txt"));
+        assert!(result.text_content().contains("file1.rs"));
+        assert!(result.text_content().contains("file2.rs"));
+        assert!(!result.text_content().contains("file3.txt"));
     }
 
     #[tokio::test]
@@ -2448,8 +2465,8 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("root.rs"));
-        assert!(result.content.contains("nested.rs"));
+        assert!(result.text_content().contains("root.rs"));
+        assert!(result.text_content().contains("nested.rs"));
     }
 
     #[tokio::test]
@@ -2468,8 +2485,8 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("root.rs"));
-        assert!(!result.content.contains("nested.rs"));
+        assert!(result.text_content().contains("root.rs"));
+        assert!(!result.text_content().contains("nested.rs"));
     }
 
     #[tokio::test]
@@ -2486,16 +2503,16 @@ mod tests {
             .execute(serde_json::json!({"include_hidden": false}))
             .await
             .unwrap();
-        assert!(result.content.contains("visible.txt"));
-        assert!(!result.content.contains(".hidden.txt"));
+        assert!(result.text_content().contains("visible.txt"));
+        assert!(!result.text_content().contains(".hidden.txt"));
 
         // With hidden
         let result = tool
             .execute(serde_json::json!({"include_hidden": true}))
             .await
             .unwrap();
-        assert!(result.content.contains("visible.txt"));
-        assert!(result.content.contains(".hidden.txt"));
+        assert!(result.text_content().contains("visible.txt"));
+        assert!(result.text_content().contains(".hidden.txt"));
     }
 
     #[tokio::test]
@@ -2514,7 +2531,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("truncated"));
+        assert!(result.text_content().contains("truncated"));
     }
 
     #[tokio::test]
@@ -2533,9 +2550,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("subdir1"));
-        assert!(result.content.contains("subdir2"));
-        assert!(!result.content.contains("file.txt"));
+        assert!(result.text_content().contains("subdir1"));
+        assert!(result.text_content().contains("subdir2"));
+        assert!(!result.text_content().contains("file.txt"));
     }
 
     // =========================================================================
@@ -2558,7 +2575,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Successfully wrote"));
+        assert!(result.text_content().contains("Successfully wrote"));
 
         let written_content = std::fs::read_to_string(dir.path().join("output.txt")).unwrap();
         assert_eq!(written_content, "Hello from write_file test!");
@@ -2651,7 +2668,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Replaced 1 occurrence"));
+        assert!(result.text_content().contains("Replaced 1 occurrence"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Hello Universe\nGoodbye World\n");
@@ -2677,7 +2694,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Replaced 2 occurrence"));
+        assert!(result.text_content().contains("Replaced 2 occurrence"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Hello Universe\nGoodbye Universe\n");
@@ -2751,7 +2768,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("No matches"));
+        assert!(result.text_content().contains("No matches"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Hello World\n");
@@ -2776,10 +2793,10 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("---"));
-        assert!(result.content.contains("+++"));
-        assert!(result.content.contains("-Hello World"));
-        assert!(result.content.contains("+Hello Universe"));
+        assert!(result.text_content().contains("---"));
+        assert!(result.text_content().contains("+++"));
+        assert!(result.text_content().contains("-Hello World"));
+        assert!(result.text_content().contains("+Hello Universe"));
     }
 
     #[tokio::test]
@@ -2896,9 +2913,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("---"));
-        assert!(result.content.contains("+++"));
-        assert!(result.content.contains("+Inserted"));
+        assert!(result.text_content().contains("---"));
+        assert!(result.text_content().contains("+++"));
+        assert!(result.text_content().contains("+Inserted"));
     }
 
     #[tokio::test]
@@ -2944,7 +2961,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Deleted 1 line"));
+        assert!(result.text_content().contains("Deleted 1 line"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Line 1\nLine 3\n");
@@ -2969,7 +2986,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Deleted 2 line"));
+        assert!(result.text_content().contains("Deleted 2 line"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Line 1\nLine 4\n");
@@ -3014,9 +3031,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("---"));
-        assert!(result.content.contains("+++"));
-        assert!(result.content.contains("-Line 2"));
+        assert!(result.text_content().contains("---"));
+        assert!(result.text_content().contains("+++"));
+        assert!(result.text_content().contains("-Line 2"));
     }
 
     #[tokio::test]
@@ -3138,10 +3155,10 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("---"));
-        assert!(result.content.contains("+++"));
-        assert!(result.content.contains("-Line 2"));
-        assert!(result.content.contains("+Modified 2"));
+        assert!(result.text_content().contains("---"));
+        assert!(result.text_content().contains("+++"));
+        assert!(result.text_content().contains("-Line 2"));
+        assert!(result.text_content().contains("+Modified 2"));
     }
 
     #[tokio::test]
@@ -3189,7 +3206,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Successfully moved"));
+        assert!(result.text_content().contains("Successfully moved"));
 
         // Source should no longer exist
         assert!(!source_path.exists());
@@ -3329,7 +3346,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Successfully created"));
+        assert!(result.text_content().contains("Successfully created"));
         assert!(dir.path().join("new_dir").is_dir());
     }
 
@@ -3369,7 +3386,7 @@ mod tests {
 
         // Should succeed (idempotent)
         assert!(!result.is_error);
-        assert!(result.content.contains("already exists"));
+        assert!(result.text_content().contains("already exists"));
     }
 
     #[tokio::test]
@@ -3463,7 +3480,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Successfully removed file"));
+        assert!(result.text_content().contains("Successfully removed file"));
         assert!(!file_path.exists());
     }
 
@@ -3552,7 +3569,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Successfully removed directory"));
+        assert!(result.text_content().contains("Successfully removed directory"));
         assert!(!dir.path().join("empty_dir").exists());
     }
 

@@ -1,4 +1,7 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,6 +22,163 @@ impl std::fmt::Display for Role {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ImageData
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageData {
+    /// Base64-encoded image bytes.
+    pub data: String,
+    /// MIME type (e.g. "image/jpeg", "image/png", "image/gif", "image/webp").
+    pub media_type: String,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
+impl ImageData {
+    /// Create from raw image bytes.
+    ///
+    /// Uses `infer` for MIME detection and `imagesize` for dimension extraction.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let kind = infer::get(bytes)
+            .ok_or_else(|| Error::Unknown("Could not detect image format".into()))?;
+
+        let media_type = kind.mime_type();
+        if !media_type.starts_with("image/") {
+            return Err(Error::Unknown(format!(
+                "Not an image file (detected: {})",
+                media_type
+            )));
+        }
+
+        let size = imagesize::blob_size(bytes)
+            .map_err(|e| Error::Unknown(format!("Could not determine image dimensions: {}", e)))?;
+
+        Ok(Self {
+            data: BASE64.encode(bytes),
+            media_type: media_type.to_string(),
+            width: size.width as u32,
+            height: size.height as u32,
+        })
+    }
+
+    /// Rough token estimate using Anthropic's formula: (width * height) / 750.
+    pub fn estimated_tokens(&self) -> u32 {
+        (self.width as u64 * self.height as u64 / 750) as u32
+    }
+
+    /// Approximate raw byte size of the decoded image data.
+    pub fn decoded_size(&self) -> usize {
+        self.data.len() * 3 / 4
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TypedContent
+// ---------------------------------------------------------------------------
+
+/// A single piece of content with an associated type.
+/// Used throughout the tool and message pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TypedContent {
+    /// text/* content
+    Text { text: String },
+    /// image/* content (base64-encoded with dimensions)
+    Image { image: ImageData },
+}
+
+impl TypedContent {
+    pub fn text(s: impl Into<String>) -> Self {
+        TypedContent::Text { text: s.into() }
+    }
+
+    pub fn image(image: ImageData) -> Self {
+        TypedContent::Image { image }
+    }
+
+    /// Byte count for budget/threshold calculations.
+    ///
+    /// For text: string length.
+    /// For images: estimated_tokens * 4 (bytes-equivalent for compaction thresholds).
+    pub fn byte_count(&self) -> usize {
+        match self {
+            TypedContent::Text { text } => text.len(),
+            TypedContent::Image { image } => image.estimated_tokens() as usize * 4,
+        }
+    }
+}
+
+impl From<String> for TypedContent {
+    fn from(s: String) -> Self {
+        TypedContent::text(s)
+    }
+}
+
+impl From<&str> for TypedContent {
+    fn from(s: &str) -> Self {
+        TypedContent::text(s)
+    }
+}
+
+impl From<ImageData> for TypedContent {
+    fn from(image: ImageData) -> Self {
+        TypedContent::image(image)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IntoContent — ergonomic conversion for Message constructors
+// ---------------------------------------------------------------------------
+
+/// Trait for types that can be converted to message content.
+pub trait IntoContent {
+    fn into_content(self) -> Content;
+}
+
+impl IntoContent for &str {
+    fn into_content(self) -> Content {
+        Content::Text(self.to_string())
+    }
+}
+
+impl IntoContent for &String {
+    fn into_content(self) -> Content {
+        Content::Text(self.clone())
+    }
+}
+
+impl IntoContent for String {
+    fn into_content(self) -> Content {
+        Content::Text(self)
+    }
+}
+
+impl IntoContent for Content {
+    fn into_content(self) -> Content {
+        self
+    }
+}
+
+impl IntoContent for TypedContent {
+    fn into_content(self) -> Content {
+        Content::Parts(vec![ContentPart::from(self)])
+    }
+}
+
+impl IntoContent for Vec<TypedContent> {
+    fn into_content(self) -> Content {
+        Content::Parts(self.into_iter().map(ContentPart::from).collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Content
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -46,6 +206,9 @@ impl Content {
         }
     }
 
+    /// Concatenate all text parts, ignoring non-text content.
+    /// Use only when you explicitly intend to discard non-text parts
+    /// (e.g. for debug logging or compaction formatting).
     pub fn to_string_lossy(&self) -> String {
         match self {
             Content::Text(s) => s.clone(),
@@ -68,9 +231,9 @@ impl Content {
                 .iter()
                 .map(|p| match p {
                     ContentPart::Text { text } => text.len(),
-                    ContentPart::Image { url } => url.len(),
+                    ContentPart::Image { image } => image.estimated_tokens() as usize * 4,
                     ContentPart::ToolUse(tc) => tc.name.len() + tc.arguments.to_string().len(),
-                    ContentPart::ToolResult(tr) => tr.content.len(),
+                    ContentPart::ToolResult(tr) => tr.byte_count(),
                 })
                 .sum(),
         }
@@ -89,14 +252,31 @@ impl From<&str> for Content {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ContentPart
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     Text { text: String },
-    Image { url: String },
+    Image { image: ImageData },
     ToolUse(ToolCall),
     ToolResult(ToolResult),
 }
+
+impl From<TypedContent> for ContentPart {
+    fn from(tc: TypedContent) -> Self {
+        match tc {
+            TypedContent::Text { text } => ContentPart::Text { text },
+            TypedContent::Image { image } => ContentPart::Image { image },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolCall
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -115,31 +295,68 @@ impl ToolCall {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ToolResult
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
-    pub content: String,
+    pub content: Vec<TypedContent>,
     #[serde(default)]
     pub is_error: bool,
 }
 
 impl ToolResult {
-    pub fn success(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn success(tool_call_id: impl Into<String>, content: impl Into<TypedContent>) -> Self {
         Self {
             tool_call_id: tool_call_id.into(),
-            content: content.into(),
+            content: vec![content.into()],
             is_error: false,
         }
     }
 
-    pub fn error(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn error(tool_call_id: impl Into<String>, content: impl Into<TypedContent>) -> Self {
         Self {
             tool_call_id: tool_call_id.into(),
-            content: content.into(),
+            content: vec![content.into()],
             is_error: true,
         }
     }
+
+    pub fn with_content(
+        tool_call_id: impl Into<String>,
+        content: Vec<TypedContent>,
+        is_error: bool,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            content,
+            is_error,
+        }
+    }
+
+    /// Byte count of all content parts.
+    pub fn byte_count(&self) -> usize {
+        self.content.iter().map(|c| c.byte_count()).sum()
+    }
+
+    /// Extract text content, concatenating text parts only.
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                TypedContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Message
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -159,10 +376,10 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn system(content: impl Into<Content>) -> Self {
+    pub fn system(content: impl IntoContent) -> Self {
         Self {
             role: Role::System,
-            content: content.into(),
+            content: content.into_content(),
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -170,10 +387,10 @@ impl Message {
         }
     }
 
-    pub fn user(content: impl Into<Content>) -> Self {
+    pub fn user(content: impl IntoContent) -> Self {
         Self {
             role: Role::User,
-            content: content.into(),
+            content: content.into_content(),
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -181,10 +398,10 @@ impl Message {
         }
     }
 
-    pub fn assistant(content: impl Into<Content>) -> Self {
+    pub fn assistant(content: impl IntoContent) -> Self {
         Self {
             role: Role::Assistant,
-            content: content.into(),
+            content: content.into_content(),
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -192,10 +409,10 @@ impl Message {
         }
     }
 
-    pub fn assistant_with_tool_calls(content: impl Into<Content>, tool_calls: Vec<ToolCall>) -> Self {
+    pub fn assistant_with_tool_calls(content: impl IntoContent, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
-            content: content.into(),
+            content: content.into_content(),
             name: None,
             tool_calls,
             tool_call_id: None,
@@ -203,10 +420,10 @@ impl Message {
         }
     }
 
-    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl IntoContent) -> Self {
         Self {
             role: Role::Tool,
-            content: Content::text(content),
+            content: content.into_content(),
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
@@ -534,5 +751,104 @@ mod tests {
             + 4 + 9 + serde_json::json!({"path": "/tmp"}).to_string().len(); // tool call
         assert_eq!(msg.observable_byte_count(), expected);
         assert!(msg.observable_byte_count() < msg.byte_count());
+    }
+
+    #[test]
+    fn test_typed_content_text() {
+        let tc = TypedContent::text("hello");
+        assert_eq!(tc.byte_count(), 5);
+    }
+
+    #[test]
+    fn test_typed_content_from_string() {
+        let tc: TypedContent = "hello".into();
+        match tc {
+            TypedContent::Text { text } => assert_eq!(text, "hello"),
+            _ => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_typed_content_from_owned_string() {
+        let tc: TypedContent = String::from("world").into();
+        match tc {
+            TypedContent::Text { text } => assert_eq!(text, "world"),
+            _ => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_text_content() {
+        let tr = ToolResult::success("tc-1", "result text");
+        assert_eq!(tr.text_content(), "result text");
+        assert_eq!(tr.byte_count(), 11);
+    }
+
+    #[test]
+    fn test_tool_result_with_content() {
+        let tr = ToolResult::with_content(
+            "tc-1",
+            vec![TypedContent::text("part1"), TypedContent::text("part2")],
+            false,
+        );
+        assert_eq!(tr.text_content(), "part1part2");
+        assert!(!tr.is_error);
+    }
+
+    #[test]
+    fn test_into_content_str() {
+        let content = "hello".into_content();
+        assert_eq!(content.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_into_content_string() {
+        let content = String::from("hello").into_content();
+        assert_eq!(content.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_into_content_vec_typed() {
+        let content = vec![TypedContent::text("a"), TypedContent::text("b")].into_content();
+        match content {
+            Content::Parts(parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("Expected Parts variant"),
+        }
+    }
+
+    #[test]
+    fn test_message_user_with_vec_typed_content() {
+        let msg = Message::user(vec![TypedContent::text("describe this")]);
+        match msg.content {
+            Content::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    ContentPart::Text { text } => assert_eq!(text, "describe this"),
+                    _ => panic!("Expected Text part"),
+                }
+            }
+            _ => panic!("Expected Parts variant"),
+        }
+    }
+
+    #[test]
+    fn test_content_part_from_typed_content() {
+        let tc = TypedContent::text("hello");
+        let cp = ContentPart::from(tc);
+        match cp {
+            ContentPart::Text { text } => assert_eq!(text, "hello"),
+            _ => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_typed_content_serde_roundtrip() {
+        let tc = TypedContent::text("hello");
+        let json = serde_json::to_string(&tc).unwrap();
+        let tc2: TypedContent = serde_json::from_str(&json).unwrap();
+        match tc2 {
+            TypedContent::Text { text } => assert_eq!(text, "hello"),
+            _ => panic!("Expected Text variant"),
+        }
     }
 }

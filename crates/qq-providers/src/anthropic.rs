@@ -7,11 +7,11 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 use qq_core::{
-    CompletionRequest, CompletionResponse, Error, FinishReason, Message, Provider, Role,
-    StreamChunk, StreamResult, ToolCall, ToolDefinition, Usage,
+    CompletionRequest, CompletionResponse, Content, ContentPart, Error, FinishReason, Message,
+    Provider, Role, StreamChunk, StreamResult, ToolCall, ToolDefinition, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -25,6 +25,7 @@ pub struct AnthropicProvider {
     default_model: Option<String>,
     include_tool_reasoning: bool,
     context_window: Option<u32>,
+    supported_content_types: Option<Vec<String>>,
 }
 
 impl AnthropicProvider {
@@ -40,6 +41,7 @@ impl AnthropicProvider {
             default_model: None,
             include_tool_reasoning: true,
             context_window: None,
+            supported_content_types: None,
         }
     }
 
@@ -63,11 +65,18 @@ impl AnthropicProvider {
         self
     }
 
+    pub fn with_supported_content_types(mut self, types: Vec<String>) -> Self {
+        self.supported_content_types = Some(types);
+        self
+    }
+
     fn build_request(&self, request: &CompletionRequest) -> AnthropicRequest {
         let model = request
             .model
             .clone()
             .or_else(|| self.default_model.clone());
+
+        let strip_images = !crate::supports_images(&self.supported_content_types);
 
         // Extract system messages into a separate field
         let mut system_parts: Vec<String> = Vec::new();
@@ -82,7 +91,16 @@ impl AnthropicProvider {
                     }
                 }
                 Role::User => {
-                    let content = self.convert_user_content(msg);
+                    let effective_msg = if strip_images {
+                        let stripped = crate::strip_unsupported_content(&msg.content, &self.supported_content_types);
+                        if crate::content_has_images(&msg.content) {
+                            warn!("Stripping unsupported image content for text-only provider");
+                        }
+                        Message { content: stripped, ..msg.clone() }
+                    } else {
+                        msg.clone()
+                    };
+                    let content = self.convert_user_content(&effective_msg);
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
                         content,
@@ -98,10 +116,19 @@ impl AnthropicProvider {
                 Role::Tool => {
                     // Anthropic expects tool results as user messages with tool_result blocks
                     let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
-                    let result_text = msg.content.to_string_lossy();
+                    let effective_content = if strip_images {
+                        let stripped = crate::strip_unsupported_content(&msg.content, &self.supported_content_types);
+                        if crate::content_has_images(&msg.content) {
+                            warn!("Stripping unsupported image content from tool result for text-only provider");
+                        }
+                        stripped
+                    } else {
+                        msg.content.clone()
+                    };
+                    let result_content = self.convert_tool_result_content(&effective_content);
                     let block = AnthropicContentBlock::ToolResult {
                         tool_use_id: tool_call_id,
-                        content: result_text,
+                        content: result_content,
                     };
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
@@ -152,11 +179,37 @@ impl AnthropicProvider {
     }
 
     fn convert_user_content(&self, msg: &Message) -> Vec<AnthropicContentBlock> {
-        let text = msg.content.to_string_lossy();
-        if text.is_empty() {
-            vec![]
-        } else {
-            vec![AnthropicContentBlock::Text { text }]
+        match &msg.content {
+            Content::Text(s) => {
+                if s.is_empty() {
+                    vec![]
+                } else {
+                    vec![AnthropicContentBlock::Text { text: s.clone() }]
+                }
+            }
+            Content::Parts(parts) => {
+                let mut blocks = Vec::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => {
+                            if !text.is_empty() {
+                                blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                            }
+                        }
+                        ContentPart::Image { image } => {
+                            blocks.push(AnthropicContentBlock::Image {
+                                source: AnthropicImageSource {
+                                    source_type: "base64".to_string(),
+                                    media_type: image.media_type.clone(),
+                                    data: image.data.clone(),
+                                },
+                            });
+                        }
+                        _ => {} // ToolUse/ToolResult handled elsewhere
+                    }
+                }
+                blocks
+            }
         }
     }
 
@@ -186,6 +239,35 @@ impl AnthropicProvider {
         }
 
         blocks
+    }
+
+    fn convert_tool_result_content(&self, content: &Content) -> Vec<AnthropicToolResultContent> {
+        match content {
+            Content::Text(s) => {
+                vec![AnthropicToolResultContent::Text { text: s.clone() }]
+            }
+            Content::Parts(parts) => {
+                let mut blocks = Vec::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => {
+                            blocks.push(AnthropicToolResultContent::Text { text: text.clone() });
+                        }
+                        ContentPart::Image { image } => {
+                            blocks.push(AnthropicToolResultContent::Image {
+                                source: AnthropicImageSource {
+                                    source_type: "base64".to_string(),
+                                    media_type: image.media_type.clone(),
+                                    data: image.data.clone(),
+                                },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                blocks
+            }
+        }
     }
 
     fn convert_tool(&self, tool: &ToolDefinition) -> AnthropicTool {
@@ -570,6 +652,9 @@ enum AnthropicContentBlock {
     Text {
         text: String,
     },
+    Image {
+        source: AnthropicImageSource,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -577,11 +662,27 @@ enum AnthropicContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: Vec<AnthropicToolResultContent>,
     },
     Thinking {
         thinking: String,
     },
+}
+
+/// Content blocks allowed inside a tool_result content array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicToolResultContent {
+    Text { text: String },
+    Image { source: AnthropicImageSource },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -751,7 +852,7 @@ mod tests {
                 role: "user".to_string(),
                 content: vec![AnthropicContentBlock::ToolResult {
                     tool_use_id: "tc_1".to_string(),
-                    content: "result".to_string(),
+                    content: vec![AnthropicToolResultContent::Text { text: "result".to_string() }],
                 }],
             },
             AnthropicMessage {

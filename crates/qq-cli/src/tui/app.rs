@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tui_input::Input;
 
 use qq_core::{
-    AgentMemory, ChunkProcessor, ChunkerConfig, CompletionRequest, Message, Provider, StreamChunk,
-    ToolCall, ToolExecutionResult, ToolRegistry,
+    AgentMemory, ChunkProcessor, ChunkerConfig, CompletionRequest, ImageData, Message, Provider,
+    StreamChunk, ToolCall, ToolExecutionResult, ToolRegistry, TypedContent,
 };
 
 use crate::agents::AgentExecutor;
@@ -208,6 +208,9 @@ pub struct TuiApp {
 
     /// Pending approval request (shown as overlay, user responds with a/s/d keys)
     pub pending_approval: Option<qq_tools::ApprovalRequest>,
+
+    /// Pending image/content attachments for the next message
+    pub pending_content: Vec<TypedContent>,
 }
 
 impl Default for TuiApp {
@@ -248,17 +251,35 @@ impl TuiApp {
             content_dirty: true,
             needs_redraw: true,
             pending_approval: None,
+            pending_content: Vec::new(),
         }
     }
 
+    /// Format pending attachments for display in the content pane.
+    fn format_attachments_display(&self) -> String {
+        let mut display = String::new();
+        for tc in &self.pending_content {
+            if let TypedContent::Image { image } = tc {
+                display.push_str(&format!(
+                    "[Image: {}, {}x{}]\n",
+                    image.media_type, image.width, image.height
+                ));
+            }
+        }
+        display
+    }
+
     /// Reset for a new response (preserves conversation history)
-    pub fn start_response(&mut self, user_input: &str) {
+    pub fn start_response(&mut self, user_input: &str, attachment_display: &str) {
         self.needs_redraw = true;
         // Add separator and user message to existing content
         if !self.content.is_empty() {
             self.content.push('\n');
         }
         self.content.push_str("─── You ───\n\n");
+        if !attachment_display.is_empty() {
+            self.content.push_str(attachment_display);
+        }
         self.content.push_str(user_input);
         self.content.push_str("\n\n─── Assistant ───\n\n");
 
@@ -1140,10 +1161,86 @@ pub async fn run_tui(
                                                 app.content = info;
                                                 app.content_dirty = true;
                                             }
+                                            TuiCommand::Attach(path_str) => {
+                                                if path_str.is_empty() {
+                                                    app.status_message = Some("Usage: /attach <path>".to_string());
+                                                } else {
+                                                    let expanded = crate::config::expand_path(&path_str);
+                                                    match std::fs::read(&expanded) {
+                                                        Ok(bytes) => {
+                                                            if bytes.len() > 20 * 1024 * 1024 {
+                                                                app.status_message = Some("Image too large (max 20MB)".to_string());
+                                                            } else {
+                                                                match ImageData::from_bytes(&bytes) {
+                                                                    Ok(img) => {
+                                                                        let status = format!(
+                                                                            "Attached: {}, {}x{} ({} pending)",
+                                                                            img.media_type,
+                                                                            img.width,
+                                                                            img.height,
+                                                                            app.pending_content.len() + 1,
+                                                                        );
+                                                                        app.pending_content.push(TypedContent::image(img));
+                                                                        app.status_message = Some(status);
+                                                                    }
+                                                                    Err(e) => {
+                                                                        app.status_message = Some(format!("Not a supported image: {}", e));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            app.status_message = Some(format!("Cannot read file: {}", e));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            TuiCommand::Attachments => {
+                                                if app.pending_content.is_empty() {
+                                                    app.status_message = Some("No pending attachments".to_string());
+                                                } else {
+                                                    let mut info = String::from("**Pending Attachments**\n\n");
+                                                    for (i, tc) in app.pending_content.iter().enumerate() {
+                                                        match tc {
+                                                            TypedContent::Image { image } => {
+                                                                info.push_str(&format!(
+                                                                    "{}. Image: {}, {}x{}\n",
+                                                                    i + 1,
+                                                                    image.media_type,
+                                                                    image.width,
+                                                                    image.height,
+                                                                ));
+                                                            }
+                                                            TypedContent::Text { text } => {
+                                                                info.push_str(&format!(
+                                                                    "{}. Text: {} bytes\n",
+                                                                    i + 1,
+                                                                    text.len(),
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+                                                    app.content = info;
+                                                    app.content_dirty = true;
+                                                }
+                                            }
+                                            TuiCommand::ClearAttachments => {
+                                                let count = app.pending_content.len();
+                                                app.pending_content.clear();
+                                                app.status_message = Some(format!("Cleared {} attachment(s)", count));
+                                            }
                                         }
                                     } else {
                                         // Regular message - start completion
-                                        session.add_user_message(&input);
+                                        let attachment_display = app.format_attachments_display();
+                                        if app.pending_content.is_empty() {
+                                            session.add_user_message(&input);
+                                        } else {
+                                            // Build multimodal content: text + images
+                                            let mut content = std::mem::take(&mut app.pending_content);
+                                            content.insert(0, TypedContent::text(&input));
+                                            session.add_message(Message::user(content));
+                                        }
 
                                         // Log user message
                                         if let Some(ref logger) = debug_logger {
@@ -1153,7 +1250,7 @@ pub async fn run_tui(
                                         // Compact context if needed before building messages
                                         session.compact_if_needed().await;
 
-                                        app.start_response(&input);
+                                        app.start_response(&input, &attachment_display);
 
                                         // Clone things for the spawned task
                                         let provider = Arc::clone(&provider);
@@ -1215,6 +1312,28 @@ pub async fn run_tui(
                                 execute!(io::stdout(), EnableMouseCapture)?;
                             } else {
                                 execute!(io::stdout(), DisableMouseCapture)?;
+                            }
+                        }
+                        Some(InputAction::PasteImage) => {
+                            if !app.is_streaming {
+                                match paste_clipboard_image() {
+                                    Ok(img) => {
+                                        let status = format!(
+                                            "Pasted: {}, {}x{} ({} pending)",
+                                            img.media_type,
+                                            img.width,
+                                            img.height,
+                                            app.pending_content.len() + 1,
+                                        );
+                                        app.pending_content.push(TypedContent::image(img));
+                                        app.status_message = Some(status);
+                                        app.needs_redraw = true;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("Clipboard image paste failed: {}", e);
+                                        // Silently ignore - no image in clipboard
+                                    }
+                                }
                             }
                         }
                         Some(action) => {
@@ -1344,6 +1463,9 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
         // Toggle mouse capture for text selection (Ctrl+Y)
         (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(InputAction::ToggleMouse),
 
+        // Paste image from clipboard (Alt+V)
+        (KeyCode::Char('v'), KeyModifiers::ALT) => Some(InputAction::PasteImage),
+
         // Characters (only when not streaming)
         (KeyCode::Char(c), KeyModifiers::NONE) if !is_streaming => Some(InputAction::Char(c)),
         (KeyCode::Char(c), KeyModifiers::SHIFT) if !is_streaming => Some(InputAction::Char(c)),
@@ -1364,6 +1486,9 @@ enum TuiCommand {
     Memory,
     Mount(String),
     Mounts,
+    Attach(String),
+    Attachments,
+    ClearAttachments,
 }
 
 /// Parse TUI commands
@@ -1379,9 +1504,15 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
         "/history" | "/h" => Some(TuiCommand::History),
         "/memory" | "/mem" => Some(TuiCommand::Memory),
         "/mounts" => Some(TuiCommand::Mounts),
+        "/attachments" => Some(TuiCommand::Attachments),
+        "/clear-attachments" => Some(TuiCommand::ClearAttachments),
         _ if trimmed.starts_with("/mount ") => {
             let path = trimmed.strip_prefix("/mount ").unwrap_or("").trim().to_string();
             Some(TuiCommand::Mount(path))
+        }
+        _ if trimmed.starts_with("/attach ") => {
+            let path = trimmed.strip_prefix("/attach ").unwrap_or("").trim().to_string();
+            Some(TuiCommand::Attach(path))
         }
         _ => None,
     }
@@ -1426,6 +1557,39 @@ fn format_agents_list(executor: &AgentExecutor) -> String {
 /// Print the conversation content to stdout using the shared markdown renderer.
 fn print_conversation(content: &str) {
     crate::markdown::render_markdown(content);
+}
+
+/// Attempt to paste an image from the system clipboard.
+///
+/// Returns `ImageData` on success, or an error if no image is available.
+fn paste_clipboard_image() -> anyhow::Result<ImageData> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| anyhow::anyhow!("clipboard unavailable: {}", e))?;
+
+    let img_data = clipboard
+        .get_image()
+        .map_err(|e| anyhow::anyhow!("no image in clipboard: {}", e))?;
+
+    // Encode raw RGBA pixels to PNG
+    let rgba_img = image::RgbaImage::from_raw(
+        img_data.width as u32,
+        img_data.height as u32,
+        img_data.bytes.into_owned(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("invalid clipboard image dimensions"))?;
+
+    let mut png_bytes = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut png_bytes));
+    image::ImageEncoder::write_image(
+        encoder,
+        rgba_img.as_raw(),
+        rgba_img.width(),
+        rgba_img.height(),
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|e| anyhow::anyhow!("PNG encode failed: {}", e))?;
+
+    ImageData::from_bytes(&png_bytes).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Per-chunk inactivity timeout for streaming responses.
@@ -1684,7 +1848,7 @@ async fn run_streaming_completion(
                                     Ok(output) => ToolExecutionResult {
                                         tool_call_id: tool_call_id.clone(),
                                         content: if output.is_error {
-                                            format!("Error: {}", output.content)
+                                            vec![qq_core::TypedContent::text(format!("Error: {}", output.text_content()))]
                                         } else {
                                             output.content
                                         },
@@ -1692,14 +1856,14 @@ async fn run_streaming_completion(
                                     },
                                     Err(e) => ToolExecutionResult {
                                         tool_call_id: tool_call_id.clone(),
-                                        content: format!("Error executing tool: {}", e),
+                                        content: vec![qq_core::TypedContent::text(format!("Error executing tool: {}", e))],
                                         is_error: true,
                                     },
                                 }
                             } else {
                                 ToolExecutionResult {
                                     tool_call_id: tool_call_id.clone(),
-                                    content: format!("Error: Unknown tool '{}'", tool_name),
+                                    content: vec![qq_core::TypedContent::text(format!("Error: Unknown tool '{}'", tool_name))],
                                     is_error: true,
                                 }
                             };
@@ -1711,13 +1875,15 @@ async fn run_streaming_completion(
                 // Stream results as they complete
                 let mut tool_result_messages = Vec::new();
                 while let Some((tool_name, mut result)) = futures.next().await {
+                    let result_text = result.text_content();
+
                     // Apply chunking if needed
-                    if !result.is_error && chunk_processor.should_chunk(&result.content) {
+                    if !result.is_error && chunk_processor.should_chunk(&result_text) {
                         if let Ok(processed) = chunk_processor
-                            .process_large_content(&result.content, Some(&original_query))
+                            .process_large_content(&result_text, Some(&original_query))
                             .await
                         {
-                            result.content = processed;
+                            result.content = vec![qq_core::TypedContent::text(processed)];
                         }
                     }
 
@@ -1725,9 +1891,10 @@ async fn run_streaming_completion(
                     execution_context.pop().await;
 
                     // Log full tool result
+                    let result_text = result.text_content();
                     if let Some(ref logger) = debug_logger {
                         let name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
-                        logger.log_tool_result_full(&result.tool_call_id, name, &result.content, result.is_error);
+                        logger.log_tool_result_full(&result.tool_call_id, name, &result_text, result.is_error);
                     }
 
                     // Send completion event immediately
@@ -1735,12 +1902,12 @@ async fn run_streaming_completion(
                         .send(StreamEvent::ToolComplete {
                             id: result.tool_call_id.clone(),
                             name: tool_name,
-                            result_len: result.content.len(),
+                            result_len: result_text.len(),
                             is_error: result.is_error,
                         })
                         .await;
 
-                    let tool_msg = Message::tool_result(&result.tool_call_id, &result.content);
+                    let tool_msg = Message::tool_result(&result.tool_call_id, &result_text);
                     iteration_messages.push(tool_msg.clone());
                     tool_result_messages.push(tool_msg);
                 }
@@ -2021,7 +2188,7 @@ async fn run_streaming_completion(
                                 Ok(output) => ToolExecutionResult {
                                     tool_call_id: tool_call_id.clone(),
                                     content: if output.is_error {
-                                        format!("Error: {}", output.content)
+                                        vec![qq_core::TypedContent::text(format!("Error: {}", output.text_content()))]
                                     } else {
                                         output.content
                                     },
@@ -2029,14 +2196,14 @@ async fn run_streaming_completion(
                                 },
                                 Err(e) => ToolExecutionResult {
                                     tool_call_id: tool_call_id.clone(),
-                                    content: format!("Error executing tool: {}", e),
+                                    content: vec![qq_core::TypedContent::text(format!("Error executing tool: {}", e))],
                                     is_error: true,
                                 },
                             }
                         } else {
                             ToolExecutionResult {
                                 tool_call_id: tool_call_id.clone(),
-                                content: format!("Error: Unknown tool '{}'", tool_name),
+                                content: vec![qq_core::TypedContent::text(format!("Error: Unknown tool '{}'", tool_name))],
                                 is_error: true,
                             }
                         };
@@ -2048,13 +2215,15 @@ async fn run_streaming_completion(
             // Stream results as they complete
             let mut tool_result_messages = Vec::new();
             while let Some((tool_name, mut result)) = futures.next().await {
+                let result_text = result.text_content();
+
                 // Apply chunking if needed
-                if !result.is_error && chunk_processor.should_chunk(&result.content) {
+                if !result.is_error && chunk_processor.should_chunk(&result_text) {
                     if let Ok(processed) = chunk_processor
-                        .process_large_content(&result.content, Some(&original_query))
+                        .process_large_content(&result_text, Some(&original_query))
                         .await
                     {
-                        result.content = processed;
+                        result.content = vec![qq_core::TypedContent::text(processed)];
                     }
                 }
 
@@ -2062,9 +2231,10 @@ async fn run_streaming_completion(
                 execution_context.pop().await;
 
                 // Log full tool result
+                let result_text = result.text_content();
                 if let Some(ref logger) = debug_logger {
                     let name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
-                    logger.log_tool_result_full(&result.tool_call_id, name, &result.content, result.is_error);
+                    logger.log_tool_result_full(&result.tool_call_id, name, &result_text, result.is_error);
                 }
 
                 // Send completion event immediately
@@ -2072,12 +2242,12 @@ async fn run_streaming_completion(
                     .send(StreamEvent::ToolComplete {
                         id: result.tool_call_id.clone(),
                         name: tool_name,
-                        result_len: result.content.len(),
+                        result_len: result_text.len(),
                         is_error: result.is_error,
                     })
                     .await;
 
-                let tool_msg = Message::tool_result(&result.tool_call_id, &result.content);
+                let tool_msg = Message::tool_result(&result.tool_call_id, &result_text);
                 iteration_messages.push(tool_msg.clone());
                 tool_result_messages.push(tool_msg);
             }

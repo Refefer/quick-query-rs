@@ -177,6 +177,11 @@ pub struct ProviderConfigEntry {
     /// Used to derive compaction thresholds when [compaction] fields are unset.
     #[serde(default)]
     pub context_window: Option<u32>,
+
+    /// Content types this provider/model supports. Default: ["text", "image"].
+    /// Set to ["text"] for text-only models.
+    #[serde(default)]
+    pub supported_content_types: Option<Vec<String>>,
 }
 
 /// Tools configuration

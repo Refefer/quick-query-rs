@@ -60,6 +60,10 @@ impl ChatSession {
         self.messages.push(Message::user(content));
     }
 
+    pub fn add_message(&mut self, message: Message) {
+        self.messages.push(message);
+    }
+
     pub fn add_assistant_message(&mut self, content: &str) {
         self.messages.push(Message::assistant(content));
     }
@@ -68,8 +72,8 @@ impl ChatSession {
         self.messages.push(message);
     }
 
-    pub fn add_tool_result(&mut self, tool_call_id: &str, result: &str) {
-        self.messages.push(Message::tool_result(tool_call_id, result));
+    pub fn add_tool_result(&mut self, tool_call_id: &str, content: impl qq_core::IntoContent) {
+        self.messages.push(Message::tool_result(tool_call_id, content));
     }
 
     pub fn build_messages(&self) -> Vec<Message> {
@@ -972,21 +976,22 @@ async fn run_completion(
                 .await;
 
                 for result in results {
+                    let result_text = result.text_content();
                     tracing::debug!(
                         tool_call_id = %result.tool_call_id,
-                        result_len = result.content.len(),
+                        result_len = result_text.len(),
                         is_error = result.is_error,
                         "Tool result received"
                     );
 
                     // Log tool result
                     if let Some(logger) = debug_logger {
-                        logger.log_tool_result(&result.tool_call_id, result.content.len(), result.is_error);
+                        logger.log_tool_result(&result.tool_call_id, result_text.len(), result.is_error);
                         let tool_name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
-                        logger.log_tool_result_full(&result.tool_call_id, tool_name, &result.content, result.is_error);
+                        logger.log_tool_result_full(&result.tool_call_id, tool_name, &result_text, result.is_error);
                     }
 
-                    session.add_tool_result(&result.tool_call_id, &result.content);
+                    session.add_tool_result(&result.tool_call_id, &result_text);
                 }
 
                 // Continue to get next response
@@ -1152,26 +1157,27 @@ async fn run_completion(
             .await;
 
             for result in results {
+                let result_text = result.text_content();
                 tracing::debug!(
                     tool_call_id = %result.tool_call_id,
-                    result_len = result.content.len(),
+                    result_len = result_text.len(),
                     is_error = result.is_error,
                     "Tool result received"
                 );
                 tracing::trace!(
                     tool_call_id = %result.tool_call_id,
-                    content = %result.content,
+                    content = %result_text,
                     "Tool result content"
                 );
 
                 // Log tool result
                 if let Some(logger) = debug_logger {
-                    logger.log_tool_result(&result.tool_call_id, result.content.len(), result.is_error);
+                    logger.log_tool_result(&result.tool_call_id, result_text.len(), result.is_error);
                     let tool_name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
-                    logger.log_tool_result_full(&result.tool_call_id, tool_name, &result.content, result.is_error);
+                    logger.log_tool_result_full(&result.tool_call_id, tool_name, &result_text, result.is_error);
                 }
 
-                session.add_tool_result(&result.tool_call_id, &result.content);
+                session.add_tool_result(&result.tool_call_id, &result_text);
             }
 
             // Continue to get next response
