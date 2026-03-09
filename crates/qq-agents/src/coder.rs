@@ -99,7 +99,7 @@ impl InternalAgent for CoderAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "edit_file", "write_file", "move_file", "copy_file", "create_directory", "rm_file", "rm_directory", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
+        &["read_file", "replace_in_file", "insert_in_file", "delete_lines", "replace_lines", "write_file", "move_file", "copy_file", "create_directory", "rm_file", "rm_directory", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -130,7 +130,10 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"read_file"));
-        assert!(agent.tool_names().contains(&"edit_file"));
+        assert!(agent.tool_names().contains(&"replace_in_file"));
+        assert!(agent.tool_names().contains(&"insert_in_file"));
+        assert!(agent.tool_names().contains(&"delete_lines"));
+        assert!(agent.tool_names().contains(&"replace_lines"));
         assert!(agent.tool_names().contains(&"write_file"));
         assert!(agent.tool_names().contains(&"move_file"));
         assert!(agent.tool_names().contains(&"copy_file"));

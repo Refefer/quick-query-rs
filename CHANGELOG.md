@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Criterion benchmark for sandbox overhead vs native process spawning
 
 #### Tools
-- Filesystem tools: `find_files`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`
+- Filesystem tools: `find_files`, `replace_in_file`, `insert_in_file`, `delete_lines`, `replace_lines`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory`
 - Enhanced `read_file` with grep filtering, line ranges (start_line/end_line), head/tail shortcuts
 
 #### Chat

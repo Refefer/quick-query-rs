@@ -18,7 +18,8 @@ Quick-query has **sandboxed bash access**. Read-only commands run freely. Write 
 - **Agent[researcher]**: Web research when external information is needed
 - **Agent[reviewer]**: Review and analyze existing code. Has bash (git blame, git log, grep, etc.)
 - **Agent[coder]**: Write/modify code using these tools:
-  - `read_file`, `edit_file`, `write_file`, `move_file`, `create_directory`
+  - `read_file`, `write_file`, `move_file`, `create_directory`
+  - `replace_in_file`, `insert_in_file`, `delete_lines`, `replace_lines` (file editing)
   - `find_files`, `search_files`
   - `bash` — can run builds and tests (cargo build, cargo test, npm test, etc.) with user approval
 - **Agent[writer]**: Create documentation using these tools:

@@ -508,7 +508,10 @@ graph TD
 
         subgraph "Filesystem (Write)"
             WF[write_file]
-            EF[edit_file]
+            RIF[replace_in_file]
+            IIF[insert_in_file]
+            DL[delete_lines]
+            RL[replace_lines]
             MF[move_file]
             CF[copy_file]
             CD[create_directory]
@@ -667,7 +670,7 @@ classDiagram
 | Category | Tools | Description |
 |----------|-------|-------------|
 | **Filesystem (read)** | `read_file`, `list_files`, `find_files`, `search_files` | Sandboxed read operations |
-| **Filesystem (write)** | `write_file`, `edit_file`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory` | Write operations (require `allow_write`) |
+| **Filesystem (write)** | `write_file`, `replace_in_file`, `insert_in_file`, `delete_lines`, `replace_lines`, `move_file`, `copy_file`, `create_directory`, `rm_file`, `rm_directory` | Write operations (require `allow_write`) |
 | **Preferences** | `update_preference`, `read_preference`, `list_preferences`, `delete_preference` | Persistent SQLite-backed user preference storage |
 | **Web** | `fetch_webpage`, `web_search` | Web content retrieval (optional Perplexica search) |
 | **Tasks** | `create_task`, `update_task`, `list_tasks`, `delete_task` | Session-scoped task tracking for the PM agent |
@@ -749,7 +752,7 @@ classDiagram
     class CoderAgent {
         +name() "coder"
         +max_turns() 50
-        +tool_names() [read_file, edit_file, write_file, ...]
+        +tool_names() [read_file, replace_in_file, insert_in_file, delete_lines, replace_lines, write_file, ...]
     }
 
     class ReviewerAgent {
@@ -773,7 +776,7 @@ classDiagram
     class WriterAgent {
         +name() "writer"
         +max_turns() 50
-        +tool_names() [read_file, write_file, edit_file, ...]
+        +tool_names() [read_file, write_file, replace_in_file, insert_in_file, delete_lines, replace_lines, ...]
     }
 
     InternalAgent <|.. ProjectManagerAgent
@@ -816,7 +819,7 @@ sequenceDiagram
     LLM-->>PM: ToolCall: Agent[coder](task="Add validation...")
     PM->>CoderTool: execute(arguments)
     CoderTool->>CoderAgent: Agent::run_once_with_progress(...)
-    CoderAgent->>LLM: messages + tools [read_file, edit_file, ...]
+    CoderAgent->>LLM: messages + tools [read_file, replace_in_file, insert_in_file, delete_lines, replace_lines, ...]
     LLM-->>CoderAgent: ToolCall: read_file(...)
     CoderAgent->>CoderAgent: execute tool, loop
     CoderAgent-->>CoderTool: AgentRunResult::Success
@@ -1046,7 +1049,7 @@ classDiagram
     ContextEntry --> ContextType
 ```
 
-Example stack: `Chat > Agent[pm] > Agent[coder] > Tool[edit_file]`
+Example stack: `Chat > Agent[pm] > Agent[coder] > Tool[replace_in_file]`
 
 ---
 
@@ -1325,7 +1328,7 @@ graph TD
 │                                     │  └──────────────┘│
 │                                     │  ┌─Tools────────┐│
 │                                     │  │ read_file  OK││
-│                                     │  │ edit_file  OK││
+│                                     │  │ replace_in OK││
 │                                     │  └──────────────┘│
 │                                     │  ┌─Bytes────────┐│
 │                                     │  │ In:  45.2KB  ││

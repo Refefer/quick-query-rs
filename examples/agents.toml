@@ -39,7 +39,7 @@ max_turns = 10
 tool_limits = { web_search = 2, fetch_webpage = 5 }
 
 [builtin.coder]
-# Default tools: read_file, edit_file, write_file, find_files, search_files + inform_user
+# Default tools: read_file, replace_in_file, insert_in_file, delete_lines, replace_lines, write_file, find_files, search_files + inform_user
 # memory_strategy = "obs-memory"  # default - context managed in-loop
 max_observations = 15             # wrap up after 15 observation passes
 # max_turns is auto-raised to 500 with obs-memory; override here if needed
