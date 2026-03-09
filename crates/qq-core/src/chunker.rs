@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_chunk_content_paragraphs() {
-        let config = ChunkerConfig::new().with_chunk_size(50);
+        let _config = ChunkerConfig::new().with_chunk_size(50);
 
         // Simulate the chunking logic
         let content = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";

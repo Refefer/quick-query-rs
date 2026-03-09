@@ -393,7 +393,6 @@ impl Config {
         Ok(config_dir.join("qq").join("config.toml"))
     }
 
-    #[allow(dead_code)]
     pub fn config_dir() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
@@ -444,7 +443,6 @@ impl Config {
 
 /// Resolved profile with all settings expanded
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ResolvedProfile {
     pub provider_name: String,
     pub provider_type: Option<String>,
