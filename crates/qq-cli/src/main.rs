@@ -989,10 +989,8 @@ fn show_config(config: &Config) -> Result<()> {
 }
 
 /// Resolved settings from CLI, profile, and config
-#[allow(dead_code)]
 struct ResolvedSettings {
     profile_name: String,
-    provider_name: String,
     provider_type: String,
     api_key: String,
     base_url: Option<String>,
@@ -1083,7 +1081,6 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
 
     Ok(ResolvedSettings {
         profile_name,
-        provider_name,
         provider_type,
         api_key,
         base_url,
@@ -1146,7 +1143,6 @@ fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result
 
     Ok(ResolvedSettings {
         profile_name: String::new(),
-        provider_name: provider_name.to_string(),
         provider_type,
         api_key,
         base_url: provider_config.base_url.clone(),

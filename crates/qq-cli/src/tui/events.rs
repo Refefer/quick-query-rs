@@ -8,7 +8,7 @@ use qq_core::Message;
 
 /// Events sent from the LLM streaming task to the TUI.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Some variant fields are used for debugging/logging only
+#[allow(dead_code)] // Fields used via Debug formatting
 pub enum StreamEvent {
     /// Stream has started
     Start { model: String },
@@ -78,8 +78,6 @@ pub enum InputAction {
     Quit,
     /// Show help
     Help,
-    /// Clear conversation
-    Clear,
     /// Move cursor to start of line
     Home,
     /// Move cursor to end of line

@@ -13,11 +13,6 @@ pub mod inform_user;
 pub use inform_user::InformUserTool;
 
 pub use agent_tool::{create_agent_tools, DEFAULT_MAX_AGENT_DEPTH};
-// Re-export continuation types for external use
-#[allow(unused_imports)]
-pub use continuation::{
-    execute_with_continuation, AgentExecutionResult, ContinuationConfig, ExecutionSummary,
-};
 
 // Re-export everything from qq-agents
 pub use qq_agents::{AgentDefinition, AgentInfo, AgentsConfig, InternalAgent, InternalAgentType};
