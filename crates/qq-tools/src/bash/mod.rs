@@ -346,7 +346,7 @@ mod tests {
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(!output.is_error);
-        assert_eq!(output.content, "hello world");
+        assert_eq!(output.text_content(), "hello world");
     }
 
     #[test]
@@ -359,9 +359,9 @@ mod tests {
             sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
-        assert!(output.content.contains("output"));
-        assert!(output.content.contains("[stderr]"));
-        assert!(output.content.contains("warning: something"));
+        assert!(output.text_content().contains("output"));
+        assert!(output.text_content().contains("[stderr]"));
+        assert!(output.text_content().contains("warning: something"));
     }
 
     #[test]
@@ -375,7 +375,7 @@ mod tests {
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(output.is_error);
-        assert!(output.content.contains("exit code 1"));
+        assert!(output.text_content().contains("exit code 1"));
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(output.is_error);
-        assert!(output.content.contains("timed out"));
+        assert!(output.text_content().contains("timed out"));
     }
 
     #[test]
@@ -403,8 +403,8 @@ mod tests {
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
         assert!(output.is_error);
-        assert!(output.content.contains("Sandbox error"));
-        assert!(output.content.contains("permission denied"));
+        assert!(output.text_content().contains("Sandbox error"));
+        assert!(output.text_content().contains("permission denied"));
     }
 
     #[test]
@@ -418,8 +418,8 @@ mod tests {
             sandbox_error: None,
         };
         let output = format_output(result, 500);
-        assert!(output.content.contains("truncated"));
-        assert!(output.content.len() < 600); // Some overhead for the truncation message
+        assert!(output.text_content().contains("truncated"));
+        assert!(output.text_content().len() < 600); // Some overhead for the truncation message
     }
 
     #[test]
@@ -432,6 +432,6 @@ mod tests {
             sandbox_error: None,
         };
         let output = format_output(result, MAX_OUTPUT_BYTES);
-        assert_eq!(output.content, "(no output)");
+        assert_eq!(output.text_content(), "(no output)");
     }
 }

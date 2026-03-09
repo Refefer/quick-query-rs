@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use crate::error::Error;
-use crate::message::{Message, Role};
+use crate::message::{Content, ContentPart, Message, Role, TypedContent};
 
 /// Async trait for LLM-powered observation and reflection.
 /// Implemented in qq-cli with a concrete provider.
@@ -252,6 +252,7 @@ impl ObservationalMemory {
                 let safe_end = find_safe_split_point(messages, unobserved_end);
                 if safe_end > self.observed_up_to {
                     let to_observe = &messages[self.observed_up_to..safe_end];
+                    let stripped = strip_images_from_messages(to_observe);
 
                     tracing::info!(
                         messages_to_observe = to_observe.len(),
@@ -260,7 +261,7 @@ impl ObservationalMemory {
                         "Starting observation pass"
                     );
 
-                    match compactor.observe(to_observe).await {
+                    match compactor.observe(&stripped).await {
                         Ok(observations) if !observations.is_empty() => {
                             // Append to observation log
                             if !self.observation_log.is_empty() {
@@ -360,6 +361,57 @@ impl ObservationalMemory {
         self.observation_count = 0;
         self.reflection_count = 0;
     }
+}
+
+/// Replace image content with text placeholders before passing to the compactor.
+/// This prevents sending huge base64 data to the compaction LLM.
+pub fn strip_images_from_messages(messages: &[Message]) -> Vec<Message> {
+    messages.iter().map(|msg| {
+        let content = match &msg.content {
+            Content::Text(s) => Content::Text(s.clone()),
+            Content::Parts(parts) => Content::Parts(
+                parts.iter().map(|part| match part {
+                    ContentPart::Image { image } => ContentPart::Text {
+                        text: format!(
+                            "[Image: {}, {}x{}, ~{} KB]",
+                            image.media_type,
+                            image.width,
+                            image.height,
+                            image.decoded_size() / 1024,
+                        ),
+                    },
+                    ContentPart::ToolResult(tr) => {
+                        let stripped_content: Vec<TypedContent> = tr.content.iter().map(|tc| match tc {
+                            TypedContent::Image { image } => TypedContent::Text {
+                                text: format!(
+                                    "[Image: {}, {}x{}, ~{} KB]",
+                                    image.media_type,
+                                    image.width,
+                                    image.height,
+                                    image.decoded_size() / 1024,
+                                ),
+                            },
+                            other => other.clone(),
+                        }).collect();
+                        ContentPart::ToolResult(crate::message::ToolResult {
+                            tool_call_id: tr.tool_call_id.clone(),
+                            content: stripped_content,
+                            is_error: tr.is_error,
+                        })
+                    }
+                    other => other.clone(),
+                }).collect(),
+            ),
+        };
+        Message {
+            role: msg.role,
+            content,
+            name: msg.name.clone(),
+            tool_calls: msg.tool_calls.clone(),
+            tool_call_id: msg.tool_call_id.clone(),
+            reasoning_content: msg.reasoning_content.clone(),
+        }
+    }).collect()
 }
 
 /// Find a safe point to split messages that doesn't break tool call sequences.

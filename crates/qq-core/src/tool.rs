@@ -153,23 +153,39 @@ impl PropertySchema {
 
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
-    pub content: String,
+    pub content: Vec<crate::message::TypedContent>,
     pub is_error: bool,
 }
 
 impl ToolOutput {
-    pub fn success(content: impl Into<String>) -> Self {
+    pub fn success(content: impl Into<crate::message::TypedContent>) -> Self {
         Self {
-            content: content.into(),
+            content: vec![content.into()],
             is_error: false,
         }
     }
 
-    pub fn error(content: impl Into<String>) -> Self {
+    pub fn error(content: impl Into<crate::message::TypedContent>) -> Self {
         Self {
-            content: content.into(),
+            content: vec![content.into()],
             is_error: true,
         }
+    }
+
+    pub fn with_content(content: Vec<crate::message::TypedContent>, is_error: bool) -> Self {
+        Self { content, is_error }
+    }
+
+    /// Extract text content, concatenating text parts only.
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                crate::message::TypedContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
     }
 }
 
@@ -319,9 +335,11 @@ mod tests {
     fn test_tool_output() {
         let success = ToolOutput::success("done");
         assert!(!success.is_error);
+        assert_eq!(success.text_content(), "done");
 
         let error = ToolOutput::error("failed");
         assert!(error.is_error);
+        assert_eq!(error.text_content(), "failed");
     }
 
     /// A test tool that is non-blocking (default).
@@ -377,7 +395,7 @@ mod tests {
     async fn test_execute_tool_dispatch_non_blocking() {
         let tool: Arc<dyn Tool> = Arc::new(NonBlockingTool);
         let result = execute_tool_dispatch(tool, Value::Null).await.unwrap();
-        assert_eq!(result.content, "non_blocking_result");
+        assert_eq!(result.text_content(), "non_blocking_result");
         assert!(!result.is_error);
     }
 
@@ -385,7 +403,7 @@ mod tests {
     async fn test_execute_tool_dispatch_blocking() {
         let tool: Arc<dyn Tool> = Arc::new(BlockingTool);
         let result = execute_tool_dispatch(tool, Value::Null).await.unwrap();
-        assert_eq!(result.content, "blocking_result");
+        assert_eq!(result.text_content(), "blocking_result");
         assert!(!result.is_error);
     }
 }

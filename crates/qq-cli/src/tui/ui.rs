@@ -80,10 +80,17 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
     // Render Input area (at bottom)
     if let Some(&input_rect) = layout.get(&PaneId::Input) {
         if input_rect.height > 0 {
+            let pending_hint;
             let input_hint = if app.is_streaming {
                 "Press Ctrl+C to cancel"
             } else if !app.mouse_captured {
                 "SELECT MODE \u{2014} Ctrl+Y to resume mouse scroll"
+            } else if !app.pending_content.is_empty() {
+                pending_hint = format!(
+                    "{} image(s) attached | /clear-attachments | /help",
+                    app.pending_content.len()
+                );
+                &pending_hint
             } else {
                 "/help | /quit | PgUp/PgDn scroll | Ctrl+Y select mode"
             };
@@ -127,7 +134,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     // Create centered overlay
     let overlay_width = 60u16.min(area.width.saturating_sub(4));
-    let overlay_height = 31u16.min(area.height.saturating_sub(4));
+    let overlay_height = 35u16.min(area.height.saturating_sub(4));
 
     let x = (area.width.saturating_sub(overlay_width)) / 2;
     let y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -163,9 +170,13 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  /agents      List available agents"),
         Line::from("  /mount <p>   Add read-only bash sandbox mount"),
         Line::from("  /mounts      List bash sandbox mounts"),
+        Line::from("  /attach <p>  Attach an image file"),
+        Line::from("  /attachments List pending attachments"),
+        Line::from("  /clear-attachments  Remove all attachments"),
         Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Cyan))),
         Line::from("  Ctrl+Y       Toggle select mode (for copy)"),
+        Line::from("  Alt+V        Paste image from clipboard"),
         Line::from("  Ctrl+C       Cancel streaming"),
         Line::from("  Ctrl+D       Exit"),
         Line::from(""),

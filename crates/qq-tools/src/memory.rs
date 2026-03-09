@@ -340,12 +340,12 @@ mod tests {
             .execute(serde_json::json!({"name": "test"}))
             .await
             .unwrap();
-        assert_eq!(result.content, "hello");
+        assert_eq!(result.text_content(), "hello");
 
         // List preferences
         let list_tool = ListPreferencesTool::new(store.clone());
         let result = list_tool.execute(serde_json::json!({})).await.unwrap();
-        assert!(result.content.contains("test"));
+        assert!(result.text_content().contains("test"));
 
         // Delete preference
         let delete_tool = DeletePreferenceTool::new(store.clone());
@@ -353,6 +353,6 @@ mod tests {
             .execute(serde_json::json!({"name": "test"}))
             .await
             .unwrap();
-        assert!(result.content.contains("deleted"));
+        assert!(result.text_content().contains("deleted"));
     }
 }

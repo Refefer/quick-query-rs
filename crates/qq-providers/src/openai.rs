@@ -7,11 +7,11 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 use qq_core::{
-    CompletionRequest, CompletionResponse, Content, Error, FinishReason, Message, Provider, Role,
-    StreamChunk, StreamResult, ToolCall, ToolDefinition, Usage,
+    CompletionRequest, CompletionResponse, Content, ContentPart, Error, FinishReason, Message,
+    Provider, Role, StreamChunk, StreamResult, ToolCall, ToolDefinition, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -23,6 +23,7 @@ pub struct OpenAIProvider {
     default_model: Option<String>,
     include_tool_reasoning: bool,
     context_window: Option<u32>,
+    supported_content_types: Option<Vec<String>>,
 }
 
 impl OpenAIProvider {
@@ -38,6 +39,7 @@ impl OpenAIProvider {
             default_model: None,
             include_tool_reasoning: true,
             context_window: None,
+            supported_content_types: None,
         }
     }
 
@@ -58,6 +60,11 @@ impl OpenAIProvider {
 
     pub fn with_context_window(mut self, cw: u32) -> Self {
         self.context_window = Some(cw);
+        self
+    }
+
+    pub fn with_supported_content_types(mut self, types: Vec<String>) -> Self {
+        self.supported_content_types = Some(types);
         self
     }
 
@@ -84,10 +91,23 @@ impl OpenAIProvider {
             .clone()
             .or_else(|| self.default_model.clone());
 
+        let strip_images = !crate::supports_images(&self.supported_content_types);
+
         let messages: Vec<OpenAIMessage> = request
             .messages
             .iter()
-            .map(|m| self.convert_message(m))
+            .map(|m| {
+                if strip_images {
+                    let stripped = crate::strip_unsupported_content(&m.content, &self.supported_content_types);
+                    if crate::content_has_images(&m.content) {
+                        warn!("Stripping unsupported image content for text-only provider");
+                    }
+                    let stripped_msg = Message { content: stripped, ..m.clone() };
+                    self.convert_message(&stripped_msg)
+                } else {
+                    self.convert_message(m)
+                }
+            })
             .collect();
 
         let tools = if request.tools.is_empty() {
@@ -133,24 +153,7 @@ impl OpenAIProvider {
             Role::Tool => "tool",
         };
 
-        let content = match &message.content {
-            Content::Text(s) => Some(s.clone()),
-            Content::Parts(parts) => {
-                let text: String = parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        qq_core::ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
-            }
-        };
+        let content = self.convert_content(&message.content, message.role);
 
         let tool_calls = if message.tool_calls.is_empty() {
             None
@@ -178,6 +181,71 @@ impl OpenAIProvider {
             name: message.name.clone(),
             tool_calls,
             tool_call_id: message.tool_call_id.clone(),
+        }
+    }
+
+    fn convert_content(&self, content: &Content, role: Role) -> Option<serde_json::Value> {
+        match content {
+            Content::Text(s) => {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::String(s.clone()))
+                }
+            }
+            Content::Parts(parts) => {
+                // Check if there are any image parts (user messages only)
+                let has_images = role == Role::User
+                    && parts.iter().any(|p| matches!(p, ContentPart::Image { .. }));
+
+                if has_images {
+                    // Emit as content array with text and image_url blocks
+                    let mut blocks = Vec::new();
+                    for part in parts {
+                        match part {
+                            ContentPart::Text { text } => {
+                                if !text.is_empty() {
+                                    blocks.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": text,
+                                    }));
+                                }
+                            }
+                            ContentPart::Image { image } => {
+                                let data_url = format!(
+                                    "data:{};base64,{}",
+                                    image.media_type, image.data
+                                );
+                                blocks.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": data_url },
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if blocks.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Array(blocks))
+                    }
+                } else {
+                    // Text-only: emit as a plain string for backward compat
+                    let text: String = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::String(text))
+                    }
+                }
+            }
         }
     }
 
@@ -219,8 +287,15 @@ impl OpenAIProvider {
             debug!("Extracted {} chars of reasoning_content from response", t.len());
         }
 
-        // Get the actual content
-        let mut content = choice.message.content.unwrap_or_default();
+        // Get the actual content (responses are always strings)
+        let mut content = choice
+            .message
+            .content
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .unwrap_or_default();
 
         // Some providers embed thinking in content with tags - extract it
         if thinking.is_none() && !content.is_empty() {
@@ -639,8 +714,9 @@ struct StreamOptions {
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenAIMessage {
     role: String,
+    /// Content can be a plain string or a content array (for images).
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     /// Reasoning/thinking content from o1/reasoning models (non-streaming response).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,

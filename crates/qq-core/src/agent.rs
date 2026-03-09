@@ -1510,10 +1510,11 @@ async fn execute_tool(
 
     match crate::tool::execute_tool_dispatch(tool, tool_call.arguments.clone()).await {
         Ok(output) => {
+            let text = output.text_content();
             let content = if output.is_error {
-                format!("Error: {}", output.content)
+                format!("Error: {}", text)
             } else {
-                output.content
+                text
             };
             truncate_tool_result(content, MAX_AGENT_TOOL_RESULT_BYTES)
         }

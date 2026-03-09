@@ -92,4 +92,6 @@ pub enum InputAction {
     WordBackward,
     /// Toggle mouse capture (for text selection)
     ToggleMouse,
+    /// Paste image from clipboard
+    PasteImage,
 }

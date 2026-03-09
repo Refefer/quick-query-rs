@@ -22,7 +22,7 @@ pub use agent::{
     AgentRunResult, AgentSender, DEFAULT_MAX_INSTANCE_BYTES,
 };
 pub use error::Error;
-pub use message::{Content, ContentPart, Message, Role, StreamChunk, ToolCall, ToolResult, Usage, strip_thinking_tags, strip_reasoning_from_history};
+pub use message::{Content, ContentPart, ImageData, IntoContent, Message, Role, StreamChunk, ToolCall, ToolResult, TypedContent, Usage, strip_thinking_tags, strip_reasoning_from_history};
 pub use provider::{
     CompletionRequest, CompletionResponse, FinishReason, Provider, StreamResult,
 };
@@ -33,6 +33,6 @@ pub use task::{
 pub use tool::{PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry, execute_tool_dispatch};
 pub use chunker::{ChunkProcessor, ChunkerConfig};
 pub use blocking::run_blocking;
-pub use observation::{ContextCompactor, ObservationalMemory, ObservationConfig, find_safe_split_point};
+pub use observation::{ContextCompactor, ObservationalMemory, ObservationConfig, find_safe_split_point, strip_images_from_messages};
 
 pub type Result<T> = std::result::Result<T, Error>;

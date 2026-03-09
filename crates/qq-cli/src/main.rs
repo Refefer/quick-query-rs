@@ -6,8 +6,8 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 use qq_agents::{ProjectManagerAgent, InternalAgent};
 use qq_core::{
-    execute_tools_parallel_with_chunker, ChunkProcessor, CompletionRequest, Message, Provider,
-    ToolRegistry,
+    execute_tools_parallel_with_chunker, ChunkProcessor, CompletionRequest, ImageData, Message,
+    Provider, ToolRegistry, TypedContent,
 };
 use qq_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
@@ -160,6 +160,10 @@ pub struct Cli {
     /// Restrict sandbox to system-only binaries (no user toolchains like cargo, node, etc.)
     #[arg(long)]
     pub agent_mode: bool,
+
+    /// Image files to include with the prompt (completion mode only, may be repeated)
+    #[arg(short = 'i', long = "image", value_name = "FILE")]
+    pub images: Vec<PathBuf>,
 
     /// Primary agent to use for interactive sessions (overrides profile)
     /// Can be any internal agent: pm, explore, researcher, coder, reviewer, summarizer, planner, writer
@@ -473,7 +477,37 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
         messages.push(Message::system(system.as_str()));
     }
 
-    messages.push(Message::user(prompt));
+    // Build user message: text prompt + optional images
+    if cli.images.is_empty() {
+        messages.push(Message::user(prompt));
+    } else {
+        const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
+
+        let mut parts: Vec<TypedContent> = Vec::with_capacity(1 + cli.images.len());
+        parts.push(TypedContent::Text { text: prompt.to_string() });
+
+        for path in &cli.images {
+            if !path.exists() {
+                anyhow::bail!("Image file not found: {}", path.display());
+            }
+            let metadata = std::fs::metadata(path)
+                .with_context(|| format!("Cannot read image file: {}", path.display()))?;
+            if metadata.len() > MAX_IMAGE_SIZE {
+                anyhow::bail!(
+                    "Image file exceeds 20 MB limit ({:.1} MB): {}",
+                    metadata.len() as f64 / (1024.0 * 1024.0),
+                    path.display()
+                );
+            }
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("Failed to read image file: {}", path.display()))?;
+            let image = ImageData::from_bytes(&bytes)
+                .with_context(|| format!("Failed to decode image: {}", path.display()))?;
+            parts.push(TypedContent::Image { image });
+        }
+
+        messages.push(Message::user(parts));
+    }
 
     // Agentic loop - keep going while LLM returns tool calls
     let max_iterations = 100;
@@ -552,20 +586,21 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
             .await;
 
             for result in results {
+                let result_text = result.text_content();
                 tracing::debug!(
                     tool_call_id = %result.tool_call_id,
-                    result_len = result.content.len(),
+                    result_len = result_text.len(),
                     is_error = result.is_error,
                     "Tool result"
                 );
                 tracing::trace!(
                     tool_call_id = %result.tool_call_id,
-                    content = %result.content,
+                    content = %result_text,
                     "Tool result content"
                 );
 
                 // Add tool result to messages
-                messages.push(Message::tool_result(&result.tool_call_id, result.content));
+                messages.push(Message::tool_result(&result.tool_call_id, result_text));
             }
 
             // Continue loop to get next response
@@ -1004,6 +1039,8 @@ struct ResolvedSettings {
     include_tool_reasoning: bool,
     /// Context window size in tokens (from config override)
     context_window: Option<u32>,
+    /// Content types this provider/model supports
+    supported_content_types: Option<Vec<String>>,
 }
 
 /// Resolve all settings from CLI args, profile, and config
@@ -1079,6 +1116,9 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
     // Resolve context window from config
     let context_window = provider_config.and_then(|p| p.context_window);
 
+    // Resolve supported content types
+    let supported_content_types = provider_config.and_then(|p| p.supported_content_types.clone());
+
     Ok(ResolvedSettings {
         profile_name,
         provider_type,
@@ -1093,6 +1133,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
             .map(|p| p.include_tool_reasoning)
             .unwrap_or(true),
         context_window,
+        supported_content_types,
     })
 }
 
@@ -1153,6 +1194,7 @@ fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result
         agent: String::new(),
         include_tool_reasoning: provider_config.include_tool_reasoning,
         context_window: provider_config.context_window,
+        supported_content_types: provider_config.supported_content_types.clone(),
     })
 }
 
@@ -1167,6 +1209,9 @@ fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn 
             if let Some(url) = &settings.base_url {
                 provider = provider.with_base_url(url);
             }
+            if let Some(types) = &settings.supported_content_types {
+                provider = provider.with_supported_content_types(types.clone());
+            }
             Ok(Box::new(provider))
         }
         "gemini" => {
@@ -1177,6 +1222,9 @@ fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn 
             }
             if let Some(url) = &settings.base_url {
                 provider = provider.with_base_url(url);
+            }
+            if let Some(types) = &settings.supported_content_types {
+                provider = provider.with_supported_content_types(types.clone());
             }
             Ok(Box::new(provider))
         }
@@ -1189,6 +1237,9 @@ fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn 
             }
             if let Some(url) = &settings.base_url {
                 provider = provider.with_base_url(url);
+            }
+            if let Some(types) = &settings.supported_content_types {
+                provider = provider.with_supported_content_types(types.clone());
             }
             Ok(Box::new(provider))
         }
