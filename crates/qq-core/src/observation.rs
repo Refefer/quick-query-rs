@@ -170,6 +170,10 @@ impl ObservationalMemory {
     }
 
     /// Check if unobserved messages exceed the message threshold.
+    ///
+    /// Uses `find_safe_split_point` to account for tool call sequences that
+    /// cannot be split. This prevents false positives where the total unobserved
+    /// bytes exceed the threshold but the safe-to-observe range does not.
     pub fn needs_observation(&self, messages: &[Message]) -> bool {
         let preserve = self.config.calculate_effective_preserve(messages, self.observation_log.len())
             .min(messages.len());
@@ -179,7 +183,13 @@ impl ObservationalMemory {
             return false;
         }
 
-        let unobserved_bytes: usize = messages[self.observed_up_to..unobserved_end]
+        // Find the actual safe range (don't break tool call sequences)
+        let safe_end = find_safe_split_point(messages, unobserved_end);
+        if safe_end <= self.observed_up_to {
+            return false;
+        }
+
+        let safe_bytes: usize = messages[self.observed_up_to..safe_end]
             .iter()
             .map(|m| m.observable_byte_count())
             .sum();
@@ -187,13 +197,14 @@ impl ObservationalMemory {
         let threshold =
             (self.config.message_threshold_bytes as f64 * self.config.hysteresis) as usize;
 
-        let triggered = unobserved_bytes > threshold;
+        let triggered = safe_bytes > threshold;
 
         tracing::info!(
             total_messages = messages.len(),
             preserve_recent = preserve,
             unobserved_range = %(format!("{}..{}", self.observed_up_to, unobserved_end)),
-            unobserved_bytes = unobserved_bytes,
+            safe_range = %(format!("{}..{}", self.observed_up_to, safe_end)),
+            safe_bytes = safe_bytes,
             threshold = threshold,
             triggered = triggered,
             "Observation check"
@@ -252,11 +263,31 @@ impl ObservationalMemory {
                 let safe_end = find_safe_split_point(messages, unobserved_end);
                 if safe_end > self.observed_up_to {
                     let to_observe = &messages[self.observed_up_to..safe_end];
+
+                    // Re-check threshold on the actual safe range — find_safe_split_point
+                    // may have shrunk the range significantly (e.g. backing up past tool
+                    // call sequences). Without this check we'd observe and drain a tiny
+                    // slice of messages (sometimes just the initial user task).
+                    let safe_bytes: usize = to_observe
+                        .iter()
+                        .map(|m| m.observable_byte_count())
+                        .sum();
+
+                    if safe_bytes <= msg_threshold {
+                        tracing::info!(
+                            safe_bytes = safe_bytes,
+                            threshold = msg_threshold,
+                            safe_end = safe_end,
+                            unobserved_end = unobserved_end,
+                            "Skipping observation: safe range too small after split point adjustment"
+                        );
+                    } else {
+
                     let stripped = strip_images_from_messages(to_observe);
 
                     tracing::info!(
                         messages_to_observe = to_observe.len(),
-                        unobserved_bytes = unobserved_bytes,
+                        safe_bytes = safe_bytes,
                         safe_split = safe_end,
                         "Starting observation pass"
                     );
@@ -293,6 +324,7 @@ impl ObservationalMemory {
                             tracing::warn!(error = %e, "Observer failed, skipping observation");
                         }
                     }
+                    } // else: safe_bytes > msg_threshold
                 }
             }
         }
@@ -882,6 +914,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Regression: when most unobserved messages are tool call sequences,
+    /// find_safe_split_point can shrink the range to just the initial user
+    /// message. Without the safe-bytes re-check, we'd observe (and drain!)
+    /// that tiny slice — losing the user's task and producing a useless
+    /// observation.
+    #[tokio::test]
+    async fn test_compact_skips_when_safe_range_below_threshold() {
+        let config = ObservationConfig {
+            message_threshold_bytes: 100,
+            observation_threshold_bytes: 100_000,
+            preserve_recent: 2,
+            hysteresis: 1.0,
+            ..Default::default()
+        };
+        let mut om = ObservationalMemory::new(config);
+
+        // Simulate an agent conversation: small user task followed by
+        // consecutive tool call sequences (assistant+tools → tool_result).
+        // Total unobserved bytes exceed threshold, but the only safe split
+        // point (before the first tool sequence) has very few bytes.
+        let mut messages = vec![
+            Message::user("short task"),                                         // ~10 bytes
+            Message::assistant_with_tool_calls(
+                "",
+                vec![ToolCall::new("tc-1", "read_file", serde_json::json!({"path": "/a"}))],
+            ),
+            Message::tool_result("tc-1", &"x".repeat(200)),                      // 200 bytes
+            Message::assistant_with_tool_calls(
+                "",
+                vec![ToolCall::new("tc-2", "read_file", serde_json::json!({"path": "/b"}))],
+            ),
+            Message::tool_result("tc-2", &"x".repeat(200)),                      // 200 bytes
+            // These two are preserved by preserve_recent = 2:
+            Message::user("follow up"),
+            Message::assistant("response"),
+        ];
+
+        let original_count = messages.len();
+
+        // The compactor should NOT be called at all
+        let compactor = TestCompactor::observe_ok("should not be called");
+        om.compact(&mut messages, &compactor).await.unwrap();
+
+        // No messages should have been drained
+        assert_eq!(messages.len(), original_count, "No messages should be drained when safe range is below threshold");
+        // No observation should have occurred
+        assert_eq!(om.observation_count, 0);
     }
 
     // --- clear() ---
