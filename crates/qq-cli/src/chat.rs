@@ -129,6 +129,13 @@ impl ChatSession {
         self.observation_memory.observation_count
     }
 
+    /// Returns true if the last message is an assistant with tool_calls (awaiting results).
+    pub fn has_pending_tool_calls(&self) -> bool {
+        self.messages
+            .last()
+            .is_some_and(|m| m.role == qq_core::Role::Assistant && !m.tool_calls.is_empty())
+    }
+
     /// Calculate total byte count of all messages plus observation log.
     pub fn total_bytes(&self) -> usize {
         let msg_bytes: usize = self.messages.iter().map(|m| m.byte_count()).sum();

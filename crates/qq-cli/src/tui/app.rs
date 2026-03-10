@@ -923,9 +923,15 @@ pub async fn run_tui(
                     let pre_obs = session.observation_count();
                     session.compact_if_needed().await;
                     if session.observation_count() > pre_obs {
-                        if let Some(ref tx) = base_msg_tx {
-                            let updated_base = session.build_messages();
-                            let _ = tx.try_send(updated_base);
+                        // Only send base update if session is "complete" — don't send
+                        // when the last message is assistant+tool_calls without results,
+                        // as the streaming task's iteration_messages would be cleared
+                        // and the tool results would be lost (race condition).
+                        if !session.has_pending_tool_calls() {
+                            if let Some(ref tx) = base_msg_tx {
+                                let updated_base = session.build_messages();
+                                let _ = tx.try_send(updated_base);
+                            }
                         }
                     }
                 }
