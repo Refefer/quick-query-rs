@@ -21,8 +21,8 @@ default_model = "gpt-4o"                # Override global default for this provi
 # Qwen3, or Claude extended thinking is kept on intermediate messages and sent
 # back to the API, then stripped after the model delivers its final answer.
 # This improves tool-call quality for reasoning models.
-# Default: true
-# include_tool_reasoning = true
+# Default: false
+# include_tool_reasoning = false
 
 # Extra parameters passed to the API (provider-specific)
 [providers.openai.parameters]
