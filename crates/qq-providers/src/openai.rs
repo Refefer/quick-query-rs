@@ -93,7 +93,7 @@ impl OpenAIProvider {
 
         let strip_images = !crate::supports_images(&self.supported_content_types);
 
-        let messages: Vec<OpenAIMessage> = request
+        let mut messages: Vec<OpenAIMessage> = request
             .messages
             .iter()
             .map(|m| {
@@ -109,6 +109,17 @@ impl OpenAIProvider {
                 }
             })
             .collect();
+
+        // Defense: remove trailing assistant+tool_calls without following tool results.
+        // This can happen due to race conditions in mid-stream compaction.
+        if let Some(last) = messages.last() {
+            if last.role == "assistant"
+                && last.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
+            {
+                warn!("Dropping orphaned trailing assistant+tool_calls from request");
+                messages.pop();
+            }
+        }
 
         let tools = if request.tools.is_empty() {
             None
