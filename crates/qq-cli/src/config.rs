@@ -169,8 +169,8 @@ pub struct ProviderConfigEntry {
     /// exchanges. When enabled, reasoning tokens from models like o1, DeepSeek-R1,
     /// and Qwen3 are kept on intermediate messages and sent back to the API, then
     /// stripped after the final answer. This improves tool-call quality for reasoning
-    /// models. Default: true
-    #[serde(default = "default_true")]
+    /// models. Default: false
+    #[serde(default)]
     pub include_tool_reasoning: bool,
 
     /// Context window size in tokens. Overrides automatic detection.

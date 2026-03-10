@@ -1131,7 +1131,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         agent,
         include_tool_reasoning: provider_config
             .map(|p| p.include_tool_reasoning)
-            .unwrap_or(true),
+            .unwrap_or(false),
         context_window,
         supported_content_types,
     })
