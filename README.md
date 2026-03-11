@@ -9,8 +9,10 @@ A fast, extensible command-line interface for interacting with Large Language Mo
 
 - **One-shot completions** — Quick, single-prompt queries for scripts or ad-hoc use
 - **Interactive chat** — Rich TUI with streaming, markdown rendering, and conversation history
-- **Agentic workflows** — 8 built-in agents (coder, researcher, planner, etc.) with automatic tool use
+- **Multimodal support** — Image input via `-i` flag for vision-capable models
+- **Agentic workflows** — 8 built-in agents (pm, coder, researcher, etc.) with automatic tool use
 - **Multi-provider** — Native support for OpenAI, Anthropic Claude, and Google Gemini, plus any OpenAI-compatible API (Ollama, vLLM, Groq, etc.)
+- **Bash sandbox** — Kernel-level isolation via hakoniwa with three-tier permission model
 - **Pure Rust** — No ncurses dependency, cross-platform, fast startup
 
 ## Quick Start
@@ -65,28 +67,34 @@ qq -A researcher -p "Best practices for error handling in Rust"
 
 # With specific profile
 qq -P coding manage
+
+# Multimodal: analyze an image
+qq -i screenshot.png -p "What errors do you see in this screenshot?"
 ```
 
 ## Built-in Agents
 
-| Agent | Purpose |
-|-------|---------|
-| **pm** | Project manager: coordinates agents, tracks tasks, ensures delivery |
-| **explore** | Filesystem exploration and discovery |
-| **researcher** | Web research and synthesis |
-| **coder** | Code generation and modification |
-| **reviewer** | Code review and analysis |
-| **summarizer** | Content summarization |
-| **planner** | Task decomposition and planning |
-| **writer** | Documentation and content creation |
+| Agent | Purpose | Read-only |
+|-------|---------|-----------|
+| **pm** | Project manager: coordinates agents, tracks tasks, ensures delivery | ❌ |
+| **explore** | Filesystem exploration and discovery | ✅ |
+| **researcher** | Web research and synthesis | ✅ |
+| **coder** | Code generation and modification | ❌ |
+| **reviewer** | Code review and security analysis | ✅ |
+| **summarizer** | Content summarization with format adaptation | ❌ |
+| **planner** | Task decomposition and implementation planning | ✅ |
+| **writer** | Documentation and content creation | ❌ |
+
+Agents can be invoked via `-A <agent-name>` or with the `@agent <task>` syntax in chat.
 
 ## CLI Reference
 
 ```
-qq [OPTIONS] [COMMAND]
+qq [OPTIONS] (COMMAND | PROMPT)
 
 Options:
   -p, --prompt <PROMPT>      Prompt for quick completion
+  -i, --image <IMAGE>        Image input for multimodal support (completion mode)
   -P, --profile <PROFILE>    Profile to use
   -m, --model <MODEL>        Model override
       --provider <PROVIDER>  Provider override
@@ -94,7 +102,11 @@ Options:
   -s, --system <SYSTEM>      System prompt override
   -t, --temperature <TEMP>   Temperature (0.0-2.0)
       --max-tokens <N>       Maximum tokens to generate
-  -A, --agent <AGENT>        Primary agent
+      --top-k <K>            Sampling top-k
+      --min-p <P>            Minimum probability threshold
+      --presence-penalty <P> Presence penalty (-2.0 to 2.0)
+      --repetition-penalty <P> Repetition penalty (0.0-2.0)
+  -A, --agent <AGENT>        Primary agent for interactive sessions
       --log-level <LEVEL>    Log level (trace, debug, info, warn, error)
   -d, --debug                Enable debug logging (shorthand for --log-level debug)
       --log-file <FILE>      Write debug log to file (JSON-lines format)
@@ -102,6 +114,7 @@ Options:
       --no-tui               Disable TUI, use readline
       --classic              Use built-in search tools instead of bash (no bash tools)
       --insecure             Allow bash tools without kernel sandbox isolation
+      --agent-mode           Restrict sandbox to system-only binaries
       --no-tools             Disable all tools
       --no-agents            Disable all agents
       --minimal              No tools, no agents
@@ -113,6 +126,179 @@ Commands:
 ```
 
 See `qq --help` for full options.
+
+## Chat Commands
+
+| Command | Aliases | Purpose |
+|---------|---------|---------|
+| `/help` | — | Show help summary |
+| `/reset` | — | Reset session and clear history |
+| `/agents` | `/a` | List available agents |
+| `/delegate` | `/d` | Delegate to specific agent |
+| `/memory` | `/mem` | Memory diagnostics and status |
+| `/debug` | — | Debug information |
+| `/clear` | — | Clear conversation history |
+| `/history` | — | Show message count |
+| `/tools` | — | List available tools |
+| `/system <msg>` | — | Override system prompt |
+| `/quit`, `/exit` | — | Exit chat session |
+
+### Quick Agent Invocation
+
+Use the `@agent` syntax for direct agent calls without `/delegate`:
+
+```
+@coder Fix the async race condition in src/main.rs
+@researcher Find best practices for Rust error handling
+@planner Plan migration from SQLite to PostgreSQL
+```
+
+## Tools
+
+Quick-Query provides a rich set of tools for agents to use. Tools are organized into categories:
+
+### Filesystem Tools
+
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Read file contents with grep filtering, line ranges, head/tail shortcuts, and automatic image detection (PNG/JPEG/GIF/WebP) |
+| `write_file` | Create or overwrite files |
+| `list_files` | Non-recursive directory listing with glob filtering |
+| `find_files` | Recursive file discovery with gitignore support |
+| `search_files` | Regex pattern search across files |
+| `replace_in_file` | Text replacement (literal or regex patterns) |
+| `insert_in_file` | Insert content at specific line positions |
+| `delete_lines` | Delete line ranges from files |
+| `replace_lines` | Replace line ranges with new content |
+| `move_file` | Move or rename files |
+| `copy_file` | Copy files to new locations |
+| `create_directory` | Create directories (recursive) |
+| `remove_file` | Delete files |
+| `remove_directory` | Delete directories |
+
+### Bash Tools
+
+| Tool | Purpose |
+|------|---------|
+| `bash` | Execute shell commands in sandboxed environment |
+| `mount_external` | Mount external directories as read-only |
+
+### Web Tools
+
+| Tool | Purpose |
+|------|---------|
+| `fetch_webpage` | Fetch and extract HTML to markdown with CSS selector support |
+| `web_search` | Web search (optional Perplexica integration) |
+
+### Other Tools
+
+| Tool | Purpose |
+|------|---------|
+| `update_preference` / `read_preference` / `list_preferences` / `delete_preference` | Persistent SQLite-backed user preference storage |
+| `process_large_data` | Chunk and summarize large tool outputs |
+| `create_task` / `update_task` / `list_tasks` | Task tracking |
+| `inform_user` | Non-blocking agent status notifications to user |
+
+## Memory Management
+
+Quick-Query implements sophisticated memory management for long-running agent sessions:
+
+### ChatSession Compaction
+
+Tiered memory compaction prevents context overflow:
+1. **LLM summary** — Summarize entire conversation using LLM
+2. **Partial compaction** — Remove middle messages while preserving recent context
+3. **Truncation** — Fallback to hard truncation if needed
+
+### Agent Memory Scoping
+
+Each agent call can have isolated memory using the `instance_id` parameter:
+- Format: `{agent}-agent:{task_id}` (e.g., `coder-agent:3`)
+- Enables parallel dispatch with separate memory contexts
+- Prevents cross-contamination between concurrent agent runs
+
+### Continuation Support
+
+Long agent runs automatically handle max_turns exhaustion:
+- **Continuation** — Resume from last state without losing progress
+- **Summarization** — Condense long execution traces before resuming
+
+### Memory Diagnostics
+
+Use `/memory` or `/mem` command to check:
+- Current memory usage
+- Compaction history
+- Token counts
+
+## Bash Sandbox
+
+Quick-Query includes a kernel-level bash sandbox for secure command execution.
+
+### Architecture
+
+The `bash` tool runs commands inside a kernel-level container using Linux user/mount/PID namespaces via [hakoniwa](https://crates.io/crates/hakoniwa):
+- Project root is mounted read-write
+- Everything else is read-only or blocked at the kernel level
+- Sandbox probe runs at startup; exits with setup instructions if unavailable
+
+### Permission Model
+
+Three-tier permission system:
+1. **Session-level** — Remember decisions for the session
+2. **Per-call** — Ask for each command execution
+3. **Restricted** — Only allow safe, read-only commands
+
+Git subcommand operations are automatically recognized and handled with special permissions.
+
+### Approval System
+
+Commands requiring permission trigger an approval prompt:
+- **TUI overlay modal** — Interactive approval in TUI mode
+- **CLI stdin prompt** — Command-line prompt (allow once / allow for session / deny)
+- Pipeline parser performs per-command checks across pipes and shell operators
+
+### Mount Management
+
+External directories can be mounted as read-only:
+- `mount_external` tool for LLM-requested directory access
+- `/mount` and `/mounts` commands to view/manage mounts
+- Mounts persist for the session duration
+
+### Sandbox Modes
+
+| Mode | Flag | Behavior |
+|------|------|----------|
+| **Default** | *(none)* | Requires working kernel sandbox. Exits if unavailable. |
+| **Classic** | `--classic` | Disables bash tools entirely. Uses built-in `list_files`, `find_files`, `search_files`. |
+| **Insecure** | `--insecure` | Allows bash without kernel isolation (simple commands only, no pipes/redirects). Not recommended for untrusted models. |
+| **Agent mode** | `--agent-mode` | Restrict sandbox to system-only binaries. |
+
+Classic and insecure modes are mutually exclusive.
+
+### AppArmor Setup (Ubuntu 24.04+ / Containers)
+
+Distributions with `apparmor_restrict_unprivileged_userns=1` block unprivileged user namespace creation. Run the setup script to create an AppArmor profile granting `qq` the `userns` permission:
+
+```bash
+sudo ./scripts/setup-apparmor.sh
+```
+
+This is common in Ubuntu 24.04+, Debian trixie, and container images based on these distros.
+
+### Platform Support
+
+| Platform | Sandbox support | Notes |
+|----------|----------------|-------|
+| Linux (native) | Full | Works out of the box on most distros. May need AppArmor setup (see above). |
+| WSL2 | Full | Real Linux kernel — user namespaces typically enabled by default. |
+| WSL1 | None | Syscall translation only, no namespace support. Use `--classic`. |
+| macOS | None | hakoniwa is Linux-only. Build with `cargo install --path crates/qq-cli --no-default-features --features native-tls` and use `--classic`. |
+
+On platforms without sandbox support, `--classic` is the recommended fallback — agents use built-in filesystem search tools instead of bash.
+
+### Sandbox Probe Caching
+
+To avoid performance overhead from repeated container spin-ups (~2.5ms each), the sandbox probe result is cached using `AtomicU8`. The cache persists for the session duration.
 
 ## Documentation
 
@@ -170,49 +356,6 @@ enable_memory = true
 enable_web = true
 ```
 
-### Bash Sandbox
-
-Agents have access to a sandboxed bash tool that runs commands inside a
-kernel-level container (Linux user/mount/PID namespaces via
-[hakoniwa](https://crates.io/crates/hakoniwa)). The project root is mounted
-read-write; everything else is read-only or blocked at the kernel level.
-
-If the sandbox probe fails at startup, `qq` exits with setup instructions
-rather than silently degrading.
-
-**Flags:**
-
-| Flag | Effect |
-|------|--------|
-| *(default)* | Requires a working kernel sandbox. Exits if unavailable. |
-| `--classic` | Disables bash tools entirely. Restores built-in `list_files`, `find_files`, and `search_files` tools. |
-| `--insecure` | Allows bash tools without kernel sandbox isolation. Simple commands only (no pipes or redirects). Not recommended for untrusted models. |
-
-The two flags are mutually exclusive.
-
-**AppArmor (Ubuntu 24.04+ / containers):**
-
-Distributions with `apparmor_restrict_unprivileged_userns=1` block unprivileged
-user namespace creation, which the sandbox requires. Run the setup script to
-create an AppArmor profile granting `qq` the `userns` permission:
-
-    sudo ./scripts/setup-apparmor.sh
-
-This is common in Ubuntu 24.04+, Debian trixie, and container images based on
-these distros.
-
-**Platform notes:**
-
-| Platform | Sandbox support | Notes |
-|----------|----------------|-------|
-| Linux (native) | Full | Works out of the box on most distros. May need AppArmor setup (see above). |
-| WSL2 | Full | Real Linux kernel — user namespaces typically enabled by default. |
-| WSL1 | None | Syscall translation only, no namespace support. Use `--classic`. |
-| macOS | None | hakoniwa is Linux-only. Build with `cargo install --path crates/qq-cli --no-default-features --features native-tls` and use `--classic`. |
-
-On platforms without sandbox support, `--classic` is the recommended fallback —
-agents use the built-in filesystem search tools instead of bash.
-
 ### Example Configurations
 
 See the [examples/](examples/) directory:
@@ -239,8 +382,7 @@ There are three ways to build `qq`, depending on how you plan to use it:
 
 #### Standard build (Linux / macOS)
 
-Uses the system TLS stack (OpenSSL on Linux, Security.framework on macOS) and
-the system CA certificate store. Requires OpenSSL dev headers on Linux.
+Uses the system TLS stack (OpenSSL on Linux, Security.framework on macOS) and the system CA certificate store. Requires OpenSSL dev headers on Linux.
 
 ```bash
 cargo install --path crates/qq-cli
@@ -248,8 +390,7 @@ cargo install --path crates/qq-cli
 
 #### macOS without sandbox
 
-The kernel sandbox is Linux-only. On macOS, disable it and use `--classic` at
-runtime for the built-in filesystem tools instead of bash.
+The kernel sandbox is Linux-only. On macOS, disable it and use `--classic` at runtime for the built-in filesystem tools instead of bash.
 
 ```bash
 cargo install --path crates/qq-cli --no-default-features --features native-tls
@@ -258,9 +399,7 @@ cargo install --path crates/qq-cli --no-default-features --features native-tls
 
 #### Static binary (Linux x86_64)
 
-Produces a single binary with **zero dynamic dependencies** — copy it to any
-Linux x86_64 machine and run it. Uses rustls (pure Rust TLS) with bundled
-Mozilla CA roots instead of OpenSSL.
+Produces a single binary with **zero dynamic dependencies** — copy it to any Linux x86_64 machine and run it. Uses rustls (pure Rust TLS) with bundled Mozilla CA roots instead of OpenSSL.
 
 ```bash
 # One-time setup
@@ -283,9 +422,7 @@ file target/x86_64-unknown-linux-musl/release/qq
 | `cargo install --path crates/qq-cli` | native-tls (OpenSSL / Security.framework) | System CA store | Yes (libc, libssl) | Linux, macOS |
 | `cargo build --release --target x86_64-unknown-linux-musl -p qq-cli --no-default-features --features static-tls` | rustls (pure Rust) | Bundled Mozilla roots | None | Linux x86_64 |
 
-Standard builds use the OS certificate store, which supports corporate CAs and
-OS-managed certificates. The static build bundles its own CA roots — ideal for
-deployment to servers and containers but won't trust custom corporate CAs.
+Standard builds use the OS certificate store, which supports corporate CAs and OS-managed certificates. The static build bundles its own CA roots — ideal for deployment to servers and containers but won't trust custom corporate CAs.
 
 #### Development
 
@@ -320,5 +457,9 @@ MIT License — see [LICENSE](LICENSE) for details.
 | `Kernel sandbox unavailable` at startup | Run `sudo ./scripts/setup-apparmor.sh` (AppArmor), or use `--classic` / `--insecure` |
 | `Kernel sandbox unavailable` on macOS | Build with `--no-default-features --features native-tls` and run with `--classic` |
 | `Kernel sandbox unavailable` on WSL1 | Use `--classic` (WSL2 works out of the box) |
+| Permission denied for bash tools | Check three-tier permission model; use TUI overlay or CLI prompt to allow. Run with `--insecure` to bypass sandbox (not recommended). |
+| Mount management issues | Use `/mounts` command to view current mounts. External directories must be mounted via `mount_external` tool before access. |
+| Image input fails | Ensure image is PNG/JPEG/GIF/WebP and under 20MB. Use `-i <image> -p "prompt"` in completion mode only. |
+| Agent memory conflicts | Use `instance_id` parameter for isolation: `{agent}-agent:{task_id}` format. Check `/memory` for diagnostics. |
 
 For more issues, see [GitHub Issues](https://github.com/andrew/quick-query-rs/issues).
