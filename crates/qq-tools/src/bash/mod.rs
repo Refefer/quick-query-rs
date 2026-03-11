@@ -3,23 +3,27 @@
 //! Provides kernel-level process isolation via hakoniwa (Linux) with
 //! graceful fallback to app-level sandboxing on other platforms.
 
+pub mod network_access;
 pub mod mounts;
 pub mod parse;
 pub mod permissions;
 pub mod sandbox;
+pub mod sensitive_access;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
 
+pub use network_access::RequestNetworkAccessTool;
 pub use mounts::{MountExternalTool, MountPoint, SandboxMounts};
 pub use permissions::{
     create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse,
     PermissionStore, Tier,
 };
 pub use sandbox::{SandboxExecutor, SandboxPathPolicy};
+pub use sensitive_access::RequestSensitiveAccessTool;
 
 /// Default command timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -33,7 +37,7 @@ pub struct BashTool {
     permissions: Arc<PermissionStore>,
     approval: ApprovalChannel,
     executor: SandboxExecutor,
-    path_policy: SandboxPathPolicy,
+    path_policy: Arc<RwLock<SandboxPathPolicy>>,
     tool_desc: String,
     timeout_secs: u64,
     max_output_bytes: usize,
@@ -53,7 +57,7 @@ impl BashTool {
         mounts: Arc<SandboxMounts>,
         permissions: Arc<PermissionStore>,
         approval: ApprovalChannel,
-        path_policy: SandboxPathPolicy,
+        path_policy: Arc<RwLock<SandboxPathPolicy>>,
     ) -> Self {
         let executor = SandboxExecutor::detect();
         let tool_desc = build_tool_description(&mounts, &executor);
@@ -140,6 +144,21 @@ impl Tool for BashTool {
             Err(e) => return Ok(ToolOutput::error(format!("Failed to parse command: {}", e))),
         };
 
+        // 1a. Reject Snap binaries up front — they cannot run inside the kernel
+        //     sandbox because Snap relies on cgroup/profile management that
+        //     breaks inside user namespaces (exit code 46).
+        if let Some(first_cmd) = commands.first() {
+            if is_snap_binary(first_cmd) {
+                return Ok(ToolOutput::error(format!(
+                    "'{}' is a Snap package and cannot run inside the qq sandbox due to \
+                     Snap daemon restrictions (user namespaces break Snap's cgroup/profile \
+                     management). Install it via apt instead: \
+                     `sudo apt install {}`, then restart qq.",
+                    first_cmd, first_cmd
+                )));
+            }
+        }
+
         // 2. Check permissions
         match self.permissions.check_pipeline(&commands) {
             permissions::PipelinePermission::Restricted(cmds) => {
@@ -193,7 +212,11 @@ impl Tool for BashTool {
         }
 
         // 4. Execute in sandbox
-        let result = match self.executor.execute(command, &self.mounts, timeout, &self.path_policy).await {
+        let path_policy = match self.path_policy.read() {
+            Ok(p) => p.clone(),
+            Err(_) => return Ok(ToolOutput::error("Path policy lock poisoned.")),
+        };
+        let result = match self.executor.execute(command, &self.mounts, timeout, &path_policy).await {
             Ok(result) => result,
             Err(e) => return Ok(ToolOutput::error(format!("Execution failed: {}", e))),
         };
@@ -259,6 +282,48 @@ fn format_output(result: sandbox::CommandResult, max_bytes: usize) -> ToolOutput
     }
 }
 
+/// Check whether a command name resolves to a Snap-managed binary.
+///
+/// Snap binaries cannot run inside the kernel sandbox because Snap's daemon
+/// relies on cgroup detection and profile management that breaks under user
+/// namespaces, causing exit code 46 ("timeout waiting for snap system profiles").
+///
+/// The check runs `which` in the *host* environment (outside the sandbox) so it
+/// has full PATH access. If `which` fails or the binary is not found the
+/// function returns `false`, leaving normal execution to handle the error.
+fn is_snap_binary(cmd_name: &str) -> bool {
+    // Only check simple command names — skip paths and shell builtins
+    if cmd_name.is_empty() || cmd_name.contains('/') {
+        return false;
+    }
+
+    let output = match std::process::Command::new("which").arg(cmd_name).output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout);
+    let path = path.trim();
+
+    // Snap binaries installed under /snap/bin/ or /snap/<pkg>/current/...
+    if path.starts_with("/snap/") {
+        return true;
+    }
+
+    // Some distros place a symlink pointing at /usr/bin/snap or another snap path.
+    if let Ok(target) = std::fs::read_link(path) {
+        if target.to_string_lossy().contains("/snap") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Build the dynamic tool description based on current mounts and sandbox mode.
 fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) -> String {
     let mode = executor.mode_name();
@@ -300,8 +365,11 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
         Permission tiers:\n\
         - Session (run immediately): ls, cat, grep, find, git log, git diff, cargo build, cargo test, npm test, etc.\n\
         - Per-call (requires user approval): cargo run, npm install, git commit, rm, mv, python, etc.\n\
-        - Restricted (always blocked): sudo, curl, wget, ssh, dd, kill, etc.\n\n\
-        Network access is blocked. Commands execute with a 30-second default timeout.\n\n\
+        - Restricted (blocked by default): sudo, dd, kill, iptables, etc.\n\
+        - Network transfer (curl, wget, ssh, etc.) requires per-call approval — use request_network_access first.\n\n\
+        Network access is not available by default — use request_network_access tool to request permission. \
+If you have trouble connecting, check that you have requested network access first. \
+Commands execute with a 30-second default timeout.\n\n\
         Examples:\n\
         - List files: ls -la src/\n\
         - Search code: grep -rn 'TODO' src/ | sort\n\
@@ -315,20 +383,28 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
 }
 
 /// Create bash tools for registration in a tool registry.
+///
+/// Returns `bash`, `mount_external`, `request_network_access`, and
+/// `request_sensitive_access` as a bundle. The `path_policy` is wrapped in an
+/// `Arc<RwLock<>>` shared between `BashTool` and `RequestSensitiveAccessTool`
+/// so that approved sensitive-directory access takes effect immediately.
 pub fn create_bash_tools(
     mounts: Arc<SandboxMounts>,
     permissions: Arc<PermissionStore>,
     approval: ApprovalChannel,
     path_policy: SandboxPathPolicy,
 ) -> Vec<Arc<dyn Tool>> {
+    let path_policy = Arc::new(RwLock::new(path_policy));
     let bash = Arc::new(BashTool::new(
         Arc::clone(&mounts),
         Arc::clone(&permissions),
         approval.clone(),
-        path_policy,
+        Arc::clone(&path_policy),
     ));
-    let mount_ext = Arc::new(MountExternalTool::new(mounts, approval));
-    vec![bash, mount_ext]
+    let mount_ext = Arc::new(MountExternalTool::new(mounts, approval.clone()));
+    let network = Arc::new(RequestNetworkAccessTool::new(approval.clone()));
+    let sensitive = Arc::new(RequestSensitiveAccessTool::new(path_policy, approval));
+    vec![bash, mount_ext, network, sensitive]
 }
 
 #[cfg(test)]

@@ -54,7 +54,7 @@ pub struct SandboxPathPolicy {
 const SYSTEM_MOUNT_PREFIXES: &[&str] = &["/bin", "/usr", "/lib", "/lib64", "/lib32", "/etc", "/sbin"];
 
 /// Directory names under $HOME to hide behind empty tmpfs mounts.
-const SENSITIVE_DIR_NAMES: &[&str] = &[
+pub const SENSITIVE_DIR_NAMES: &[&str] = &[
     ".ssh", ".gnupg", ".gpg", ".aws", ".kube",
     ".docker", ".password-store", ".netrc",
 ];
@@ -79,8 +79,14 @@ impl SandboxPathPolicy {
     /// Build from the host environment: mount $HOME RO, forward all env vars,
     /// and hide sensitive directories behind empty tmpfs mounts.
     ///
+    /// `allowed_sensitive_dirs` is a list of directory names (e.g. `[".ssh", ".aws"]`)
+    /// that should **not** be hidden — they are excluded from the tmpfs overlay so they
+    /// remain accessible from the first bash command without any tool call or approval.
+    /// Names that are not in `SENSITIVE_DIR_NAMES` are silently ignored (they were never
+    /// going to be hidden anyway).
+    ///
     /// Falls back to `system_only()` if `$HOME` or `$PATH` is unset/empty/invalid.
-    pub fn from_host_env() -> Self {
+    pub fn from_host_env(allowed_sensitive_dirs: &[String]) -> Self {
         let home = match std::env::var("HOME") {
             Ok(h) if !h.is_empty() && Path::new(&h).is_dir() => PathBuf::from(h),
             _ => return Self::system_only(),
@@ -129,9 +135,10 @@ impl SandboxPathPolicy {
             }
         }
 
-        // tmpfs_mounts: sensitive dirs that exist under $HOME
+        // tmpfs_mounts: sensitive dirs that exist under $HOME, minus pre-approved ones
         let tmpfs_mounts: Vec<PathBuf> = SENSITIVE_DIR_NAMES
             .iter()
+            .filter(|name| !allowed_sensitive_dirs.iter().any(|a| a == *name))
             .map(|name| home.join(name))
             .filter(|p| p.exists())
             .collect();
@@ -672,7 +679,7 @@ mod tests {
     fn test_path_policy_from_host_env() {
         // from_host_env reads $HOME and $PATH which are set in test processes;
         // just verify it returns a valid struct without panicking
-        let policy = SandboxPathPolicy::from_host_env();
+        let policy = SandboxPathPolicy::from_host_env(&[]);
         assert!(!policy.path_value.is_empty());
         // All ro_mounts should be non-system
         for dir in &policy.ro_mounts {
@@ -851,7 +858,7 @@ mod tests {
                 }
             };
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let policy = SandboxPathPolicy::from_host_env();
+            let policy = SandboxPathPolicy::from_host_env(&[]);
             // Should be able to list the home directory contents
             let cmd = format!("ls -d {}", home);
             let result = execute_kernel(&cmd, &mounts, 10, &policy).unwrap();
@@ -878,7 +885,7 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let policy = SandboxPathPolicy::from_host_env();
+            let policy = SandboxPathPolicy::from_host_env(&[]);
             // .ssh should be empty (hidden by tmpfs)
             let cmd = format!("ls -A {}/.ssh 2>&1", home);
             let result = execute_kernel(&cmd, &mounts, 10, &policy).unwrap();

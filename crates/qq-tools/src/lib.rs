@@ -16,8 +16,9 @@ pub mod web;
 
 pub use approval::{create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse};
 pub use bash::{
-    create_bash_tools, BashTool, MountExternalTool, MountPoint, PermissionStore, SandboxExecutor,
-    SandboxMounts, SandboxPathPolicy,
+    create_bash_tools, BashTool, MountExternalTool, MountPoint, PermissionStore,
+    RequestNetworkAccessTool, RequestSensitiveAccessTool, SandboxExecutor, SandboxMounts,
+    SandboxPathPolicy,
 };
 pub use filesystem::{create_filesystem_tools, create_filesystem_tools_arc, FileSystemConfig, FileWritePermissions};
 pub use memory::{create_preference_tools, create_preference_tools_arc, MemoryStore};
