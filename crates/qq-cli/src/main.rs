@@ -421,7 +421,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
         let path_policy = if agent_mode {
             qq_tools::SandboxPathPolicy::system_only()
         } else {
-            qq_tools::SandboxPathPolicy::from_host_env()
+            qq_tools::SandboxPathPolicy::from_host_env(&config.tools.bash_sensitive_dirs)
         };
 
         for tool in qq_tools::create_bash_tools(

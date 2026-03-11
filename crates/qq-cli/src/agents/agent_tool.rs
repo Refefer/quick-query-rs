@@ -504,7 +504,7 @@ impl Tool for InternalAgentTool {
 
         let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
 
-        // Auto-inject bash + mount_external unless disabled via config
+        // Auto-inject bash + mount_external + access-request tools unless disabled via config
         let no_bash = self.external_agents.get_builtin_no_bash(self.agent.name());
         if !no_bash && !tool_names.is_empty() {
             if !tool_names.iter().any(|n| n == "bash") {
@@ -512,6 +512,12 @@ impl Tool for InternalAgentTool {
             }
             if !tool_names.iter().any(|n| n == "mount_external") {
                 tool_names.push("mount_external".to_string());
+            }
+            if !tool_names.iter().any(|n| n == "request_network_access") {
+                tool_names.push("request_network_access".to_string());
+            }
+            if !tool_names.iter().any(|n| n == "request_sensitive_access") {
+                tool_names.push("request_sensitive_access".to_string());
             }
         }
 
@@ -674,13 +680,19 @@ impl Tool for ExternalAgentTool {
 
         let mut tool_names = self.agent_def.tools.clone();
 
-        // Auto-inject bash + mount_external unless disabled via config
+        // Auto-inject bash + mount_external + access-request tools unless disabled via config
         if !self.agent_def.no_bash && !tool_names.is_empty() {
             if !tool_names.iter().any(|n| n == "bash") {
                 tool_names.push("bash".to_string());
             }
             if !tool_names.iter().any(|n| n == "mount_external") {
                 tool_names.push("mount_external".to_string());
+            }
+            if !tool_names.iter().any(|n| n == "request_network_access") {
+                tool_names.push("request_network_access".to_string());
+            }
+            if !tool_names.iter().any(|n| n == "request_sensitive_access") {
+                tool_names.push("request_sensitive_access".to_string());
             }
         }
 

@@ -229,7 +229,10 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
             "### Bash Access\n\
              You have sandboxed bash access. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
              run without approval. Write commands (cargo build, git commit, npm install, rm, etc.) require user approval.\n\
-             Network access is blocked.\n\
+             Network access is blocked by default — call the `request_network_access` tool before running\n\
+             any bash command that needs the internet (curl, wget, git clone, npm install from remote, etc.).\n\
+             Sensitive home directories (.ssh, .aws, .kube, .docker, etc.) are hidden by default — call\n\
+             `request_sensitive_access` before running tools that need stored credentials (gh, kubectl, docker, aws, etc.).\n\
              \n\
              ### /tmp Scratch Space\n\
              /tmp is a writable scratch space shared across all your tools in this session. **Use it liberally\n\

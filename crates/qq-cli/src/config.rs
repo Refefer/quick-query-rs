@@ -234,6 +234,21 @@ pub struct ToolsConfigEntry {
     /// Require per-call user approval for filesystem write operations
     #[serde(default = "default_true")]
     pub require_write_approval: bool,
+
+    /// Sensitive directories to pre-approve for bash sandbox access.
+    ///
+    /// By default, directories like `.ssh`, `.aws`, `.gnupg`, etc. are hidden
+    /// inside the sandbox with empty tmpfs mounts. Any directory listed here
+    /// will be excluded from that hiding — it will be accessible from the first
+    /// bash command with no tool call or user approval needed.
+    ///
+    /// Valid names: ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker",
+    /// ".password-store", ".netrc" (anything else is silently ignored since
+    /// it was never hidden in the first place).
+    ///
+    /// Example: bash_sensitive_dirs = [".ssh", ".aws"]
+    #[serde(default)]
+    pub bash_sensitive_dirs: Vec<String>,
 }
 
 /// Web search (Perplexica) configuration
@@ -341,6 +356,7 @@ impl Default for ToolsConfigEntry {
             bash_mounts: Vec::new(),
             bash_permissions: None,
             require_write_approval: true,
+            bash_sensitive_dirs: Vec::new(),
         }
     }
 }

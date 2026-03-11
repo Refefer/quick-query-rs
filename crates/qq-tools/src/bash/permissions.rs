@@ -55,7 +55,7 @@ impl PermissionStore {
             return tier;
         }
 
-        // 2. Session promotions
+        // 2. Session promotions (highest runtime tier)
         if let Ok(promoted) = self.session_promoted.read() {
             if promoted.contains(command) {
                 return Tier::Session;
@@ -162,6 +162,8 @@ const SESSION_COMMANDS: &[&str] = &[
 ];
 
 const PER_CALL_COMMANDS: &[&str] = &[
+    // Network transfer (requires per-call approval)
+    "curl", "wget", "nc", "ncat", "socat", "ssh", "scp", "rsync", "ftp",
     // Git write operations
     "git-commit", "git-add", "git-checkout", "git-switch", "git-merge",
     "git-rebase", "git-stash", "git-stash-push", "git-stash-pop",
@@ -212,14 +214,11 @@ const RESTRICTED_COMMANDS: &[&str] = &[
     "shutdown", "reboot", "halt", "poweroff", "init", "systemctl",
     // Process control (could affect host)
     "kill", "killall", "pkill",
-    // Network
+    // Network configuration
     "iptables", "ip", "ifconfig", "route", "tc",
-    // Network transfer
-    "curl", "wget", "nc", "ncat", "socat", "ssh", "scp", "rsync", "ftp",
     // User management
     "chown", "chgrp", "useradd", "userdel", "passwd", "usermod", "groupadd",
 ];
-
 
 /// Parse config-level permission overrides into a tier map.
 pub fn parse_config_overrides(
@@ -268,15 +267,20 @@ mod tests {
         assert_eq!(s.check_tier("git-commit"), Tier::PerCall);
         assert_eq!(s.check_tier("python"), Tier::PerCall);
         assert_eq!(s.check_tier("npm-install"), Tier::PerCall);
+        // Network transfer commands are per-call (not restricted)
+        assert_eq!(s.check_tier("curl"), Tier::PerCall);
+        assert_eq!(s.check_tier("wget"), Tier::PerCall);
+        assert_eq!(s.check_tier("ssh"), Tier::PerCall);
+        assert_eq!(s.check_tier("rsync"), Tier::PerCall);
     }
 
     #[test]
     fn test_restricted_commands() {
         let s = store();
         assert_eq!(s.check_tier("sudo"), Tier::Restricted);
-        assert_eq!(s.check_tier("curl"), Tier::Restricted);
-        assert_eq!(s.check_tier("ssh"), Tier::Restricted);
         assert_eq!(s.check_tier("dd"), Tier::Restricted);
+        assert_eq!(s.check_tier("kill"), Tier::Restricted);
+        assert_eq!(s.check_tier("iptables"), Tier::Restricted);
     }
 
     #[test]

@@ -112,26 +112,17 @@ impl OpenAIProvider {
 
         // Defense: remove trailing assistant+tool_calls without following tool results.
         // This can happen due to race conditions in mid-stream compaction.
-        if let Some(last) = messages.last() {
-            if last.role == "assistant"
-                && last.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
-            {
+        if let Some(OpenAIMessage::ToolCallOnly { .. }) = messages.last() {
+            warn!("Dropping orphaned trailing assistant+tool_calls from request");
+            messages.pop();
+        }
+        // Also drop WithContent assistant messages that have tool_calls but no following results.
+        if let Some(OpenAIMessage::WithContent { role, tool_calls, .. }) = messages.last() {
+            if role == "assistant" && !tool_calls.is_empty() {
                 warn!("Dropping orphaned trailing assistant+tool_calls from request");
                 messages.pop();
             }
         }
-
-        let tools = if request.tools.is_empty() {
-            None
-        } else {
-            Some(
-                request
-                    .tools
-                    .iter()
-                    .map(|t| self.convert_tool(t))
-                    .collect(),
-            )
-        };
 
         OpenAIChatRequest {
             model,
@@ -143,12 +134,10 @@ impl OpenAIProvider {
             min_p: request.min_p,
             presence_penalty: request.presence_penalty,
             frequency_penalty: request.repetition_penalty,
-            stream: Some(request.stream),
-            tools,
+            tools: request.tools.iter().map(|t| self.convert_tool(t)).collect(),
+            stream: request.stream,
             stream_options: if request.stream {
-                Some(StreamOptions {
-                    include_usage: true,
-                })
+                Some(StreamOptions { include_usage: true })
             } else {
                 None
             },
@@ -164,28 +153,35 @@ impl OpenAIProvider {
             Role::Tool => "tool",
         };
 
-        let content = self.convert_content(&message.content, message.role);
+        let content = self.convert_content(&message.content);
 
-        let tool_calls = if message.tool_calls.is_empty() {
-            None
-        } else {
-            Some(
-                message
-                    .tool_calls
-                    .iter()
-                    .map(|tc| OpenAIToolCall {
-                        id: tc.id.clone(),
-                        r#type: "function".to_string(),
-                        function: OpenAIFunctionCall {
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.to_string(),
-                        },
-                    })
-                    .collect(),
-            )
-        };
+        let tool_calls: Vec<OpenAIToolCall> = message
+            .tool_calls
+            .iter()
+            .map(|tc| OpenAIToolCall {
+                id: tc.id.clone(),
+                r#type: "function".to_string(),
+                function: OpenAIFunctionCall {
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.to_string(),
+                },
+            })
+            .collect();
 
-        OpenAIMessage {
+        // Assistant with tool_calls and empty content → ToolCallOnly (content field omitted)
+        if message.role == Role::Assistant
+            && !tool_calls.is_empty()
+            && matches!(&content, OpenAIContent::Text(s) if s.is_empty())
+        {
+            return OpenAIMessage::ToolCallOnly {
+                role: role.to_string(),
+                reasoning_content: message.reasoning_content.clone(),
+                tool_calls,
+            };
+        }
+
+        // All other messages → WithContent (content field always present)
+        OpenAIMessage::WithContent {
             role: role.to_string(),
             content,
             reasoning_content: message.reasoning_content.clone(),
@@ -195,67 +191,25 @@ impl OpenAIProvider {
         }
     }
 
-    fn convert_content(&self, content: &Content, role: Role) -> Option<serde_json::Value> {
+    fn convert_content(&self, content: &Content) -> OpenAIContent {
         match content {
-            Content::Text(s) => {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::Value::String(s.clone()))
-                }
-            }
+            Content::Text(s) => OpenAIContent::Text(s.clone()),
             Content::Parts(parts) => {
-                // Check if there are any image parts (user messages only)
-                let has_images = role == Role::User
-                    && parts.iter().any(|p| matches!(p, ContentPart::Image { .. }));
-
-                if has_images {
-                    // Emit as content array with text and image_url blocks
-                    let mut blocks = Vec::new();
-                    for part in parts {
-                        match part {
-                            ContentPart::Text { text } => {
-                                if !text.is_empty() {
-                                    blocks.push(serde_json::json!({
-                                        "type": "text",
-                                        "text": text,
-                                    }));
-                                }
-                            }
-                            ContentPart::Image { image } => {
-                                let data_url = format!(
-                                    "data:{};base64,{}",
-                                    image.media_type, image.data
-                                );
-                                blocks.push(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": { "url": data_url },
-                                }));
-                            }
-                            _ => {}
+                let blocks: Vec<OpenAIContentBlock> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } if !text.is_empty() => {
+                            Some(OpenAIContentBlock::Text { text: text.clone() })
                         }
-                    }
-                    if blocks.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::Array(blocks))
-                    }
-                } else {
-                    // Text-only: emit as a plain string for backward compat
-                    let text: String = parts
-                        .iter()
-                        .filter_map(|p| match p {
-                            ContentPart::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::String(text))
-                    }
-                }
+                        ContentPart::Image { image } => Some(OpenAIContentBlock::ImageUrl {
+                            image_url: OpenAIImageUrl {
+                                url: format!("data:{};base64,{}", image.media_type, image.data),
+                            },
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                OpenAIContent::Array(blocks)
             }
         }
     }
@@ -281,7 +235,6 @@ impl OpenAIProvider {
         let tool_calls: Vec<ToolCall> = choice
             .message
             .tool_calls
-            .unwrap_or_default()
             .into_iter()
             .map(|tc| {
                 ToolCall::new(
@@ -298,15 +251,7 @@ impl OpenAIProvider {
             debug!("Extracted {} chars of reasoning_content from response", t.len());
         }
 
-        // Get the actual content (responses are always strings)
-        let mut content = choice
-            .message
-            .content
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let mut content = choice.message.content.unwrap_or_default();
 
         // Some providers embed thinking in content with tags - extract it
         if thinking.is_none() && !content.is_empty() {
@@ -374,7 +319,7 @@ impl Provider for OpenAIProvider {
         debug!(
             model = ?api_request.model,
             message_count = api_request.messages.len(),
-            has_tools = api_request.tools.is_some(),
+            has_tools = !api_request.tools.is_empty(),
             "LLM request"
         );
         trace!(request = %serde_json::to_string(&api_request).unwrap_or_default(), "LLM request payload");
@@ -430,7 +375,7 @@ impl Provider for OpenAIProvider {
         debug!(
             model = ?api_request.model,
             message_count = api_request.messages.len(),
-            has_tools = api_request.tools.is_some(),
+            has_tools = !api_request.tools.is_empty(),
             "LLM stream request"
         );
         trace!(request = %serde_json::to_string(&api_request).unwrap_or_default(), "LLM stream request payload");
@@ -682,6 +627,69 @@ pub async fn probe_context_window(
 
 // OpenAI API types
 
+/// A single block in an outgoing content array.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAIContentBlock {
+    Text { text: String },
+    ImageUrl { image_url: OpenAIImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIImageUrl {
+    url: String,
+}
+
+/// Content for outgoing (request) messages. Either a plain string or an array
+/// of content blocks (text + image_url). Always present for non-assistant roles.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum OpenAIContent {
+    Text(String),
+    Array(Vec<OpenAIContentBlock>),
+}
+
+/// Outgoing message (request serialization only).
+///
+/// Two variants:
+/// - `WithContent`: system/user/tool messages and assistant messages that have
+///   text content (possibly alongside tool_calls). Content is always present.
+/// - `ToolCallOnly`: assistant-only variant when there is no text content but
+///   there are tool_calls. Omitting content here is valid per the OpenAI spec.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum OpenAIMessage {
+    WithContent {
+        role: String,
+        content: OpenAIContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<OpenAIToolCall>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+    },
+    ToolCallOnly {
+        role: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
+        tool_calls: Vec<OpenAIToolCall>,
+    },
+}
+
+/// Incoming message (response deserialization only).
+#[derive(Debug, Deserialize)]
+struct OpenAIResponseMessage {
+    /// Null when the model only wants to call tools.
+    content: Option<String>,
+    reasoning_content: Option<String>,
+    /// Empty when not a tool call response.
+    #[serde(default)]
+    tool_calls: Vec<OpenAIToolCall>,
+}
+
 #[derive(Debug, Serialize)]
 struct OpenAIChatRequest {
     /// Model to use. Optional for servers that have a default model.
@@ -706,10 +714,13 @@ struct OpenAIChatRequest {
     /// Frequency penalty - mapped from repetition_penalty (OpenAI uses -2.0 to 2.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     frequency_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<OpenAITool>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAITool>,
+    stream: bool,
+    /// Always `Some` when `stream` is `true`, always `None` when `false`.
+    /// Two fields rather than one enum because the OpenAI wire format requires
+    /// them as separate top-level keys, and serde has no way to flatten an
+    /// enum into sibling fields without a custom serializer.
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
     /// Extra parameters (reasoning_effort, chat_template_kwargs, etc.)
@@ -722,22 +733,6 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct OpenAIMessage {
-    role: String,
-    /// Content can be a plain string or a content array (for images).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<serde_json::Value>,
-    /// Reasoning/thinking content from o1/reasoning models (non-streaming response).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<OpenAIToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenAIToolCall {
@@ -774,7 +769,7 @@ struct OpenAIChatResponse {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIChoice {
-    message: OpenAIMessage,
+    message: OpenAIResponseMessage,
     finish_reason: Option<String>,
 }
 
@@ -847,7 +842,9 @@ mod tests {
 
         assert_eq!(api_request.model, Some("test-model".to_string()));
         assert_eq!(api_request.messages.len(), 1);
-        assert_eq!(api_request.messages[0].role, "user");
+        let json = serde_json::to_value(&api_request.messages[0]).unwrap();
+        assert_eq!(json["role"], "user");
+        assert_eq!(json["content"], "Hello");
     }
 
     #[test]
@@ -858,5 +855,77 @@ mod tests {
 
         // No model configured - field should be None (skipped in serialization)
         assert_eq!(api_request.model, None);
+    }
+
+    #[test]
+    fn test_tool_message_empty_content_serializes_content_field() {
+        let provider = OpenAIProvider::new("test-key");
+        let msg = Message::tool_result("call-id", "");
+        let converted = provider.convert_message(&msg);
+        let json = serde_json::to_value(&converted).unwrap();
+        assert_eq!(json["role"], "tool");
+        // content key must be present even for empty string
+        assert!(json.get("content").is_some(), "content field must be present for tool messages");
+        assert_eq!(json["content"], "");
+    }
+
+    #[test]
+    fn test_user_message_empty_content_serializes_content_field() {
+        let provider = OpenAIProvider::new("test-key");
+        let msg = Message::user("");
+        let converted = provider.convert_message(&msg);
+        let json = serde_json::to_value(&converted).unwrap();
+        assert_eq!(json["role"], "user");
+        assert!(json.get("content").is_some(), "content field must be present for user messages");
+        assert_eq!(json["content"], "");
+    }
+
+    #[test]
+    fn test_assistant_tool_calls_omits_content() {
+        let provider = OpenAIProvider::new("test-key");
+        let tc = ToolCall::new("id1", "my_tool", serde_json::json!({"key": "val"}));
+        let msg = Message::assistant_with_tool_calls("", vec![tc]);
+        let converted = provider.convert_message(&msg);
+        let json = serde_json::to_value(&converted).unwrap();
+        assert_eq!(json["role"], "assistant");
+        // Empty-content assistant+tool_calls → ToolCallOnly: no content key
+        assert!(json.get("content").is_none(), "content field must be absent for ToolCallOnly");
+        assert!(json.get("tool_calls").is_some(), "tool_calls must be present");
+    }
+
+    #[test]
+    fn test_assistant_with_content_and_tool_calls_includes_both() {
+        let provider = OpenAIProvider::new("test-key");
+        let tc = ToolCall::new("id1", "my_tool", serde_json::json!({}));
+        let msg = Message::assistant_with_tool_calls("thinking...", vec![tc]);
+        let converted = provider.convert_message(&msg);
+        let json = serde_json::to_value(&converted).unwrap();
+        assert_eq!(json["role"], "assistant");
+        assert_eq!(json["content"], "thinking...");
+        assert!(json.get("tool_calls").is_some(), "tool_calls must be present");
+    }
+
+    #[test]
+    fn test_non_assistant_messages_always_have_content_key() {
+        let provider = OpenAIProvider::new("test-key");
+        let messages = vec![
+            Message::system("You are helpful."),
+            Message::user("Hi"),
+            Message::user(""),  // empty user message
+            Message::tool_result("id1", "result text"),
+            Message::tool_result("id2", ""),  // empty tool result
+        ];
+        let request = CompletionRequest::new(messages);
+        let api_request = provider.build_request(&request);
+        let json = serde_json::to_value(&api_request).unwrap();
+        for msg in json["messages"].as_array().unwrap() {
+            let role = msg["role"].as_str().unwrap();
+            if role != "assistant" {
+                assert!(
+                    msg.get("content").is_some(),
+                    "non-assistant message with role={role} is missing content key: {msg}"
+                );
+            }
+        }
     }
 }
