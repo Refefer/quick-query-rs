@@ -684,6 +684,7 @@ enum OpenAIMessage {
 struct OpenAIResponseMessage {
     /// Null when the model only wants to call tools.
     content: Option<String>,
+    #[serde(alias = "reasoning")]
     reasoning_content: Option<String>,
     /// Empty when not a tool call response.
     #[serde(default)]
@@ -798,6 +799,7 @@ struct OpenAIStreamChoice {
 struct OpenAIStreamDelta {
     content: Option<String>,
     /// Reasoning/thinking content from o1/reasoning models
+    #[serde(alias = "reasoning")]
     reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAIStreamToolCall>>,
 }
