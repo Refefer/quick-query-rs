@@ -149,12 +149,8 @@ pub struct Cli {
     #[arg(long)]
     pub no_tui: bool,
 
-    /// Use built-in filesystem tools for search instead of bash (no bash tools)
-    #[arg(long, conflicts_with = "insecure")]
-    pub classic: bool,
-
-    /// Allow bash tools without kernel sandbox isolation
-    #[arg(long, conflicts_with = "classic")]
+    /// Allow shell commands without kernel sandbox isolation
+    #[arg(long)]
     pub insecure: bool,
 
     /// Restrict sandbox to system-only binaries (no user toolchains like cargo, node, etc.)
@@ -266,37 +262,25 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Resources created by bash tool setup, passed to TUI/CLI for approval handling.
-struct BashResources {
+/// Resources created by run tool setup, passed to TUI/CLI for approval handling.
+struct RunResources {
     mounts: Arc<qq_tools::SandboxMounts>,
     permissions: Arc<qq_tools::PermissionStore>,
 }
 
 /// Build tools registry from config.
-///
-/// Bash tool modes:
-/// - Default: requires kernel sandbox, exits if unavailable
-/// - `--classic`: no bash tools, built-in search tools instead
-/// - `--insecure`: bash tools without kernel sandbox
-fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mode: bool) -> Result<(ToolRegistry, Option<BashResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
+fn build_tools_registry(config: &Config, insecure: bool, agent_mode: bool) -> Result<(ToolRegistry, Option<RunResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
     // Resolve root directory: config > $PWD
     let root = config.tools.root.as_ref()
         .map(|s| expand_path(s))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Resolve memory db: config > default
-    let memory_db = config.tools.memory_db.as_ref()
-        .map(|s| expand_path(s))
-        .or_else(|| Config::config_dir().ok().map(|d| d.join("memory.db")));
-
     let mut registry = ToolRegistry::new();
 
-    // Determine whether bash tools will be available
-    // --classic disables bash entirely; otherwise respect config
-    let use_bash = !classic && config.tools.enable_bash;
+    let use_run = config.tools.enable_bash;
 
-    // If bash is requested (not classic, config enabled), verify sandbox unless --insecure
-    if use_bash && !insecure {
+    // If run is requested, verify sandbox unless --insecure
+    if use_run && !insecure {
         let executor = qq_tools::SandboxExecutor::detect();
         if !executor.supports_shell() {
             if is_apparmor_restricting_userns() {
@@ -304,25 +288,22 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
                     "Kernel sandbox unavailable — AppArmor is restricting user namespaces.\n\n\
                      To fix, run:  sudo ./scripts/setup-apparmor.sh\n\n\
                      Alternatively:\n  \
-                     --classic   Use built-in search tools instead of bash\n  \
-                     --insecure  Allow bash without kernel sandbox isolation"
+                     --insecure  Allow commands without kernel sandbox isolation"
                 );
             } else {
                 anyhow::bail!(
                     "Kernel sandbox unavailable — user namespaces are not supported.\n\n\
                      Alternatively:\n  \
-                     --classic   Use built-in search tools instead of bash\n  \
-                     --insecure  Allow bash without kernel sandbox isolation"
+                     --insecure  Allow commands without kernel sandbox isolation"
                 );
             }
         }
     }
 
-    // Create sandbox mounts early so we can share tmp_dir with filesystem tools.
-    // Mounts are only created when bash is enabled with kernel sandbox (not --insecure).
-    let mounts = if use_bash {
+    // Create sandbox mounts
+    let mounts = if use_run {
         if insecure {
-            eprintln!("Warning: Running bash tools without kernel sandbox isolation (--insecure).");
+            eprintln!("Warning: Running commands without kernel sandbox isolation (--insecure).");
         }
 
         let m = Arc::new(qq_tools::SandboxMounts::new(root.clone())
@@ -337,7 +318,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
                     label: None,
                 });
             } else {
-                tracing::warn!(path = %mount_path, "Bash mount path does not exist or is not a directory");
+                tracing::warn!(path = %mount_path, "Mount path does not exist or is not a directory");
             }
         }
 
@@ -346,56 +327,13 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
         None
     };
 
-    // Create shared approval channel when at least one consumer needs it.
-    let needs_write_approval = config.tools.enable_filesystem
-        && config.tools.allow_write
-        && config.tools.require_write_approval;
-    let needs_approval = needs_write_approval || use_bash;
-
-    let (approval_tx, approval_rx) = if needs_approval {
+    // Create shared approval channel
+    let (approval_tx, approval_rx) = if use_run {
         let (tx, rx) = qq_tools::create_approval_channel();
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
-
-    // Shared write permissions tracker (used by filesystem write tools)
-    let write_permissions = if needs_write_approval {
-        Some(Arc::new(qq_tools::FileWritePermissions::new()))
-    } else {
-        None
-    };
-
-    // Filesystem tools — include search tools only when bash is not available.
-    // When kernel sandbox is active (not --insecure), share its /tmp with file tools.
-    if config.tools.enable_filesystem {
-        let mut fs_config = qq_tools::FileSystemConfig::new(&root)
-            .with_write(config.tools.allow_write)
-            .with_search_tools(!use_bash);
-        if !insecure {
-            if let Some(ref m) = mounts {
-                fs_config = fs_config.with_sandbox_tmp(m.tmp_dir().to_path_buf());
-            }
-        }
-        if let (Some(ref tx), Some(ref perms)) = (&approval_tx, &write_permissions) {
-            fs_config = fs_config.with_approval(tx.clone(), Arc::clone(perms));
-        }
-        for tool in qq_tools::create_filesystem_tools_arc(fs_config) {
-            registry.register(tool);
-        }
-    }
-
-    // Memory tools
-    if config.tools.enable_memory {
-        let store = if let Some(db_path) = &memory_db {
-            std::sync::Arc::new(qq_tools::MemoryStore::new(db_path)?)
-        } else {
-            std::sync::Arc::new(qq_tools::MemoryStore::in_memory()?)
-        };
-        for tool in qq_tools::create_preference_tools_arc(store) {
-            registry.register(tool);
-        }
-    }
 
     // Web tools
     if config.tools.enable_web {
@@ -407,16 +345,16 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
         }
     }
 
-    // Bash tools — only when not in classic mode and config enables bash
-    let bash_resources = if let Some(mounts) = mounts {
+    // Run tools
+    let run_resources = if let Some(mounts) = mounts {
         // Build permission overrides from config
         let overrides = config.tools.bash_permissions.as_ref()
             .map(|p| parse_config_overrides(&p.session, &p.per_call, &p.restricted))
             .unwrap_or_default();
         let permissions = Arc::new(qq_tools::PermissionStore::new(overrides));
 
-        // approval_tx is guaranteed Some when use_bash is true
-        let approval_tx = approval_tx.clone().expect("approval_tx must exist when bash is enabled");
+        // approval_tx is guaranteed Some when use_run is true
+        let approval_tx = approval_tx.clone().expect("approval_tx must exist when run is enabled");
 
         let path_policy = if agent_mode {
             qq_tools::SandboxPathPolicy::system_only()
@@ -424,7 +362,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
             qq_tools::SandboxPathPolicy::from_host_env(&config.tools.bash_sensitive_dirs)
         };
 
-        for tool in qq_tools::create_bash_tools(
+        for tool in qq_tools::create_run_tools(
             Arc::clone(&mounts),
             Arc::clone(&permissions),
             approval_tx,
@@ -433,7 +371,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
             registry.register(tool);
         }
 
-        Some(BashResources {
+        Some(RunResources {
             mounts,
             permissions,
         })
@@ -441,7 +379,7 @@ fn build_tools_registry(config: &Config, classic: bool, insecure: bool, agent_mo
         None
     };
 
-    Ok((registry, bash_resources, approval_rx))
+    Ok((registry, run_resources, approval_rx))
 }
 
 fn is_apparmor_restricting_userns() -> bool {
@@ -456,19 +394,11 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let (mut tools_registry, _bash_resources, _approval_rx) = build_tools_registry(config, cli.classic, cli.insecure, cli.agent_mode)?;
+    let (tools_registry, _run_resources, _approval_rx) = build_tools_registry(config, cli.insecure, cli.agent_mode)?;
 
     // Set up chunk processor for large tool outputs
     let chunker_config = config.tools.chunker.to_chunker_config();
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config.clone());
-
-    // Add process_large_data tool (requires provider)
-    if chunker_config.enabled {
-        tools_registry.register(qq_tools::create_process_data_tool_arc(
-            Arc::clone(&provider),
-            chunker_config,
-        ));
-    }
 
     let mut messages = Vec::new();
 
@@ -668,11 +598,11 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     };
 
     // Set up base tools (conditionally)
-    let (mut base_tools, bash_resources, approval_rx) = if disable_tools {
+    let (mut base_tools, run_resources, approval_rx) = if disable_tools {
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
         (ToolRegistry::new(), None, None)
     } else {
-        build_tools_registry(config, cli.classic, cli.insecure, cli.agent_mode)?
+        build_tools_registry(config, cli.insecure, cli.agent_mode)?
     };
 
     // Register task tracking tools (session-scoped, in-memory)
@@ -804,14 +734,6 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     // Set up chunker config
     let chunker_config = config.tools.chunker.to_chunker_config();
 
-    // Add process_large_data tool (requires provider)
-    if chunker_config.enabled && !disable_tools {
-        tools_registry.register(qq_tools::create_process_data_tool_arc(
-            Arc::clone(&provider),
-            chunker_config.clone(),
-        ));
-    }
-
     // Create executor for manual agent commands (@agent, /delegate)
     // Uses base_tools so manual commands also can't recurse
     let agent_executor = if disable_agents {
@@ -826,9 +748,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         Some(Arc::new(tokio::sync::RwLock::new(executor)))
     };
 
-    // Destructure bash resources for TUI/CLI
-    let (bash_mounts, bash_permissions) = match bash_resources {
-        Some(br) => (Some(br.mounts), Some(br.permissions)),
+    // Destructure run resources for TUI/CLI
+    let (bash_mounts, bash_permissions) = match run_resources {
+        Some(rr) => (Some(rr.mounts), Some(rr.permissions)),
         None => (None, None),
     };
 

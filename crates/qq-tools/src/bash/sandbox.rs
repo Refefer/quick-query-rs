@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::mounts::SandboxMounts;
 use super::parse;
@@ -17,6 +18,8 @@ pub struct CommandResult {
     pub timed_out: bool,
     /// Container-level error (e.g. namespace/mount setup failure).
     pub sandbox_error: Option<String>,
+    /// Wall-clock duration of the command execution.
+    pub duration: Duration,
 }
 
 /// Sandbox executor backend.
@@ -216,6 +219,7 @@ impl SandboxExecutor {
         mounts: &Arc<SandboxMounts>,
         timeout_secs: u64,
         path_policy: &SandboxPathPolicy,
+        stdin_data: Option<&str>,
     ) -> Result<CommandResult, String> {
         match self {
             #[cfg(feature = "sandbox")]
@@ -223,14 +227,15 @@ impl SandboxExecutor {
                 let mounts = Arc::clone(mounts);
                 let cmd = command.to_string();
                 let policy = path_policy.clone();
+                let stdin = stdin_data.map(|s| s.as_bytes().to_vec());
                 tokio::task::spawn_blocking(move || {
-                    execute_kernel(&cmd, &mounts, timeout_secs, &policy)
+                    execute_kernel(&cmd, &mounts, timeout_secs, &policy, stdin.as_deref())
                 })
                 .await
                 .map_err(|e| format!("Sandbox task failed: {}", e))?
             }
             SandboxExecutor::AppLevel => {
-                execute_app_level(command, mounts, timeout_secs).await
+                execute_app_level(command, mounts, timeout_secs, stdin_data).await
             }
         }
     }
@@ -288,6 +293,7 @@ pub fn execute_kernel(
     mounts: &SandboxMounts,
     timeout_secs: u64,
     policy: &SandboxPathPolicy,
+    stdin_data: Option<&[u8]>,
 ) -> Result<CommandResult, String> {
     use hakoniwa::Container;
 
@@ -380,25 +386,57 @@ pub fn execute_kernel(
         cmd.env(key, value);
     }
 
+    // Note: hakoniwa does not support piped stdin; if stdin_data is provided,
+    // we write it to a temp file and redirect from there.
+    let _stdin_tmpfile;
+    let effective_command;
+    if let Some(data) = stdin_data {
+        let tmp = mounts.tmp_dir().join(".stdin_pipe");
+        std::fs::write(&tmp, data).map_err(|e| format!("Failed to write stdin data: {}", e))?;
+        effective_command = format!(
+            "cat {} | /bin/sh -c {}",
+            tmp.display(),
+            shell_escape(command)
+        );
+        _stdin_tmpfile = Some(tmp);
+
+        // Re-build the command with the piped version
+        let mut cmd2 = container.command("/bin/sh");
+        let cmd2 = cmd2
+            .arg("-c")
+            .arg(&effective_command)
+            .current_dir(root_str);
+        for (key, value) in &env_vars {
+            cmd2.env(key, value);
+        }
+
+        let start = Instant::now();
+        let output = cmd2
+            .wait_timeout(timeout_secs)
+            .output()
+            .map_err(|e| format!("Sandbox execution failed: {}", e))?;
+        let duration = start.elapsed();
+
+        let (timed_out, sandbox_error) = classify_hakoniwa_status(&output);
+
+        return Ok(CommandResult {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.exit_code.unwrap_or(output.status.code),
+            timed_out,
+            sandbox_error,
+            duration,
+        });
+    }
+
+    let start = Instant::now();
     let output = cmd
         .wait_timeout(timeout_secs)
         .output()
         .map_err(|e| format!("Sandbox execution failed: {}", e))?;
+    let duration = start.elapsed();
 
-    // Hakoniwa sets exit_code=None for both timeouts (SIGKILL, code=137) and
-    // container setup failures (code=125).  Distinguish them by checking code.
-    let (timed_out, sandbox_error) = if !output.status.success() && output.status.exit_code.is_none() {
-        if output.status.code == 128 + 9 {
-            // SIGKILL — the timeout alarm handler killed the inner process.
-            (true, None)
-        } else {
-            // Container-level failure (code 125) or other signal death.
-            // Surface hakoniwa's reason so the user sees what actually broke.
-            (false, Some(output.status.reason.clone()))
-        }
-    } else {
-        (false, None)
-    };
+    let (timed_out, sandbox_error) = classify_hakoniwa_status(&output);
 
     Ok(CommandResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -406,7 +444,28 @@ pub fn execute_kernel(
         exit_code: output.status.exit_code.unwrap_or(output.status.code),
         timed_out,
         sandbox_error,
+        duration,
     })
+}
+
+/// Classify hakoniwa exit status into timed_out / sandbox_error.
+#[cfg(feature = "sandbox")]
+fn classify_hakoniwa_status(output: &hakoniwa::Output) -> (bool, Option<String>) {
+    if !output.status.success() && output.status.exit_code.is_none() {
+        if output.status.code == 128 + 9 {
+            (true, None)
+        } else {
+            (false, Some(output.status.reason.clone()))
+        }
+    } else {
+        (false, None)
+    }
+}
+
+/// Shell-escape a string for use in a shell command.
+#[cfg(feature = "sandbox")]
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Execute a command using app-level sandboxing (no kernel isolation).
@@ -419,6 +478,7 @@ async fn execute_app_level(
     command: &str,
     mounts: &Arc<SandboxMounts>,
     timeout_secs: u64,
+    stdin_data: Option<&str>,
 ) -> Result<CommandResult, String> {
     // Reject shell operators — we can't safely sandbox them without namespaces
     if parse::has_shell_operators(command) {
@@ -464,11 +524,33 @@ async fn execute_app_level(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await;
+    if stdin_data.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+
+    let start = Instant::now();
+    let result = if let Some(data) = stdin_data {
+        // Spawn, write to stdin, then wait
+        let child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {}", e))?;
+        let mut child = child;
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(data.as_bytes()).await;
+            drop(stdin);
+        }
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            child.wait_with_output(),
+        )
+        .await
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            cmd.output(),
+        )
+        .await
+    };
+    let duration = start.elapsed();
 
     match result {
         Ok(Ok(output)) => Ok(CommandResult {
@@ -477,6 +559,7 @@ async fn execute_app_level(
             exit_code: output.status.code().unwrap_or(-1),
             timed_out: false,
             sandbox_error: None,
+            duration,
         }),
         Ok(Err(e)) => Err(format!("Failed to execute command: {}", e)),
         Err(_) => Ok(CommandResult {
@@ -485,6 +568,7 @@ async fn execute_app_level(
             exit_code: -1,
             timed_out: true,
             sandbox_error: None,
+            duration: start.elapsed(),
         }),
     }
 }
@@ -574,7 +658,7 @@ mod tests {
         let mounts = Arc::new(SandboxMounts::new(
             std::env::current_dir().unwrap(),
         ).unwrap());
-        let result = execute_app_level("echo hello", &mounts, 10).await.unwrap();
+        let result = execute_app_level("echo hello", &mounts, 10, None).await.unwrap();
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.exit_code, 0);
     }
@@ -584,7 +668,7 @@ mod tests {
         let mounts = Arc::new(SandboxMounts::new(
             std::env::current_dir().unwrap(),
         ).unwrap());
-        let result = execute_app_level("echo hello | cat", &mounts, 10).await;
+        let result = execute_app_level("echo hello | cat", &mounts, 10, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
     }
@@ -654,7 +738,7 @@ mod tests {
         std::fs::write(&tmp_file, "remapped-content").unwrap();
 
         // Run cat /tmp/remap_test.txt — should be rewritten to the session dir
-        let result = execute_app_level("cat /tmp/remap_test.txt", &mounts, 10)
+        let result = execute_app_level("cat /tmp/remap_test.txt", &mounts, 10, None)
             .await
             .unwrap();
         assert_eq!(result.stdout.trim(), "remapped-content");
@@ -753,8 +837,9 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello", &mounts, 10, &sys_policy()).unwrap();
-            assert_eq!(result.stdout.trim(), "hello");
+            let result = execute_kernel("echo hello", &mounts, 10, &sys_policy(), None).unwrap();
+            assert_eq!(
+result.stdout.trim(), "hello");
             assert_eq!(result.exit_code, 0);
         }
 
@@ -765,8 +850,9 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello | cat", &mounts, 10, &sys_policy()).unwrap();
-            assert_eq!(result.stdout.trim(), "hello");
+            let result = execute_kernel("echo hello | cat", &mounts, 10, &sys_policy(), None).unwrap();
+            assert_eq!(
+result.stdout.trim(), "hello");
         }
 
         #[test]
@@ -781,6 +867,7 @@ mod tests {
                 &mounts,
                 10,
                 &sys_policy(),
+                None,
             )
             .unwrap();
             assert_eq!(result.stdout.trim(), "test");
@@ -795,10 +882,10 @@ mod tests {
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let policy = sys_policy();
             // Write in first command
-            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10, &policy).unwrap();
+            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10, &policy, None).unwrap();
             assert_eq!(r1.exit_code, 0);
             // Read in second, separate command
-            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy).unwrap();
+            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy, None).unwrap();
             assert_eq!(r2.stdout.trim(), "persist");
         }
 
@@ -809,7 +896,7 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10, &sys_policy()).unwrap();
+            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10, &sys_policy(), None).unwrap();
             // Should either list toml files or say no-match
             assert!(!result.stdout.is_empty());
         }
@@ -821,8 +908,9 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo $PATH", &mounts, 10, &sys_policy()).unwrap();
+            let result = execute_kernel("echo $PATH", &mounts, 10, &sys_policy(), None).unwrap();
             assert_eq!(
+
                 result.stdout.trim(),
                 "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             );
@@ -840,7 +928,7 @@ mod tests {
                 path_value: custom_path.into(),
                 ..SandboxPathPolicy::system_only()
             };
-            let result = execute_kernel("echo $PATH", &mounts, 10, &policy).unwrap();
+            let result = execute_kernel("echo $PATH", &mounts, 10, &policy, None).unwrap();
             assert_eq!(result.stdout.trim(), custom_path);
         }
 
@@ -861,7 +949,7 @@ mod tests {
             let policy = SandboxPathPolicy::from_host_env(&[]);
             // Should be able to list the home directory contents
             let cmd = format!("ls -d {}", home);
-            let result = execute_kernel(&cmd, &mounts, 10, &policy).unwrap();
+            let result = execute_kernel(&cmd, &mounts, 10, &policy, None).unwrap();
             assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
             assert!(result.stdout.trim().contains(&home));
         }
@@ -888,7 +976,7 @@ mod tests {
             let policy = SandboxPathPolicy::from_host_env(&[]);
             // .ssh should be empty (hidden by tmpfs)
             let cmd = format!("ls -A {}/.ssh 2>&1", home);
-            let result = execute_kernel(&cmd, &mounts, 10, &policy).unwrap();
+            let result = execute_kernel(&cmd, &mounts, 10, &policy, None).unwrap();
             assert!(
                 result.stdout.trim().is_empty(),
                 "Expected ~/.ssh to be empty in sandbox, got: {}",

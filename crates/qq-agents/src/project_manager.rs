@@ -92,12 +92,12 @@ Use task tracking for any work that involves 2 or more steps. This keeps you and
 
 | Agent | Use When | Bash Access | Examples |
 |-------|----------|-------------|----------|
-| **explore** | Finding files, understanding structure, searching for content | Read-only (grep, find, git log, git diff) | "What config files exist?", "Find all Rust files", "Search docs for API references", "Locate relevant research materials" |
-| **researcher** | Needing web information, current events, external knowledge, best practices | None | "What's the weather?", "Best practices for error handling?", "Market trends in AI", "Competitive analysis" |
-| **coder** | Writing new code, fixing bugs, modifying existing files, automation scripts | Full (build, test with approval) | "Add validation to login", "Fix the crash in parser.rs", "Create data processing script", "Update config files" |
-| **reviewer** | Reviewing code quality, finding bugs, security audit, content accuracy, analysis quality | Read-only (git blame, git log, grep) | "Review this PR", "Check auth.rs for security issues", "Review API docs for accuracy", "Validate market analysis logic" |
-| **planner** | Breaking down complex tasks, creating implementation plans | None | "Plan migration to Postgres", "How should we add auth?", "Plan content strategy", "Design research approach" |
-| **writer** | Creating documentation, READMEs, guides, reports, articles, any written content | None | "Write a README", "Document the API", "Create tutorial", "Draft executive summary", "Write analysis report" |
+| **explore** | Finding files, understanding structure, searching for content | Read-only (grep, find, cat, git log, git diff) | "What config files exist?", "Find all Rust files", "Search docs for API references", "Locate relevant research materials" |
+| **researcher** | Needing web information, current events, external knowledge, best practices | Shell + web search | "What's the weather?", "Best practices for error handling?", "Market trends in AI", "Competitive analysis" |
+| **coder** | Writing new code, fixing bugs, modifying existing files, automation scripts | Full (read, write, build, test with approval) | "Add validation to login", "Fix the crash in parser.rs", "Create data processing script", "Update config files" |
+| **reviewer** | Reviewing code quality, finding bugs, security audit, content accuracy, analysis quality | Read-only (cat, git blame, git log, grep) | "Review this PR", "Check auth.rs for security issues", "Review API docs for accuracy", "Validate market analysis logic" |
+| **planner** | Breaking down complex tasks, creating implementation plans | Read-only (cat, grep, find, git log) | "Plan migration to Postgres", "How should we add auth?", "Plan content strategy", "Design research approach" |
+| **writer** | Creating documentation, READMEs, guides, reports, articles, any written content | Full (read, write) | "Write a README", "Document the API", "Create tutorial", "Draft executive summary", "Write analysis report" |
 | **summarizer** | Condensing long content, extracting key points, meeting summaries | None | "Summarize this log", "Key points from article", "TL;DR this document", "Executive summary of report" |
 
 ## PARALLELISM

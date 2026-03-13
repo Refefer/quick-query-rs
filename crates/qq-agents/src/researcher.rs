@@ -114,7 +114,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["web_search", "fetch_webpage", "read_preference", "bash", "mount_external", "update_my_task"]
+        &["run", "web_search", "fetch_webpage", "update_my_task"]
     }
 
     fn max_turns(&self) -> usize {
@@ -151,15 +151,10 @@ mod tests {
         assert_eq!(agent.name(), "researcher");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
+        assert!(agent.tool_names().contains(&"run"));
         assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
-        assert!(agent.tool_names().contains(&"read_preference"));
         assert!(agent.tool_names().contains(&"update_my_task"));
-        assert!(agent.tool_names().contains(&"bash"));
-        assert!(agent.tool_names().contains(&"mount_external"));
-        // Researcher is read-only - no write tools
-        assert!(!agent.tool_names().contains(&"update_preference"));
-        assert!(!agent.tool_names().contains(&"write_file"));
     }
 
     #[test]
