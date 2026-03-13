@@ -191,25 +191,9 @@ pub struct ToolsConfigEntry {
     #[serde(default)]
     pub root: Option<String>,
 
-    /// Path to memory database (supports $HOME, ~)
-    #[serde(default)]
-    pub memory_db: Option<String>,
-
-    /// Allow write operations for filesystem tools
-    #[serde(default = "default_true")]
-    pub allow_write: bool,
-
     /// Enable web tools
     #[serde(default = "default_true")]
     pub enable_web: bool,
-
-    /// Enable filesystem tools
-    #[serde(default = "default_true")]
-    pub enable_filesystem: bool,
-
-    /// Enable memory tools
-    #[serde(default = "default_true")]
-    pub enable_memory: bool,
 
     /// Chunker configuration for large tool outputs
     #[serde(default)]
@@ -219,28 +203,24 @@ pub struct ToolsConfigEntry {
     #[serde(default)]
     pub web_search: Option<WebSearchConfigEntry>,
 
-    /// Enable sandboxed bash tool
-    #[serde(default = "default_true")]
+    /// Enable sandboxed run tool (alias: enable_bash for backward compat)
+    #[serde(default = "default_true", alias = "enable_bash")]
     pub enable_bash: bool,
 
-    /// Extra directories to mount read-only in the bash sandbox
+    /// Extra directories to mount read-only in the sandbox
     #[serde(default)]
     pub bash_mounts: Vec<String>,
 
-    /// Bash permission overrides
+    /// Permission overrides for run tool commands
     #[serde(default)]
     pub bash_permissions: Option<BashPermissionOverrides>,
 
-    /// Require per-call user approval for filesystem write operations
-    #[serde(default = "default_true")]
-    pub require_write_approval: bool,
-
-    /// Sensitive directories to pre-approve for bash sandbox access.
+    /// Sensitive directories to pre-approve for sandbox access.
     ///
     /// By default, directories like `.ssh`, `.aws`, `.gnupg`, etc. are hidden
     /// inside the sandbox with empty tmpfs mounts. Any directory listed here
     /// will be excluded from that hiding — it will be accessible from the first
-    /// bash command with no tool call or user approval needed.
+    /// command with no tool call or user approval needed.
     ///
     /// Valid names: ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker",
     /// ".password-store", ".netrc" (anything else is silently ignored since
@@ -345,17 +325,12 @@ impl Default for ToolsConfigEntry {
     fn default() -> Self {
         Self {
             root: None, // Will default to $PWD at runtime
-            memory_db: None, // Will default to ~/.config/qq/memory.db
-            allow_write: true,
             enable_web: true,
-            enable_filesystem: true,
-            enable_memory: true,
             chunker: ChunkerConfigEntry::default(),
             web_search: None,
             enable_bash: true,
             bash_mounts: Vec::new(),
             bash_permissions: None,
-            require_write_approval: true,
             bash_sensitive_dirs: Vec::new(),
         }
     }
@@ -414,6 +389,7 @@ impl Config {
         Ok(config_dir.join("qq").join("config.toml"))
     }
 
+    #[allow(dead_code)]
     pub fn config_dir() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;

@@ -223,14 +223,16 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
         );
     }
 
-    // Bash access (conditional)
+    // Shell access (conditional)
     if ctx.has_bash {
         sections.push(
-            "### Bash Access\n\
-             You have sandboxed bash access. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
+            "### Shell Access\n\
+             You have sandboxed shell access via the `run` tool. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
              run without approval. Write commands (cargo build, git commit, npm install, rm, etc.) require user approval.\n\
+             The `run` tool is your primary tool for ALL file operations — reading (cat, head), writing (cat >, tee),\n\
+             editing (sed -i), searching (grep -rn, find), and file management (cp, mv, mkdir -p, rm).\n\
              Network access is blocked by default — call the `request_network_access` tool before running\n\
-             any bash command that needs the internet (curl, wget, git clone, npm install from remote, etc.).\n\
+             any command that needs the internet (curl, wget, git clone, npm install from remote, etc.).\n\
              Sensitive home directories (.ssh, .aws, .kube, .docker, etc.) are hidden by default — call\n\
              `request_sensitive_access` before running tools that need stored credentials (gh, kubectl, docker, aws, etc.).\n\
              \n\
@@ -251,8 +253,7 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
                other agents or returning results to your caller\n\
              \n\
              Rule of thumb: if a task involves more than 2-3 intermediate steps, use /tmp files to track\n\
-             state between steps rather than relying on context alone. Never store task-specific working\n\
-             data in the preference tools — those are reserved for user preferences."
+             state between steps rather than relying on context alone."
                 .to_string(),
         );
     }
@@ -264,9 +265,8 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
              You are a READ-ONLY agent. You must NEVER modify project files or directories.\n\
              - No writing, creating, moving, or deleting project files\n\
              - No write commands that affect the project (no cargo build, git commit, npm install, rm, mv, etc.)\n\
-             - No writing to preference stores\n\
              \n\
-             You may ONLY: read files, search content, and run read-only bash commands (grep, find, cat, \
+             You may ONLY: read files, search content, and run read-only commands (grep, find, cat, \
              git log, git diff, git blame, wc, tree, head, tail, ls, etc.).\n\
              \n\
              **Exception: /tmp is allowed.** You CAN write to /tmp for scratch work — saving intermediate\n\
@@ -352,7 +352,7 @@ mod tests {
         assert!(!preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Task Tracking"));
         assert!(!preamble.contains("User Preferences"));
-        assert!(!preamble.contains("Bash Access"));
+        assert!(!preamble.contains("Shell Access"));
         assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
     }
 
@@ -466,11 +466,10 @@ mod tests {
             is_read_only: false,
         }, &agent_ctx);
 
-        assert!(preamble.contains("Bash Access"));
-        assert!(preamble.contains("sandboxed bash access"));
+        assert!(preamble.contains("Shell Access"));
+        assert!(preamble.contains("sandboxed shell access"));
         assert!(preamble.contains("/tmp"));
         assert!(preamble.contains("Cross-agent data"));
-        assert!(preamble.contains("preference tools"));
         assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
     }
 
@@ -490,8 +489,7 @@ mod tests {
         assert!(preamble.contains("CRITICAL: Read-Only Agent"));
         assert!(preamble.contains("READ-ONLY agent"));
         assert!(preamble.contains("NEVER"));
-        assert!(preamble.contains("preference stores"));
-        assert!(!preamble.contains("Bash Access"));
+        assert!(!preamble.contains("Shell Access"));
     }
 
     #[test]
@@ -508,7 +506,7 @@ mod tests {
         }, &agent_ctx);
 
         // Both sections should appear
-        assert!(preamble.contains("Bash Access"));
+        assert!(preamble.contains("Shell Access"));
         assert!(preamble.contains("CRITICAL: Read-Only Agent"));
     }
 
@@ -535,7 +533,7 @@ mod tests {
         assert!(preamble.contains("Resourcefulness"));
         assert!(preamble.contains("Task Tracking"));
         assert!(preamble.contains("User Preferences"));
-        assert!(preamble.contains("Bash Access"));
+        assert!(preamble.contains("Shell Access"));
     }
 
     #[test]

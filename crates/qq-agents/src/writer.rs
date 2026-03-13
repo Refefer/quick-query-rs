@@ -124,7 +124,7 @@ impl InternalAgent for WriterAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["read_file", "write_file", "replace_in_file", "insert_in_file", "delete_lines", "replace_lines", "copy_file", "create_directory", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
+        &["run", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -154,18 +154,7 @@ mod tests {
         assert_eq!(agent.name(), "writer");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
-        assert!(agent.tool_names().contains(&"read_file"));
-        assert!(agent.tool_names().contains(&"write_file"));
-        assert!(agent.tool_names().contains(&"replace_in_file"));
-        assert!(agent.tool_names().contains(&"insert_in_file"));
-        assert!(agent.tool_names().contains(&"delete_lines"));
-        assert!(agent.tool_names().contains(&"replace_lines"));
-        assert!(agent.tool_names().contains(&"copy_file"));
-        assert!(agent.tool_names().contains(&"create_directory"));
-        assert!(agent.tool_names().contains(&"find_files"));
-        assert!(agent.tool_names().contains(&"search_files"));
-        assert!(agent.tool_names().contains(&"bash"));
-        assert!(agent.tool_names().contains(&"mount_external"));
+        assert!(agent.tool_names().contains(&"run"));
         assert!(agent.tool_names().contains(&"update_my_task"));
     }
 

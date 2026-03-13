@@ -169,8 +169,8 @@ async fn execute_agent(
     let has_tools = !config.tool_names.is_empty();
     let has_inform_user = event_bus.is_some();
     let has_task_tracking = config.tool_names.iter().any(|n| n == "update_my_task");
-    let has_bash = config.tool_names.iter().any(|n| n == "bash");
-    let has_preferences = config.tool_names.iter().any(|n| n == "read_preference" || n == "update_preference");
+    let has_run = config.tool_names.iter().any(|n| n == "run");
+    let has_preferences = false; // No preference tools in run-only mode
 
     let agent_ctx = qq_agents::AgentContext::new();
     let preamble = qq_agents::generate_preamble(&qq_agents::PreambleContext {
@@ -179,7 +179,7 @@ async fn execute_agent(
         has_inform_user,
         has_task_tracking,
         has_preferences,
-        has_bash,
+        has_bash: has_run,
         is_read_only: config.is_read_only,
     }, &agent_ctx);
     let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
@@ -504,11 +504,11 @@ impl Tool for InternalAgentTool {
 
         let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
 
-        // Auto-inject bash + mount_external + access-request tools unless disabled via config
-        let no_bash = self.external_agents.get_builtin_no_bash(self.agent.name());
-        if !no_bash && !tool_names.is_empty() {
-            if !tool_names.iter().any(|n| n == "bash") {
-                tool_names.push("bash".to_string());
+        // Auto-inject run + mount_external + access-request tools unless disabled via config
+        let no_run = self.external_agents.get_builtin_no_bash(self.agent.name());
+        if !no_run && !tool_names.is_empty() {
+            if !tool_names.iter().any(|n| n == "run") {
+                tool_names.push("run".to_string());
             }
             if !tool_names.iter().any(|n| n == "mount_external") {
                 tool_names.push("mount_external".to_string());
@@ -680,10 +680,10 @@ impl Tool for ExternalAgentTool {
 
         let mut tool_names = self.agent_def.tools.clone();
 
-        // Auto-inject bash + mount_external + access-request tools unless disabled via config
+        // Auto-inject run + mount_external + access-request tools unless disabled via config
         if !self.agent_def.no_bash && !tool_names.is_empty() {
-            if !tool_names.iter().any(|n| n == "bash") {
-                tool_names.push("bash".to_string());
+            if !tool_names.iter().any(|n| n == "run") {
+                tool_names.push("run".to_string());
             }
             if !tool_names.iter().any(|n| n == "mount_external") {
                 tool_names.push("mount_external".to_string());

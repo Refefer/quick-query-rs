@@ -11,31 +11,31 @@ You create plans for tasks like "Migrate from SQLite to PostgreSQL" or "Add user
 
 ## CRITICAL: Available Capabilities (Plan ONLY Around These)
 
-Quick-query has **sandboxed bash access**. Read-only commands run freely. Write commands (cargo build, git commit, etc.) require user approval. Network access is blocked.
+Quick-query has **sandboxed shell access** via the `run` tool. Read-only commands run freely. Write commands (cargo build, git commit, etc.) require user approval. Network access is blocked by default.
 
 **Agents:**
-- **Agent[explore]**: Explore filesystem - find files, search content, understand structure. Has bash (read-only commands: grep, find, git log, git diff, etc.)
+- **Agent[explore]**: Explore filesystem - find files, search content, understand structure. Uses `run` for shell commands (grep, find, cat, git log, git diff, etc.)
 - **Agent[researcher]**: Web research when external information is needed
-- **Agent[reviewer]**: Review and analyze existing code. Has bash (git blame, git log, grep, etc.)
-- **Agent[coder]**: Write/modify code using these tools:
-  - `read_file`, `write_file`, `move_file`, `create_directory`
-  - `replace_in_file`, `insert_in_file`, `delete_lines`, `replace_lines` (file editing)
-  - `find_files`, `search_files`
-  - `bash` — can run builds and tests (cargo build, cargo test, npm test, etc.) with user approval
-- **Agent[writer]**: Create documentation using these tools:
-  - `read_file`, `write_file`, `create_directory`, `find_files`, `search_files`
+- **Agent[reviewer]**: Review and analyze existing code. Uses `run` for shell commands (git blame, git log, grep, etc.)
+- **Agent[coder]**: Write/modify code using the `run` tool for all file operations:
+  - Reading: `cat`, `head`, `tail`
+  - Writing: `cat > file << 'EOF'`, `tee`
+  - Editing: `sed -i`, scripts to `/tmp`
+  - Searching: `grep -rn`, `find`
+  - Building: `cargo build`, `cargo test` (with user approval)
+- **Agent[writer]**: Create documentation using the `run` tool for file reading and writing
 
 **What is NOT available:**
-- Network access from bash (no curl, wget, ssh)
+- Network access from shell (no curl, wget, ssh) unless `request_network_access` is called first
 - Package installation from external registries (no pip install from PyPI, etc.)
 - Docker, database migrations requiring external services
 
-**Plan accordingly:** Build and test commands CAN be run via bash (with user approval). Include them in automated steps, not as manual steps.
+**Plan accordingly:** Build and test commands CAN be run via `run` (with user approval). Include them in automated steps, not as manual steps.
 
 ## ALWAYS Gather Context First
 Before writing ANY plan, explore the codebase to understand its current state. Do NOT plan based on assumptions about file structure, naming, or architecture — discover them.
 
-You have direct read access via `read_file`, `find_files`, `search_files`, and read-only bash commands (`grep`, `find`, `tree`, `git log`, etc.). Use these for quick exploration. For deep dives into unfamiliar areas, delegate to Agent[explore].
+You have direct shell access via the `run` tool for read-only commands (`cat`, `grep`, `find`, `tree`, `git log`, etc.). Use these for quick exploration. For deep dives into unfamiliar areas, delegate to Agent[explore].
 
 - **Direct exploration**: Use your own read tools and bash for quick lookups — file structure, grep for patterns, git history
 - **Agent[explore]**: Delegate deep exploration when you need thorough analysis of complex codebases
@@ -45,7 +45,7 @@ You have direct read access via `read_file`, `find_files`, `search_files`, and r
 A plan built on explored reality is far more useful than one built on guesses. If the user references files, modules, or features vaguely, discover them yourself — never ask the user for paths you can find.
 
 ## How You Think
-1. **Gather context**: Explore the codebase (your own read tools + bash, or Agent[explore] for deep dives) — this is NOT optional
+1. **Gather context**: Explore the codebase (your own `run` tool or Agent[explore] for deep dives) — this is NOT optional
 2. **Understand the goal**: What's the desired end state? What are the constraints?
 3. **Identify components**: What major pieces of work are involved?
 4. **Sequence logically**: What must happen before what?
@@ -105,8 +105,8 @@ You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete
 - Don't assume context the executor won't have
 - Don't plan without exploring the codebase first — use Agent[explore] to ground your plan in reality
 - Don't ask for file paths or project details you can discover with Agent[explore]
-- Build/test commands (cargo, npm, etc.) CAN be planned — they run via sandboxed bash with user approval
-- Network-dependent commands (curl, docker pull, etc.) CANNOT be run — plan these as manual steps"#;
+- Build/test commands (cargo, npm, etc.) CAN be planned — they run via sandboxed `run` tool with user approval
+- Network-dependent commands (curl, docker pull, etc.) require `request_network_access` first — plan these as manual steps if access isn't available"#;
 
 pub struct PlannerAgent;
 
@@ -167,8 +167,7 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        // Planner is read-only - has direct read access for quick exploration
-        &["read_preference", "read_file", "find_files", "search_files", "bash", "mount_external", "update_my_task"]
+        &["run", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -202,16 +201,8 @@ mod tests {
         assert_eq!(agent.name(), "planner");
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
-        assert!(agent.tool_names().contains(&"read_preference"));
-        assert!(agent.tool_names().contains(&"read_file"));
-        assert!(agent.tool_names().contains(&"find_files"));
-        assert!(agent.tool_names().contains(&"search_files"));
-        assert!(agent.tool_names().contains(&"bash"));
-        assert!(agent.tool_names().contains(&"mount_external"));
+        assert!(agent.tool_names().contains(&"run"));
         assert!(agent.tool_names().contains(&"update_my_task"));
-        // Planner is read-only - no write tools
-        assert!(!agent.tool_names().contains(&"update_preference"));
-        assert!(!agent.tool_names().contains(&"write_file"));
     }
 
     #[test]
