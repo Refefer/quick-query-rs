@@ -101,9 +101,11 @@ impl TableData {
 /// This is the core rendering function used by both TUI and CLI paths.
 /// The `width` parameter controls table column layout.
 pub fn render_to_text(content: &str, width: usize) -> Text<'static> {
+    // Convert grid/ASCII tables to GFM format before parsing
+    let content = preprocess_grid_tables(content);
     let styles = MarkdownStyle::default();
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
-    let parser = Parser::new_ext(content, options);
+    let parser = Parser::new_ext(&content, options);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
@@ -981,6 +983,122 @@ pub fn render_markdown(content: &str) {
     println!("{}", output);
 }
 
+/// Check if a line is a grid table border (e.g., "+---+---+" or "+===+===+").
+fn is_grid_border(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('+') || !trimmed.ends_with('+') || trimmed.len() < 3 {
+        return false;
+    }
+    trimmed[1..trimmed.len() - 1]
+        .chars()
+        .all(|c| c == '-' || c == '=' || c == '+')
+}
+
+/// Check if a line is a grid table content row (starts and ends with '|').
+fn is_grid_content(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2
+}
+
+/// Split a grid table content line into cells.
+fn split_grid_cells(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    let inner = &trimmed[1..trimmed.len() - 1];
+    inner.split('|').map(|s| s.trim().to_string()).collect()
+}
+
+/// Preprocess markdown content to convert grid/ASCII tables to GFM markdown tables.
+///
+/// Grid tables use `+---+---+` borders and `|...|` content rows, which pulldown-cmark
+/// does not recognize. This converts them to standard `| ... |` + `|---|---|` format.
+fn preprocess_grid_tables(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    let mut in_code_fence = false;
+
+    while i < lines.len() {
+        // Track code fences to avoid transforming tables inside code blocks
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            result.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+
+        if !in_code_fence && is_grid_border(lines[i]) {
+            // Try to collect a full grid table starting at this line
+            let start = i;
+            let mut j = i + 1;
+            while j < lines.len() && (is_grid_border(lines[j]) || is_grid_content(lines[j])) {
+                j += 1;
+            }
+            let end = j;
+
+            // Need at least: border + content + border (3 lines)
+            if end - start >= 3 && is_grid_border(lines[end - 1]) {
+                // Extract content rows (first content row = header, rest = data)
+                let mut header_cells: Option<Vec<String>> = None;
+                let mut data_rows: Vec<Vec<String>> = Vec::new();
+
+                for &line in &lines[start..end] {
+                    if is_grid_border(line) {
+                        continue;
+                    }
+                    if is_grid_content(line) {
+                        let cells = split_grid_cells(line);
+                        if header_cells.is_none() {
+                            header_cells = Some(cells);
+                        } else {
+                            data_rows.push(cells);
+                        }
+                    }
+                }
+
+                if let Some(hdr) = header_cells {
+                    let num_cols = hdr.len();
+
+                    // Blank line before table for clean markdown separation
+                    if !result.is_empty()
+                        && result.last().is_some_and(|l| !l.trim().is_empty())
+                    {
+                        result.push(String::new());
+                    }
+
+                    // Header row
+                    result.push(format!("| {} |", hdr.join(" | ")));
+
+                    // Separator
+                    let sep: Vec<&str> = (0..num_cols).map(|_| "---").collect();
+                    result.push(format!("| {} |", sep.join(" | ")));
+
+                    // Data rows
+                    for row in &data_rows {
+                        let mut padded = row.clone();
+                        while padded.len() < num_cols {
+                            padded.push(String::new());
+                        }
+                        padded.truncate(num_cols);
+                        result.push(format!("| {} |", padded.join(" | ")));
+                    }
+
+                    // Blank line after table
+                    result.push(String::new());
+
+                    i = end;
+                    continue;
+                }
+            }
+        }
+
+        result.push(lines[i].to_string());
+        i += 1;
+    }
+
+    result.join("\n")
+}
+
 /// Minimum characters per column before we self-render the table.
 const MIN_COL_WIDTH: usize = 10;
 
@@ -1328,5 +1446,119 @@ mod tests {
         // Content should be present (possibly wrapped)
         assert!(ansi.contains("This"));
         assert!(ansi.contains("wrap"));
+    }
+
+    // --- Grid table preprocessing tests ---
+
+    #[test]
+    fn test_grid_table_basic() {
+        let content = "\
++--------+--------+
+| Date   | Event  |
++========+========+
+| Feb 28 | Strike |
++--------+--------+";
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        // Should be rendered as a proper table with box-drawing chars
+        assert!(ansi.contains('┌'), "Should have box-drawing top-left");
+        assert!(ansi.contains("Date"), "Should contain header text");
+        assert!(ansi.contains("Strike"), "Should contain cell text");
+    }
+
+    #[test]
+    fn test_grid_table_multiple_rows() {
+        let content = "\
++--------+------------------+
+| Date   | Event            |
++--------+------------------+
+| Feb 28 | Airstrikes begin |
++--------+------------------+
+| Mar 1  | Missile barrage  |
++--------+------------------+";
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        assert!(ansi.contains('┌'));
+        assert!(ansi.contains("Feb 28"));
+        assert!(ansi.contains("Missile barrage"));
+    }
+
+    #[test]
+    fn test_grid_table_no_header_separator() {
+        // Grid table without '=' separator — first row is still header
+        let content = "\
++---+---+
+| A | B |
++---+---+
+| 1 | 2 |
++---+---+";
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        assert!(ansi.contains('┌'));
+        assert!(ansi.contains('│'));
+    }
+
+    #[test]
+    fn test_grid_table_in_code_block() {
+        let content = "\
+```
++---+---+
+| A | B |
++---+---+
+| 1 | 2 |
++---+---+
+```";
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        // Should NOT be rendered as a table
+        assert!(!ansi.contains('┌'));
+        assert!(ansi.contains("+---+---+"));
+    }
+
+    #[test]
+    fn test_grid_table_with_surrounding_text() {
+        let content = "\
+Some text before
+
++------+------+
+| Col1 | Col2 |
++------+------+
+| a    | b    |
++------+------+
+
+Some text after";
+        let text = render_to_text(content, 80);
+        let ansi = text_to_ansi(&text);
+        assert!(ansi.contains("Some text before"));
+        assert!(ansi.contains("Some text after"));
+        assert!(ansi.contains('┌'));
+    }
+
+    #[test]
+    fn test_preprocess_grid_tables_conversion() {
+        let input = "\
++------+------+
+| Head | Tail |
++======+======+
+| a    | b    |
++------+------+";
+        let output = preprocess_grid_tables(input);
+        assert!(output.contains("| Head | Tail |"));
+        assert!(output.contains("| --- | --- |"));
+        assert!(output.contains("| a | b |"));
+    }
+
+    #[test]
+    fn test_preprocess_preserves_non_table_content() {
+        let input = "Hello world\n\nSome **bold** text";
+        let output = preprocess_grid_tables(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_preprocess_skips_code_fences() {
+        let input = "```\n+---+\n| A |\n+---+\n```";
+        let output = preprocess_grid_tables(input);
+        assert_eq!(output, input);
     }
 }
