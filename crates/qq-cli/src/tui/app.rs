@@ -798,6 +798,7 @@ pub async fn run_tui(
     task_store: Option<Arc<qq_tools::TaskStore>>,
     compactor: Option<Arc<dyn qq_core::ContextCompactor>>,
     observation_config: qq_core::ObservationConfig,
+    mcp_manager: Option<&qq_mcp::McpManager>,
 ) -> Result<()> {
     // Set up panic hook
     setup_panic_hook();
@@ -1063,6 +1064,10 @@ pub async fn run_tui(
                                             }
                                             TuiCommand::Tools => {
                                                 app.content = format_tools_list(&tools_registry);
+                                                app.content_dirty = true;
+                                            }
+                                            TuiCommand::Mcp => {
+                                                app.content = format_mcp_status(mcp_manager);
                                                 app.content_dirty = true;
                                             }
                                             TuiCommand::Agents => {
@@ -1490,6 +1495,7 @@ enum TuiCommand {
     Agents,
     History,
     Memory,
+    Mcp,
     Mount(String),
     Mounts,
     Attach(String),
@@ -1509,6 +1515,7 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
         "/agents" | "/a" => Some(TuiCommand::Agents),
         "/history" | "/h" => Some(TuiCommand::History),
         "/memory" | "/mem" => Some(TuiCommand::Memory),
+        "/mcp" => Some(TuiCommand::Mcp),
         "/mounts" => Some(TuiCommand::Mounts),
         "/attachments" => Some(TuiCommand::Attachments),
         "/clear-attachments" => Some(TuiCommand::ClearAttachments),
@@ -1533,6 +1540,28 @@ fn format_tools_list(registry: &ToolRegistry) -> String {
         if let Some(tool) = registry.get(name) {
             // Use Tool::description() which is the short human-friendly version
             output.push_str(&format!("  {} - {}\n", name, tool.description()));
+        }
+    }
+    output
+}
+
+/// Format MCP server status for display
+fn format_mcp_status(manager: Option<&qq_mcp::McpManager>) -> String {
+    let Some(mgr) = manager else {
+        return "No MCP servers configured.".to_string();
+    };
+    let info = mgr.server_info();
+    if info.is_empty() {
+        return "No MCP servers connected.".to_string();
+    }
+    let mut output = String::from("MCP Servers:\n\n");
+    for server in info {
+        output.push_str(&format!(
+            "  {} ({}) - {} tools\n",
+            server.name, server.transport_label, server.tool_names.len()
+        ));
+        for tool_name in &server.tool_names {
+            output.push_str(&format!("    {}\n", tool_name));
         }
     }
     output

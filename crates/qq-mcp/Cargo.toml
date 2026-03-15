@@ -1,0 +1,26 @@
+[package]
+name = "qq-mcp"
+description = "MCP (Model Context Protocol) client integration for quick-query"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+qq-core = { workspace = true }
+rmcp = { version = "1.2", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "reqwest-native-tls",
+] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+http = "1"
+
+[dev-dependencies]
+toml = { workspace = true }

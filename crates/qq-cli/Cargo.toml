@@ -15,6 +15,7 @@ qq-core = { workspace = true }
 qq-agents = { workspace = true }
 qq-providers = { workspace = true }
 qq-tools = { workspace = true }
+qq-mcp = { workspace = true }
 
 async-trait = { workspace = true }
 tokio = { workspace = true }

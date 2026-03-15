@@ -212,6 +212,7 @@ enum ChatCommand {
     Memory,
     Mount(String),
     Mounts,
+    Mcp,
     Delegate { agent: String, task: String },
     AgentCall { agent: String, task: String }, // @agent syntax
     System(String),
@@ -275,6 +276,7 @@ fn parse_command(input: &str) -> ChatCommand {
             }
         }
         "/memory" | "/mem" => ChatCommand::Memory,
+        "/mcp" => ChatCommand::Mcp,
         "/mount" => ChatCommand::Mount(arg),
         "/mounts" => ChatCommand::Mounts,
         "/system" | "/sys" => ChatCommand::System(arg),
@@ -298,6 +300,7 @@ Chat Commands:
   /memory, /mem       Show memory usage diagnostics
   /tools, /t          List available tools
   /agents, /a         List available agents
+  /mcp                Show connected MCP servers and tools
   /delegate <a> <t>   Delegate task <t> to agent <a>
   /mount <path>       Add read-only mount to bash sandbox
   /mounts             List current bash sandbox mounts
@@ -529,6 +532,7 @@ pub async fn run_chat(
     task_store: Option<Arc<qq_tools::TaskStore>>,
     compactor: Option<Arc<dyn ContextCompactor>>,
     observation_config: ObservationConfig,
+    mcp_manager: Option<&qq_mcp::McpManager>,
 ) -> Result<()> {
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
@@ -713,6 +717,26 @@ pub async fn run_chat(
                             }
                         }
                         println!();
+                    }
+                    ChatCommand::Mcp => {
+                        if let Some(ref mgr) = mcp_manager {
+                            let info = mgr.server_info();
+                            if info.is_empty() {
+                                println!("\nNo MCP servers connected.\n");
+                            } else {
+                                println!("\nMCP Servers:");
+                                for server in info {
+                                    println!("  {} ({}) - {} tools",
+                                        server.name, server.transport_label, server.tool_names.len());
+                                    for tool_name in &server.tool_names {
+                                        println!("    {}", tool_name);
+                                    }
+                                }
+                                println!();
+                            }
+                        } else {
+                            println!("\nNo MCP servers configured.\n");
+                        }
                     }
                     ChatCommand::Agents => {
                         if let Some(ref executor) = agent_executor {

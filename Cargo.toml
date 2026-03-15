@@ -66,6 +66,7 @@ qq-cli = { path = "crates/qq-cli" }
 qq-agents = { path = "crates/qq-agents" }
 qq-providers = { path = "crates/qq-providers" }
 qq-tools = { path = "crates/qq-tools" }
+qq-mcp = { path = "crates/qq-mcp" }
 
 [profile.release]
 strip = true

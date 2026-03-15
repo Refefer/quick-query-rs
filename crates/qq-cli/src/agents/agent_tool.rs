@@ -129,8 +129,9 @@ async fn execute_agent(
         "Executing agent"
     );
 
-    // Build tools for this agent: start with base tools it needs
-    let mut agent_tools = base_tools.subset(&config.tool_names);
+    // Resolve config-style tool refs (mcp/server/tool, mcp/server/*, etc.)
+    let resolved_names = base_tools.resolve_tool_refs(&config.tool_names);
+    let mut agent_tools = base_tools.subset(&resolved_names);
 
     // If not at max depth, add agent tools so this agent can call other agents
     let next_depth = current_depth + 1;
@@ -213,8 +214,10 @@ async fn execute_agent(
                 .with_max_turns(max_turns)
                 .with_prior_observation_log(prior_observation_log);
 
-            if let Some(limits) = config.tool_limits {
-                agent_cfg = agent_cfg.with_tool_limits(limits);
+            if let Some(limits) = config.tool_limits.clone() {
+                agent_cfg = agent_cfg.with_tool_limits(
+                    base_tools.resolve_tool_limits(limits),
+                );
             }
 
             // Wire up compactor and obs config
@@ -304,7 +307,9 @@ async fn execute_agent(
                 .with_max_turns(config.max_turns);
 
             if let Some(limits) = config.tool_limits {
-                agent_cfg = agent_cfg.with_tool_limits(limits);
+                agent_cfg = agent_cfg.with_tool_limits(
+                    base_tools.resolve_tool_limits(limits),
+                );
             }
 
             let continuation_config = ContinuationConfig::default();
@@ -518,6 +523,13 @@ impl Tool for InternalAgentTool {
             }
             if !tool_names.iter().any(|n| n == "request_sensitive_access") {
                 tool_names.push("request_sensitive_access".to_string());
+            }
+        }
+
+        // Append extra tools from config overrides (e.g., MCP tools)
+        for extra in self.external_agents.get_builtin_extra_tools(self.agent.name()) {
+            if !tool_names.iter().any(|n| n == extra) {
+                tool_names.push(extra.clone());
             }
         }
 
@@ -994,12 +1006,13 @@ mod tests {
         let def = agent_tool_definition("Agent[test]", "Test agent description");
         assert_eq!(def.name, "Agent[test]");
         assert_eq!(def.description, "Test agent description");
-        assert!(def.parameters.required.contains(&"task".to_string()));
-        assert!(!def.parameters.required.contains(&"new_instance".to_string()));
-        assert!(!def.parameters.required.contains(&"instance_id".to_string()));
-        assert!(def.parameters.properties.contains_key("task"));
-        assert!(def.parameters.properties.contains_key("new_instance"));
-        assert!(def.parameters.properties.contains_key("instance_id"));
+        assert!(def.parameters.required().contains(&"task".to_string()));
+        assert!(!def.parameters.required().contains(&"new_instance".to_string()));
+        assert!(!def.parameters.required().contains(&"instance_id".to_string()));
+        let props = def.parameters.properties().unwrap();
+        assert!(props.contains_key("task"));
+        assert!(props.contains_key("new_instance"));
+        assert!(props.contains_key("instance_id"));
     }
 
     #[test]

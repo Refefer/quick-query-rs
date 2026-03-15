@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use qq_mcp::manager::McpServerConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Default profile to use (required - bundles provider, prompt, model, parameters)
@@ -23,6 +25,10 @@ pub struct Config {
     /// Compaction configuration for observational memory
     #[serde(default)]
     pub compaction: Option<CompactionConfig>,
+
+    /// MCP server configurations, keyed by server name
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 /// Configuration for observational memory compaction.
@@ -692,5 +698,77 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         let provider = config.providers.get("ollama").unwrap();
         assert_eq!(provider.context_window, Some(8192));
+    }
+
+    #[test]
+    fn test_mcp_servers_config() {
+        let toml = r#"
+            default_profile = "default"
+
+            [providers.openai]
+            api_key = "sk-test"
+
+            [profiles.default]
+            provider = "openai"
+
+            [mcp_servers.filesystem]
+            transport = "stdio"
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+            [mcp_servers.github]
+            transport = "stdio"
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-github"]
+
+            [mcp_servers.github.env]
+            GITHUB_TOKEN = "ghp_test"
+
+            [mcp_servers.remote]
+            transport = "http"
+            url = "http://localhost:8000/mcp"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 3);
+
+        match config.mcp_servers.get("filesystem").unwrap() {
+            McpServerConfig::Stdio { command, args, .. } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args.len(), 3);
+            }
+            _ => panic!("Expected Stdio"),
+        }
+
+        match config.mcp_servers.get("github").unwrap() {
+            McpServerConfig::Stdio { command, env, .. } => {
+                assert_eq!(command, "npx");
+                assert_eq!(env.get("GITHUB_TOKEN").unwrap(), "ghp_test");
+            }
+            _ => panic!("Expected Stdio"),
+        }
+
+        match config.mcp_servers.get("remote").unwrap() {
+            McpServerConfig::Http { url, .. } => {
+                assert_eq!(url, "http://localhost:8000/mcp");
+            }
+            _ => panic!("Expected Http"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_servers_default_empty() {
+        let toml = r#"
+            default_profile = "default"
+
+            [providers.openai]
+            api_key = "sk-test"
+
+            [profiles.default]
+            provider = "openai"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.mcp_servers.is_empty());
     }
 }
