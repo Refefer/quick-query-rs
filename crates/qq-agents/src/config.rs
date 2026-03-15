@@ -58,6 +58,11 @@ pub struct BuiltinAgentOverride {
     #[serde(default)]
     pub max_observations: Option<u32>,
 
+    /// Additional tool names to add to this agent's tool set.
+    /// Use this to give built-in agents access to MCP or other extra tools.
+    #[serde(default)]
+    pub extra_tools: Vec<String>,
+
     /// Disable bash tool for this agent (default: false = bash enabled).
     #[serde(default)]
     pub no_bash: Option<bool>,
@@ -218,6 +223,14 @@ impl AgentsConfig {
             .get(name)
             .and_then(|o| o.no_bash)
             .unwrap_or(false)
+    }
+
+    /// Get extra tools for a built-in agent from config overrides.
+    pub fn get_builtin_extra_tools(&self, name: &str) -> &[String] {
+        self.builtin
+            .get(name)
+            .map(|o| o.extra_tools.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Get memory strategy override for a built-in agent.

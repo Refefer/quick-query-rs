@@ -27,21 +27,83 @@ impl ToolDefinition {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolParameters {
-    #[serde(rename = "type")]
-    pub schema_type: String,
-    #[serde(default)]
-    pub properties: std::collections::HashMap<String, PropertySchema>,
-    #[serde(default)]
-    pub required: Vec<String>,
-    #[serde(rename = "additionalProperties", default)]
-    pub additional_properties: bool,
+/// Tool parameter schema. Either a structured schema built with `add_property()` (used by
+/// built-in tools) or a raw JSON Schema passthrough (used for MCP tools).
+#[derive(Debug, Clone)]
+pub enum ToolParameters {
+    /// Structured schema built with add_property() -- used by built-in tools
+    Structured {
+        schema_type: String,
+        properties: std::collections::HashMap<String, PropertySchema>,
+        required: Vec<String>,
+        additional_properties: bool,
+    },
+    /// Raw JSON Schema passthrough -- used for MCP tools
+    Raw(serde_json::Value),
+}
+
+impl Serialize for ToolParameters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ToolParameters::Structured {
+                schema_type,
+                properties,
+                required,
+                additional_properties,
+            } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("type", schema_type)?;
+                map.serialize_entry("properties", properties)?;
+                map.serialize_entry("required", required)?;
+                map.serialize_entry("additionalProperties", additional_properties)?;
+                map.end()
+            }
+            ToolParameters::Raw(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolParameters {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // Try to parse as a structured schema (has "type" and "properties" fields)
+        if let Some(obj) = value.as_object() {
+            if obj.contains_key("type") && obj.contains_key("properties") {
+                if let (Some(schema_type), Some(properties)) = (
+                    obj.get("type").and_then(|v| v.as_str()),
+                    obj.get("properties").and_then(|v| v.as_object()),
+                ) {
+                    let properties: std::collections::HashMap<String, PropertySchema> = properties
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            serde_json::from_value(v.clone()).ok().map(|s| (k.clone(), s))
+                        })
+                        .collect();
+                    let required: Vec<String> = obj
+                        .get("required")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    let additional_properties = obj
+                        .get("additionalProperties")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    return Ok(ToolParameters::Structured {
+                        schema_type: schema_type.to_string(),
+                        properties,
+                        required,
+                        additional_properties,
+                    });
+                }
+            }
+        }
+        Ok(ToolParameters::Raw(value))
+    }
 }
 
 impl Default for ToolParameters {
     fn default() -> Self {
-        Self {
+        Self::Structured {
             schema_type: "object".to_string(),
             properties: std::collections::HashMap::new(),
             required: Vec::new(),
@@ -55,18 +117,50 @@ impl ToolParameters {
         Self::default()
     }
 
+    /// Create from a raw JSON Schema value (used for MCP tools).
+    pub fn from_raw(value: serde_json::Value) -> Self {
+        ToolParameters::Raw(value)
+    }
+
     pub fn add_property(
         mut self,
         name: impl Into<String>,
         schema: PropertySchema,
         required: bool,
     ) -> Self {
-        let name = name.into();
-        self.properties.insert(name.clone(), schema);
-        if required {
-            self.required.push(name);
+        match &mut self {
+            ToolParameters::Structured {
+                properties: props,
+                required: req,
+                ..
+            } => {
+                let name = name.into();
+                props.insert(name.clone(), schema);
+                if required {
+                    req.push(name);
+                }
+            }
+            ToolParameters::Raw(_) => {
+                panic!("Cannot add_property to a Raw ToolParameters");
+            }
         }
         self
+    }
+
+    /// Access the required fields (for testing/inspection). Returns empty slice for Raw.
+    pub fn required(&self) -> &[String] {
+        match self {
+            ToolParameters::Structured { required, .. } => required,
+            ToolParameters::Raw(_) => &[],
+        }
+    }
+
+    /// Access the properties map (for testing/inspection). Returns None for Raw.
+    pub fn properties(&self) -> Option<&std::collections::HashMap<String, PropertySchema>> {
+        match self {
+            ToolParameters::Structured { properties, .. } => Some(properties),
+            ToolParameters::Raw(_) => None,
+        }
     }
 }
 
@@ -281,6 +375,73 @@ impl ToolRegistry {
         let owned: Vec<String> = tool_names.iter().map(|s| s.to_string()).collect();
         self.subset(&owned)
     }
+
+    /// Resolve config-style tool references to actual registry tool names.
+    ///
+    /// Supported formats:
+    /// - `internal:run` — built-in tool (resolves to `run`)
+    /// - `internal:*` — glob: all non-MCP tools in the registry
+    /// - `mcp:server/tool` — MCP tool (resolves to `mcp__server__tool`)
+    /// - `mcp:server/*` — glob: all tools from the named MCP server
+    ///
+    /// Unqualified names (no `:` scheme) are passed through as-is for use by
+    /// internal agent code that builds tool lists programmatically.
+    pub fn resolve_tool_refs(&self, refs: &[String]) -> Vec<String> {
+        let mut result = Vec::new();
+        for r in refs {
+            if let Some(rest) = r.strip_prefix("mcp:") {
+                if let Some(server) = rest.strip_suffix("/*") {
+                    // Glob: mcp:server/* → all mcp__server__* tools
+                    let prefix = format!("mcp__{}__", server);
+                    for name in self.tools.keys() {
+                        if name.starts_with(&prefix) && !result.contains(name) {
+                            result.push(name.clone());
+                        }
+                    }
+                } else if let Some((server, tool)) = rest.split_once('/') {
+                    // Specific: mcp:server/tool → mcp__server__tool
+                    let mangled = format!("mcp__{}__{}",  server, tool);
+                    if !result.contains(&mangled) {
+                        result.push(mangled);
+                    }
+                }
+            } else if let Some(rest) = r.strip_prefix("internal:") {
+                if rest == "*" {
+                    // Glob: internal:* → all non-MCP tools
+                    for name in self.tools.keys() {
+                        if !name.starts_with("mcp__") && !result.contains(name) {
+                            result.push(name.clone());
+                        }
+                    }
+                } else if !result.contains(&rest.to_string()) {
+                    result.push(rest.to_string());
+                }
+            } else {
+                // Unqualified name — pass through (used by internal agent code)
+                if !result.contains(r) {
+                    result.push(r.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Resolve config-style tool limit keys to actual registry tool names.
+    ///
+    /// Uses the same resolution rules as `resolve_tool_refs`. Glob patterns
+    /// expand to all matching tools, each receiving the same limit value.
+    pub fn resolve_tool_limits(
+        &self,
+        limits: std::collections::HashMap<String, usize>,
+    ) -> std::collections::HashMap<String, usize> {
+        let mut resolved = std::collections::HashMap::new();
+        for (key, value) in limits {
+            for name in self.resolve_tool_refs(&[key]) {
+                resolved.insert(name, value);
+            }
+        }
+        resolved
+    }
 }
 
 /// Execute a tool, routing blocking tools through `spawn_blocking`.
@@ -316,7 +477,7 @@ mod tests {
             );
 
         assert_eq!(def.name, "read_file");
-        assert!(def.parameters.required.contains(&"path".to_string()));
+        assert!(def.parameters.required().contains(&"path".to_string()));
     }
 
     #[test]
@@ -405,5 +566,117 @@ mod tests {
         let result = execute_tool_dispatch(tool, Value::Null).await.unwrap();
         assert_eq!(result.text_content(), "blocking_result");
         assert!(!result.is_error);
+    }
+
+    /// Helper to create a named stub tool for registry tests.
+    struct NamedTool(&'static str);
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str { self.0 }
+        fn description(&self) -> &str { "test" }
+        fn definition(&self) -> ToolDefinition { ToolDefinition::new(self.0, "test") }
+        async fn execute(&self, _: Value) -> Result<ToolOutput, crate::Error> {
+            Ok(ToolOutput::success("ok"))
+        }
+    }
+
+    fn registry_with(names: &[&'static str]) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for name in names {
+            reg.register(Arc::new(NamedTool(name)));
+        }
+        reg
+    }
+
+    #[test]
+    fn test_resolve_internal_specific() {
+        let reg = registry_with(&["run", "read_file"]);
+        let resolved = reg.resolve_tool_refs(&["internal:run".into()]);
+        assert_eq!(resolved, vec!["run"]);
+    }
+
+    #[test]
+    fn test_resolve_internal_glob() {
+        let reg = registry_with(&["run", "read_file", "mcp__ws__web_search"]);
+        let mut resolved = reg.resolve_tool_refs(&["internal:*".into()]);
+        resolved.sort();
+        assert_eq!(resolved, vec!["read_file", "run"]);
+        assert!(!resolved.contains(&"mcp__ws__web_search".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_mcp_specific() {
+        let reg = registry_with(&["mcp__ws__web_search", "mcp__ws__fetch_webpage"]);
+        let resolved = reg.resolve_tool_refs(&["mcp:ws/web_search".into()]);
+        assert_eq!(resolved, vec!["mcp__ws__web_search"]);
+    }
+
+    #[test]
+    fn test_resolve_mcp_glob() {
+        let reg = registry_with(&[
+            "mcp__ws__web_search",
+            "mcp__ws__fetch_webpage",
+            "mcp__other__something",
+            "run",
+        ]);
+        let mut resolved = reg.resolve_tool_refs(&["mcp:ws/*".into()]);
+        resolved.sort();
+        assert_eq!(resolved, vec!["mcp__ws__fetch_webpage", "mcp__ws__web_search"]);
+    }
+
+    #[test]
+    fn test_resolve_mixed() {
+        let reg = registry_with(&[
+            "run", "read_file",
+            "mcp__ws__web_search", "mcp__ws__fetch_webpage",
+        ]);
+        let resolved = reg.resolve_tool_refs(&[
+            "internal:run".into(),
+            "mcp:ws/*".into(),
+            "internal:read_file".into(),
+        ]);
+        assert!(resolved.contains(&"run".to_string()));
+        assert!(resolved.contains(&"read_file".to_string()));
+        assert!(resolved.contains(&"mcp__ws__web_search".to_string()));
+        assert!(resolved.contains(&"mcp__ws__fetch_webpage".to_string()));
+        assert_eq!(resolved.len(), 4);
+    }
+
+    #[test]
+    fn test_resolve_no_duplicates() {
+        let reg = registry_with(&["mcp__ws__web_search"]);
+        let resolved = reg.resolve_tool_refs(&[
+            "mcp:ws/web_search".into(),
+            "mcp:ws/*".into(),
+        ]);
+        assert_eq!(resolved, vec!["mcp__ws__web_search"]);
+    }
+
+    #[test]
+    fn test_resolve_tool_limits() {
+        let reg = registry_with(&[
+            "run", "mcp__ws__web_search", "mcp__ws__fetch_webpage",
+        ]);
+        let mut limits = std::collections::HashMap::new();
+        limits.insert("run".into(), 10);
+        limits.insert("mcp:ws/web_search".into(), 2);
+        limits.insert("mcp:ws/fetch_webpage".into(), 5);
+
+        let resolved = reg.resolve_tool_limits(limits);
+        assert_eq!(resolved.get("run"), Some(&10));
+        assert_eq!(resolved.get("mcp__ws__web_search"), Some(&2));
+        assert_eq!(resolved.get("mcp__ws__fetch_webpage"), Some(&5));
+        assert_eq!(resolved.len(), 3);
+    }
+
+    #[test]
+    fn test_resolve_tool_limits_glob() {
+        let reg = registry_with(&["mcp__ws__web_search", "mcp__ws__fetch_webpage"]);
+        let mut limits = std::collections::HashMap::new();
+        limits.insert("mcp:ws/*".into(), 3);
+
+        let resolved = reg.resolve_tool_limits(limits);
+        assert_eq!(resolved.get("mcp__ws__web_search"), Some(&3));
+        assert_eq!(resolved.get("mcp__ws__fetch_webpage"), Some(&3));
     }
 }

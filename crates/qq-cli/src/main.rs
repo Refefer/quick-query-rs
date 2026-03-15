@@ -616,6 +616,24 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         None
     };
 
+    // Connect to MCP servers
+    let mcp_manager = if !config.mcp_servers.is_empty() && !disable_tools {
+        let manager = qq_mcp::McpManager::connect_all(&config.mcp_servers).await;
+        if !manager.is_empty() {
+            eprintln!(
+                "Connected to {} MCP server(s) ({} tools)",
+                manager.server_count(),
+                manager.tool_count()
+            );
+            for tool in manager.tools() {
+                base_tools.register(Arc::clone(tool));
+            }
+        }
+        Some(manager)
+    } else {
+        None
+    };
+
     // Load agents config
     let agents_config = AgentsConfig::load().unwrap_or_default();
 
@@ -754,7 +772,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         None => (None, None),
     };
 
-    if use_tui {
+    let result = if use_tui {
         tui::run_tui(
             cli,
             config,
@@ -776,6 +794,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             task_store.clone(),
             compactor.clone(),
             observation_config.clone(),
+            mcp_manager.as_ref(),
         )
         .await
     } else {
@@ -798,9 +817,17 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             task_store,
             compactor,
             observation_config,
+            mcp_manager.as_ref(),
         )
         .await
+    };
+
+    // Shut down MCP servers
+    if let Some(manager) = mcp_manager {
+        manager.shutdown().await;
     }
+
+    result
 }
 
 fn list_profiles(config: &Config) -> Result<()> {
