@@ -58,10 +58,12 @@ pub struct BuiltinAgentOverride {
     #[serde(default)]
     pub max_observations: Option<u32>,
 
-    /// Additional tool names to add to this agent's tool set.
+    /// Additional tool names/patterns to add to this agent's tool set.
     /// Use this to give built-in agents access to MCP or other extra tools.
-    #[serde(default)]
-    pub extra_tools: Vec<String>,
+    /// Supports the same pattern syntax as external agent `tools`: plain names,
+    /// `mcp:server/tool`, `mcp:server/*`, `internal:*`.
+    #[serde(default, alias = "extra_tools")]
+    pub tools: Vec<String>,
 
     /// Disable bash tool for this agent (default: false = bash enabled).
     #[serde(default)]
@@ -225,11 +227,11 @@ impl AgentsConfig {
             .unwrap_or(false)
     }
 
-    /// Get extra tools for a built-in agent from config overrides.
-    pub fn get_builtin_extra_tools(&self, name: &str) -> &[String] {
+    /// Get additional tool names/patterns for a built-in agent from config overrides.
+    pub fn get_builtin_tools(&self, name: &str) -> &[String] {
         self.builtin
             .get(name)
-            .map(|o| o.extra_tools.as_slice())
+            .map(|o| o.tools.as_slice())
             .unwrap_or(&[])
     }
 
@@ -589,6 +591,29 @@ context_budget_bytes = 400000
         assert_eq!(agent.message_threshold_bytes, Some(15000));
         assert_eq!(agent.observation_threshold_bytes, Some(80000));
         assert_eq!(agent.context_budget_bytes, Some(400000));
+    }
+
+    #[test]
+    fn test_builtin_tools_new_field() {
+        let toml_content = r#"
+[builtin.researcher]
+tools = ["mcp:ws/*", "mcp:brave/search"]
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+        let tools = config.get_builtin_tools("researcher");
+        assert_eq!(tools, &["mcp:ws/*", "mcp:brave/search"]);
+    }
+
+    #[test]
+    fn test_builtin_extra_tools_backward_compat() {
+        // "extra_tools" should still deserialize via serde alias
+        let toml_content = r#"
+[builtin.researcher]
+extra_tools = ["mcp:ws/web_search"]
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+        let tools = config.get_builtin_tools("researcher");
+        assert_eq!(tools, &["mcp:ws/web_search"]);
     }
 
     #[test]

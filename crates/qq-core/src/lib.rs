@@ -30,7 +30,7 @@ pub use task::{
     complete_parallel, execute_tools_parallel, execute_tools_parallel_with_chunker,
     TaskHandle, TaskId, TaskInfo, TaskManager, TaskState, ToolExecutionResult,
 };
-pub use tool::{PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry, execute_tool_dispatch};
+pub use tool::{PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolPattern, ToolRef, ToolRegistry, execute_tool_dispatch};
 pub use chunker::{ChunkProcessor, ChunkerConfig};
 pub use blocking::run_blocking;
 pub use observation::{ContextCompactor, ObservationalMemory, ObservationConfig, find_safe_split_point, strip_images_from_messages};

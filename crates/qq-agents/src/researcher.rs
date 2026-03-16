@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use qq_core::{ToolPattern, ToolRef};
+
 use crate::InternalAgent;
 
 const SYSTEM_PROMPT: &str = r#"You are an autonomous web research agent. You receive HIGH-LEVEL RESEARCH QUESTIONS, not URLs to fetch.
@@ -114,7 +116,7 @@ impl InternalAgent for ResearcherAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["run", "web_search", "fetch_webpage", "update_my_task"]
+        &["run", "read_image", "web_search", "fetch_webpage", "update_my_task"]
     }
 
     fn max_turns(&self) -> usize {
@@ -139,6 +141,18 @@ impl InternalAgent for ResearcherAgent {
     fn is_read_only(&self) -> bool {
         true
     }
+
+    fn tool_patterns(&self) -> Vec<ToolPattern> {
+        vec![
+            ToolPattern::Exact(ToolRef::Internal("run".into())),
+            ToolPattern::Exact(ToolRef::Internal("read_image".into())),
+            ToolPattern::Exact(ToolRef::Internal("web_search".into())),
+            ToolPattern::Exact(ToolRef::Internal("fetch_webpage".into())),
+            ToolPattern::Exact(ToolRef::Internal("update_my_task".into())),
+            // Automatically pick up tools from any connected MCP web search server
+            ToolPattern::McpGlob("websearch".into()),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +166,7 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"run"));
+        assert!(agent.tool_names().contains(&"read_image"));
         assert!(agent.tool_names().contains(&"web_search"));
         assert!(agent.tool_names().contains(&"fetch_webpage"));
         assert!(agent.tool_names().contains(&"update_my_task"));

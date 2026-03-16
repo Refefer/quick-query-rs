@@ -124,6 +124,17 @@ pub trait InternalAgent: Send + Sync {
     fn observation_config(&self) -> Option<qq_core::ObservationConfig> {
         None
     }
+
+    /// Get tool patterns this agent requires.
+    ///
+    /// Default: wraps each `tool_names()` entry as `ToolPattern::Exact(Internal(...))`.
+    /// Override to include MCP glob patterns or other non-internal tools.
+    fn tool_patterns(&self) -> Vec<qq_core::ToolPattern> {
+        self.tool_names()
+            .iter()
+            .map(|name| qq_core::ToolPattern::Exact(qq_core::ToolRef::Internal(name.to_string())))
+            .collect()
+    }
 }
 
 /// Information about an available agent.

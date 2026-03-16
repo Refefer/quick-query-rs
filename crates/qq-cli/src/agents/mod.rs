@@ -134,9 +134,18 @@ impl AgentExecutor {
 
     /// Run an internal agent.
     async fn run_internal(&self, agent: &dyn InternalAgent, task: &str) -> Result<String> {
-        // Build tool subset for this agent
-        let agent_tools = self.tools.subset_from_strs(agent.tool_names());
-        let agent_tools = Arc::new(agent_tools);
+        // Build tool list: agent's tool patterns + config tools
+        let mut patterns = agent.tool_patterns();
+
+        for tool_str in self.external_agents.get_builtin_tools(agent.name()) {
+            let pattern = qq_core::ToolPattern::from_str(tool_str);
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
+
+        let resolved = self.tools.resolve_patterns(&patterns);
+        let agent_tools = Arc::new(self.tools.subset(&resolved));
 
         // Build config
         let config = AgentConfig::new(agent.name())
@@ -160,9 +169,12 @@ impl AgentExecutor {
 
     /// Run an external agent.
     async fn run_external(&self, def: &AgentDefinition, task: &str) -> Result<String> {
-        // Build tool subset for this agent
-        let agent_tools = self.tools.subset(&def.tools);
-        let agent_tools = Arc::new(agent_tools);
+        // Parse external agent tool entries as patterns, then resolve
+        let patterns: Vec<qq_core::ToolPattern> = def.tools.iter()
+            .map(|s| qq_core::ToolPattern::from_str(s))
+            .collect();
+        let resolved = self.tools.resolve_patterns(&patterns);
+        let agent_tools = Arc::new(self.tools.subset(&resolved));
 
         // Build config
         let config = AgentConfig::new("external")

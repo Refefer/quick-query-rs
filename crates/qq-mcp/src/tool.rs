@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use qq_core::{Error, Tool, ToolDefinition, ToolOutput, ToolParameters};
+use qq_core::{Error, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRef};
 use rmcp::model::{RawContent, ResourceContents};
 
 use crate::client::McpClient;
@@ -14,6 +14,10 @@ pub struct McpTool {
     namespaced_name: String,
     /// Original MCP tool name (for call_tool)
     mcp_tool_name: String,
+    /// Server name
+    server_name: String,
+    /// Human-readable display name: "mcp:<server>/<tool>"
+    display_name_str: String,
     /// Tool description
     description: String,
     /// Raw JSON Schema from the MCP server
@@ -25,6 +29,7 @@ pub struct McpTool {
 impl McpTool {
     pub fn new(server_name: &str, mcp_tool: &rmcp::model::Tool, client: Arc<McpClient>) -> Self {
         let namespaced_name = format!("mcp__{}__{}", server_name, mcp_tool.name);
+        let display_name_str = format!("mcp:{}/{}", server_name, mcp_tool.name);
         let description = mcp_tool
             .description
             .as_deref()
@@ -37,9 +42,19 @@ impl McpTool {
         Self {
             namespaced_name,
             mcp_tool_name: mcp_tool.name.to_string(),
+            server_name: server_name.to_string(),
+            display_name_str,
             description,
             input_schema,
             client,
+        }
+    }
+
+    /// Get a typed `ToolRef` for this MCP tool.
+    pub fn tool_ref(&self) -> ToolRef {
+        ToolRef::Mcp {
+            server: self.server_name.clone(),
+            tool: self.mcp_tool_name.clone(),
         }
     }
 }
@@ -52,6 +67,10 @@ impl Tool for McpTool {
 
     fn description(&self) -> &str {
         &self.description
+    }
+
+    fn display_name(&self) -> &str {
+        &self.display_name_str
     }
 
     fn definition(&self) -> ToolDefinition {
