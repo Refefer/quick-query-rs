@@ -85,7 +85,7 @@ impl McpManager {
 
                     for mcp_tool in client.tools() {
                         let tool = McpTool::new(name, mcp_tool, Arc::clone(&client));
-                        tool_names.push(tool.name().to_string());
+                        tool_names.push(tool.display_name().to_string());
                         tools.push(Arc::new(tool));
                     }
 

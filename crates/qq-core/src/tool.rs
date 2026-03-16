@@ -1,9 +1,127 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::error::Error;
+
+// =============================================================================
+// ToolRef — A resolved reference to a single tool
+// =============================================================================
+
+/// A typed reference to a single tool, distinguishing internal vs MCP routing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ToolRef {
+    /// Built-in tool. Wire name = the tool name itself (e.g., "run").
+    Internal(String),
+    /// MCP tool. Wire name = "mcp__<server>__<tool>".
+    Mcp { server: String, tool: String },
+}
+
+impl ToolRef {
+    /// Flat string for LLM API: `"run"` or `"mcp__ws__web_search"`.
+    pub fn wire_name(&self) -> String {
+        match self {
+            ToolRef::Internal(name) => name.clone(),
+            ToolRef::Mcp { server, tool } => format!("mcp__{}__{}", server, tool),
+        }
+    }
+
+    /// URI-style name for display: `"run"` or `"mcp:ws/web_search"`.
+    pub fn display_name(&self) -> String {
+        match self {
+            ToolRef::Internal(name) => name.clone(),
+            ToolRef::Mcp { server, tool } => format!("mcp:{}/{}", server, tool),
+        }
+    }
+
+    /// Parse a mangled wire name back into a `ToolRef`.
+    ///
+    /// If the string matches `mcp__<server>__<tool>` (split on first two `__`
+    /// segments), it's `Mcp`; otherwise `Internal`.
+    pub fn from_wire_name(s: &str) -> Self {
+        if let Some(rest) = s.strip_prefix("mcp__") {
+            if let Some((server, tool)) = rest.split_once("__") {
+                return ToolRef::Mcp {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                };
+            }
+        }
+        ToolRef::Internal(s.to_string())
+    }
+
+    /// Parse a config/URI-style reference into a `ToolRef`.
+    ///
+    /// - `"mcp:ws/web_search"` → `Mcp { ws, web_search }`
+    /// - `"internal:run"` → `Internal("run")`
+    /// - `"run"` (unqualified) → `Internal("run")`
+    pub fn from_uri(s: &str) -> Self {
+        if let Some(rest) = s.strip_prefix("mcp:") {
+            if let Some((server, tool)) = rest.split_once('/') {
+                return ToolRef::Mcp {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                };
+            }
+        }
+        if let Some(rest) = s.strip_prefix("internal:") {
+            return ToolRef::Internal(rest.to_string());
+        }
+        ToolRef::Internal(s.to_string())
+    }
+}
+
+impl fmt::Display for ToolRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+// =============================================================================
+// ToolPattern — A pattern that matches one or more tools
+// =============================================================================
+
+/// A pattern that matches one or more tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPattern {
+    /// Match a specific tool.
+    Exact(ToolRef),
+    /// Match all tools from an MCP server: `"mcp:ws/*"`.
+    McpGlob(String),
+    /// Match all internal tools: `"internal:*"`.
+    AllInternal,
+}
+
+impl ToolPattern {
+    /// Parse a pattern string into a `ToolPattern`.
+    ///
+    /// - `"mcp:ws/*"` → `McpGlob("ws")`
+    /// - `"internal:*"` → `AllInternal`
+    /// - anything else → `Exact(ToolRef::from_uri(s))`
+    pub fn from_str(s: &str) -> Self {
+        if let Some(rest) = s.strip_prefix("mcp:") {
+            if let Some(server) = rest.strip_suffix("/*") {
+                return ToolPattern::McpGlob(server.to_string());
+            }
+        }
+        if s == "internal:*" {
+            return ToolPattern::AllInternal;
+        }
+        ToolPattern::Exact(ToolRef::from_uri(s))
+    }
+}
+
+impl fmt::Display for ToolPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ToolPattern::Exact(r) => write!(f, "{}", r),
+            ToolPattern::McpGlob(server) => write!(f, "mcp:{}/*", server),
+            ToolPattern::AllInternal => write!(f, "internal:*"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -290,6 +408,11 @@ pub trait Tool: Send + Sync {
     /// Short summary for user display (e.g., /tools command).
     fn description(&self) -> &str;
 
+    /// Human-readable display name. Default: same as name() (wire name).
+    fn display_name(&self) -> &str {
+        self.name()
+    }
+
     /// Rich description sent to LLMs as part of the tool definition.
     /// Includes usage examples, dos/don'ts, and behavioral guidance.
     /// Default: falls back to `description()`.
@@ -437,6 +560,51 @@ impl ToolRegistry {
         let mut resolved = std::collections::HashMap::new();
         for (key, value) in limits {
             for name in self.resolve_tool_refs(&[key]) {
+                resolved.insert(name, value);
+            }
+        }
+        resolved
+    }
+
+    /// Resolve typed `ToolPattern`s to actual registry tool names.
+    pub fn resolve_patterns(&self, patterns: &[ToolPattern]) -> Vec<String> {
+        let mut result = Vec::new();
+        for pattern in patterns {
+            match pattern {
+                ToolPattern::Exact(ref_) => {
+                    let name = ref_.wire_name();
+                    if !result.contains(&name) {
+                        result.push(name);
+                    }
+                }
+                ToolPattern::McpGlob(server) => {
+                    let prefix = format!("mcp__{}__", server);
+                    for name in self.tools.keys() {
+                        if name.starts_with(&prefix) && !result.contains(name) {
+                            result.push(name.clone());
+                        }
+                    }
+                }
+                ToolPattern::AllInternal => {
+                    for name in self.tools.keys() {
+                        if !name.starts_with("mcp__") && !result.contains(name) {
+                            result.push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Resolve typed `ToolPattern` limit keys to actual registry tool names.
+    pub fn resolve_pattern_limits(
+        &self,
+        limits: std::collections::HashMap<ToolPattern, usize>,
+    ) -> std::collections::HashMap<String, usize> {
+        let mut resolved = std::collections::HashMap::new();
+        for (pattern, value) in limits {
+            for name in self.resolve_patterns(&[pattern]) {
                 resolved.insert(name, value);
             }
         }
@@ -678,5 +846,180 @@ mod tests {
         let resolved = reg.resolve_tool_limits(limits);
         assert_eq!(resolved.get("mcp__ws__web_search"), Some(&3));
         assert_eq!(resolved.get("mcp__ws__fetch_webpage"), Some(&3));
+    }
+
+    // =========================================================================
+    // ToolRef tests
+    // =========================================================================
+
+    #[test]
+    fn test_tool_ref_internal_round_trip() {
+        let r = ToolRef::Internal("run".to_string());
+        assert_eq!(r.wire_name(), "run");
+        assert_eq!(r.display_name(), "run");
+        assert_eq!(ToolRef::from_wire_name("run"), r);
+    }
+
+    #[test]
+    fn test_tool_ref_mcp_round_trip() {
+        let r = ToolRef::Mcp {
+            server: "ws".to_string(),
+            tool: "web_search".to_string(),
+        };
+        assert_eq!(r.wire_name(), "mcp__ws__web_search");
+        assert_eq!(r.display_name(), "mcp:ws/web_search");
+        assert_eq!(ToolRef::from_wire_name("mcp__ws__web_search"), r);
+    }
+
+    #[test]
+    fn test_tool_ref_display() {
+        let internal = ToolRef::Internal("run".to_string());
+        assert_eq!(format!("{}", internal), "run");
+
+        let mcp = ToolRef::Mcp {
+            server: "ws".to_string(),
+            tool: "web_search".to_string(),
+        };
+        assert_eq!(format!("{}", mcp), "mcp:ws/web_search");
+    }
+
+    #[test]
+    fn test_tool_ref_from_uri() {
+        assert_eq!(
+            ToolRef::from_uri("mcp:ws/web_search"),
+            ToolRef::Mcp {
+                server: "ws".to_string(),
+                tool: "web_search".to_string(),
+            }
+        );
+        assert_eq!(
+            ToolRef::from_uri("internal:run"),
+            ToolRef::Internal("run".to_string())
+        );
+        assert_eq!(
+            ToolRef::from_uri("run"),
+            ToolRef::Internal("run".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tool_ref_from_wire_name_internal() {
+        // Strings that don't match mcp__X__Y stay internal
+        assert_eq!(
+            ToolRef::from_wire_name("read_file"),
+            ToolRef::Internal("read_file".to_string())
+        );
+        // "mcp__" alone (no second __) is internal
+        assert_eq!(
+            ToolRef::from_wire_name("mcp__incomplete"),
+            ToolRef::Internal("mcp__incomplete".to_string())
+        );
+    }
+
+    // =========================================================================
+    // ToolPattern tests
+    // =========================================================================
+
+    #[test]
+    fn test_tool_pattern_from_str() {
+        assert_eq!(
+            ToolPattern::from_str("mcp:ws/*"),
+            ToolPattern::McpGlob("ws".to_string())
+        );
+        assert_eq!(ToolPattern::from_str("internal:*"), ToolPattern::AllInternal);
+        assert_eq!(
+            ToolPattern::from_str("run"),
+            ToolPattern::Exact(ToolRef::Internal("run".to_string()))
+        );
+        assert_eq!(
+            ToolPattern::from_str("mcp:ws/web_search"),
+            ToolPattern::Exact(ToolRef::Mcp {
+                server: "ws".to_string(),
+                tool: "web_search".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_tool_pattern_display() {
+        assert_eq!(format!("{}", ToolPattern::McpGlob("ws".into())), "mcp:ws/*");
+        assert_eq!(format!("{}", ToolPattern::AllInternal), "internal:*");
+        assert_eq!(
+            format!("{}", ToolPattern::Exact(ToolRef::Internal("run".into()))),
+            "run"
+        );
+    }
+
+    // =========================================================================
+    // resolve_patterns tests
+    // =========================================================================
+
+    #[test]
+    fn test_resolve_patterns_exact_internal() {
+        let reg = registry_with(&["run", "read_file"]);
+        let resolved = reg.resolve_patterns(&[
+            ToolPattern::Exact(ToolRef::Internal("run".to_string())),
+        ]);
+        assert_eq!(resolved, vec!["run"]);
+    }
+
+    #[test]
+    fn test_resolve_patterns_exact_mcp() {
+        let reg = registry_with(&["mcp__ws__web_search"]);
+        let resolved = reg.resolve_patterns(&[
+            ToolPattern::Exact(ToolRef::Mcp {
+                server: "ws".to_string(),
+                tool: "web_search".to_string(),
+            }),
+        ]);
+        assert_eq!(resolved, vec!["mcp__ws__web_search"]);
+    }
+
+    #[test]
+    fn test_resolve_patterns_mcp_glob() {
+        let reg = registry_with(&[
+            "mcp__ws__web_search",
+            "mcp__ws__fetch_webpage",
+            "mcp__other__something",
+            "run",
+        ]);
+        let mut resolved = reg.resolve_patterns(&[ToolPattern::McpGlob("ws".to_string())]);
+        resolved.sort();
+        assert_eq!(resolved, vec!["mcp__ws__fetch_webpage", "mcp__ws__web_search"]);
+    }
+
+    #[test]
+    fn test_resolve_patterns_all_internal() {
+        let reg = registry_with(&["run", "read_file", "mcp__ws__web_search"]);
+        let mut resolved = reg.resolve_patterns(&[ToolPattern::AllInternal]);
+        resolved.sort();
+        assert_eq!(resolved, vec!["read_file", "run"]);
+    }
+
+    #[test]
+    fn test_resolve_patterns_no_duplicates() {
+        let reg = registry_with(&["mcp__ws__web_search"]);
+        let resolved = reg.resolve_patterns(&[
+            ToolPattern::Exact(ToolRef::Mcp {
+                server: "ws".to_string(),
+                tool: "web_search".to_string(),
+            }),
+            ToolPattern::McpGlob("ws".to_string()),
+        ]);
+        assert_eq!(resolved, vec!["mcp__ws__web_search"]);
+    }
+
+    #[test]
+    fn test_resolve_patterns_empty_glob() {
+        // Glob for a server that doesn't exist resolves to nothing
+        let reg = registry_with(&["run"]);
+        let resolved = reg.resolve_patterns(&[ToolPattern::McpGlob("nonexistent".to_string())]);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_tool_display_name_default() {
+        let tool = NonBlockingTool;
+        assert_eq!(tool.display_name(), tool.name());
     }
 }

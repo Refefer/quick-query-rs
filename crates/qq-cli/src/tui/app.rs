@@ -324,11 +324,12 @@ impl TuiApp {
                 // Auto-scroll if enabled (handled by ScrollState)
             }
             StreamEvent::ToolCallStart { id, name } => {
+                let display = qq_core::ToolRef::from_wire_name(&name).to_string();
                 self.tool_notifications.push(
-                    ToolNotification::new(name.clone(), ToolNotificationStatus::Started)
+                    ToolNotification::new(display.clone(), ToolNotificationStatus::Started)
                         .with_id(id),
                 );
-                self.status_message = Some(format!("Tool: {}", name));
+                self.status_message = Some(format!("Tool: {}", display));
             }
             StreamEvent::ToolCallDelta { arguments: _ } => {
                 // We don't update args preview in real-time to avoid noise
@@ -431,8 +432,9 @@ impl TuiApp {
                 arguments,
             } => {
                 self.streaming_state = StreamingState::Listening;
+                let display = qq_core::ToolRef::from_wire_name(&tool_name).to_string();
                 let mut notif = ToolNotification::new(
-                    tool_name.clone(),
+                    display,
                     ToolNotificationStatus::Executing,
                 );
                 notif.preview = arguments;
@@ -1474,8 +1476,8 @@ fn key_to_action(key: KeyEvent, is_streaming: bool) -> Option<InputAction> {
         // Toggle mouse capture for text selection (Ctrl+Y)
         (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(InputAction::ToggleMouse),
 
-        // Paste image from clipboard (Alt+V)
-        (KeyCode::Char('v'), KeyModifiers::ALT) => Some(InputAction::PasteImage),
+        // Paste image from clipboard (Ctrl+V)
+        (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(InputAction::PasteImage),
 
         // Characters (only when not streaming)
         (KeyCode::Char(c), KeyModifiers::NONE) if !is_streaming => Some(InputAction::Char(c)),
@@ -1534,12 +1536,13 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
 /// Format tools list for display
 fn format_tools_list(registry: &ToolRegistry) -> String {
     let mut output = String::from("Available tools:\n\n");
-    let mut names: Vec<_> = registry.names().into_iter().collect();
-    names.sort();
-    for name in names {
-        if let Some(tool) = registry.get(name) {
-            // Use Tool::description() which is the short human-friendly version
-            output.push_str(&format!("  {} - {}\n", name, tool.description()));
+    let mut entries: Vec<_> = registry.names().into_iter()
+        .map(|wire| (qq_core::ToolRef::from_wire_name(wire).to_string(), wire))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (display, wire) in entries {
+        if let Some(tool) = registry.get(wire) {
+            output.push_str(&format!("  {} - {}\n", display, tool.description()));
         }
     }
     output

@@ -409,13 +409,14 @@ fn print_tool_call(name: &str, args: &serde_json::Value) -> std::io::Result<()> 
     use crossterm::style::{Color, SetForegroundColor, ResetColor};
     use std::io::Write;
 
+    let display = qq_core::ToolRef::from_wire_name(name);
     let formatted_args = format_tool_args(args);
 
     let mut stdout = std::io::stdout();
     stdout.execute(SetForegroundColor(Color::DarkGrey))?;
     print!("▶ ");
     stdout.execute(SetForegroundColor(Color::Yellow))?;
-    print!("{}", name);
+    print!("{}", display);
     if !formatted_args.is_empty() {
         stdout.execute(SetForegroundColor(Color::DarkGrey))?;
         print!(" {}", formatted_args);
@@ -709,11 +710,13 @@ pub async fn run_chat(
                     }
                     ChatCommand::Tools => {
                         println!("\nAvailable tools:");
-                        let mut names: Vec<_> = tools_registry.names().into_iter().collect();
-                        names.sort();
-                        for name in names {
-                            if let Some(tool) = tools_registry.get(name) {
-                                println!("  {} - {}", name, tool.description());
+                        let mut entries: Vec<_> = tools_registry.names().into_iter()
+                            .map(|wire| (qq_core::ToolRef::from_wire_name(wire).to_string(), wire))
+                            .collect();
+                        entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (display, wire) in entries {
+                            if let Some(tool) = tools_registry.get(wire) {
+                                println!("  {} - {}", display, tool.description());
                             }
                         }
                         println!();

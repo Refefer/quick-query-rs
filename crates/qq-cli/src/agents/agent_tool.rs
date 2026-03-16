@@ -514,31 +514,40 @@ impl Tool for InternalAgentTool {
             .get_builtin_observation_config(self.agent.name(), self.context_window)
             .or_else(|| self.agent.observation_config());
 
-        let mut tool_names: Vec<String> = self.agent.tool_names().iter().map(|s| s.to_string()).collect();
+        let mut patterns: Vec<qq_core::ToolPattern> = self.agent.tool_patterns();
 
         // Auto-inject run + mount_external + access-request tools unless disabled via config
         let no_run = self.external_agents.get_builtin_no_bash(self.agent.name());
-        if !no_run && !tool_names.is_empty() {
-            if !tool_names.iter().any(|n| n == "run") {
-                tool_names.push("run".to_string());
+        if !no_run && !patterns.is_empty() {
+            let run_pat = qq_core::ToolPattern::Exact(qq_core::ToolRef::Internal("run".into()));
+            let mount_pat = qq_core::ToolPattern::Exact(qq_core::ToolRef::Internal("mount_external".into()));
+            let sensitive_pat = qq_core::ToolPattern::Exact(qq_core::ToolRef::Internal("request_sensitive_access".into()));
+            if !patterns.contains(&run_pat) {
+                patterns.push(run_pat);
             }
-            if !tool_names.iter().any(|n| n == "mount_external") {
-                tool_names.push("mount_external".to_string());
+            if !patterns.contains(&mount_pat) {
+                patterns.push(mount_pat);
             }
-            if self.ask_network && !tool_names.iter().any(|n| n == "request_network_access") {
-                tool_names.push("request_network_access".to_string());
+            if self.ask_network {
+                let net_pat = qq_core::ToolPattern::Exact(qq_core::ToolRef::Internal("request_network_access".into()));
+                if !patterns.contains(&net_pat) {
+                    patterns.push(net_pat);
+                }
             }
-            if !tool_names.iter().any(|n| n == "request_sensitive_access") {
-                tool_names.push("request_sensitive_access".to_string());
+            if !patterns.contains(&sensitive_pat) {
+                patterns.push(sensitive_pat);
             }
         }
 
-        // Append extra tools from config overrides (e.g., MCP tools)
-        for extra in self.external_agents.get_builtin_extra_tools(self.agent.name()) {
-            if !tool_names.iter().any(|n| n == extra) {
-                tool_names.push(extra.clone());
+        // Append config tools (replaces extra_tools)
+        for tool_str in self.external_agents.get_builtin_tools(self.agent.name()) {
+            let pattern = qq_core::ToolPattern::from_str(tool_str);
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
             }
         }
+
+        let tool_names = self.base_tools.resolve_patterns(&patterns);
 
         let config = AgentToolConfig {
             agent_name: self.agent.name().to_string(),
