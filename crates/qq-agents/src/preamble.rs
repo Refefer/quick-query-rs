@@ -76,6 +76,8 @@ pub struct PreambleContext {
     pub has_preferences: bool,
     /// Whether this agent has bash access.
     pub has_bash: bool,
+    /// Whether this agent has unrestricted network access (true = no approval needed).
+    pub has_network: bool,
     /// Whether this agent is read-only (must not modify files).
     pub is_read_only: bool,
 }
@@ -225,14 +227,21 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
 
     // Shell access (conditional)
     if ctx.has_bash {
-        sections.push(
+        let network_section = if ctx.has_network {
+            "Network access is available — commands like curl, wget, git clone, \
+             npm install, etc. can use the network freely."
+        } else {
+            "Network access is blocked by default — call the `request_network_access` tool before running\n\
+             any command that needs the internet (curl, wget, git clone, npm install from remote, etc.)."
+        };
+
+        sections.push(format!(
             "### Shell Access\n\
              You have sandboxed shell access via the `run` tool. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
              run without approval. Write commands (cargo build, git commit, npm install, rm, etc.) require user approval.\n\
              The `run` tool is your primary tool for ALL file operations — reading (cat, head), writing (cat >, tee),\n\
              editing (sed -i), searching (grep -rn, find), and file management (cp, mv, mkdir -p, rm).\n\
-             Network access is blocked by default — call the `request_network_access` tool before running\n\
-             any command that needs the internet (curl, wget, git clone, npm install from remote, etc.).\n\
+             {}\n\
              Sensitive home directories (.ssh, .aws, .kube, .docker, etc.) are hidden by default — call\n\
              `request_sensitive_access` before running tools that need stored credentials (gh, kubectl, docker, aws, etc.).\n\
              \n\
@@ -253,9 +262,9 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
                other agents or returning results to your caller\n\
              \n\
              Rule of thumb: if a task involves more than 2-3 intermediate steps, use /tmp files to track\n\
-             state between steps rather than relying on context alone."
-                .to_string(),
-        );
+             state between steps rather than relying on context alone.",
+            network_section
+        ));
     }
 
     // Read-only reinforcement (conditional)
@@ -332,6 +341,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -366,6 +376,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -385,6 +396,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -405,6 +417,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -424,6 +437,7 @@ mod tests {
             has_task_tracking: true,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -442,6 +456,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: true,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -463,6 +478,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: true,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -483,6 +499,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: true,
         }, &agent_ctx);
 
@@ -502,6 +519,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: true,
+            has_network: true,
             is_read_only: true,
         }, &agent_ctx);
 
@@ -520,6 +538,7 @@ mod tests {
             has_task_tracking: true,
             has_preferences: true,
             has_bash: true,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -549,6 +568,7 @@ mod tests {
             has_task_tracking: false,
             has_preferences: false,
             has_bash: false,
+            has_network: true,
             is_read_only: false,
         }, &agent_ctx);
 
@@ -557,5 +577,60 @@ mod tests {
         assert!(preamble.contains("development"));
         assert!(preamble.contains("TEAM"));
         assert!(preamble.contains("platform"));
+    }
+
+    #[test]
+    fn test_preamble_network_available() {
+        let agent_ctx = AgentContext::new();
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: true,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_preferences: false,
+            has_bash: true,
+            has_network: true,
+            is_read_only: false,
+        }, &agent_ctx);
+
+        assert!(preamble.contains("Network access is available"));
+        assert!(!preamble.contains("request_network_access"));
+    }
+
+    #[test]
+    fn test_preamble_network_restricted() {
+        let agent_ctx = AgentContext::new();
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: true,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_preferences: false,
+            has_bash: true,
+            has_network: false,
+            is_read_only: false,
+        }, &agent_ctx);
+
+        assert!(!preamble.contains("Network access is available"));
+        assert!(preamble.contains("request_network_access"));
+    }
+
+    #[test]
+    fn test_preamble_no_bash_no_network_text() {
+        let agent_ctx = AgentContext::new();
+        let preamble = generate_preamble(&PreambleContext {
+            has_tools: true,
+            has_sub_agents: false,
+            has_inform_user: false,
+            has_task_tracking: false,
+            has_preferences: false,
+            has_bash: false,
+            has_network: false,
+            is_read_only: false,
+        }, &agent_ctx);
+
+        // Shell section is skipped entirely when has_bash is false
+        assert!(!preamble.contains("Network access is available"));
+        assert!(!preamble.contains("request_network_access"));
     }
 }

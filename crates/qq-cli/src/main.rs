@@ -157,6 +157,10 @@ pub struct Cli {
     #[arg(long)]
     pub agent_mode: bool,
 
+    /// Require agents to request network access approval before using the network
+    #[arg(long)]
+    pub ask_network: bool,
+
     /// Image files to include with the prompt (completion mode only, may be repeated)
     #[arg(short = 'i', long = "image", value_name = "FILE")]
     pub images: Vec<PathBuf>,
@@ -269,7 +273,7 @@ struct RunResources {
 }
 
 /// Build tools registry from config.
-fn build_tools_registry(config: &Config, insecure: bool, agent_mode: bool) -> Result<(ToolRegistry, Option<RunResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
+fn build_tools_registry(config: &Config, insecure: bool, agent_mode: bool, supported_mimetypes: &[String], ask_network: bool) -> Result<(ToolRegistry, Option<RunResources>, Option<tokio::sync::mpsc::Receiver<qq_tools::ApprovalRequest>>)> {
     // Resolve root directory: config > $PWD
     let root = config.tools.root.as_ref()
         .map(|s| expand_path(s))
@@ -335,6 +339,13 @@ fn build_tools_registry(config: &Config, insecure: bool, agent_mode: bool) -> Re
         (None, None)
     };
 
+    // Image tools (only if model supports image content)
+    if supported_mimetypes.iter().any(|t| t == "image") {
+        for tool in qq_tools::create_image_tools(root.clone()) {
+            registry.register(tool);
+        }
+    }
+
     // Web tools
     if config.tools.enable_web {
         let web_search_config = config.tools.web_search.as_ref().map(|ws| {
@@ -367,6 +378,7 @@ fn build_tools_registry(config: &Config, insecure: bool, agent_mode: bool) -> Re
             Arc::clone(&permissions),
             approval_tx,
             path_policy,
+            ask_network,
         ) {
             registry.register(tool);
         }
@@ -394,7 +406,9 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
     let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
 
     // Set up tools
-    let (tools_registry, _run_resources, _approval_rx) = build_tools_registry(config, cli.insecure, cli.agent_mode)?;
+    let mimetypes = settings.supported_content_types.clone()
+        .unwrap_or_else(|| vec!["text".into(), "image".into()]);
+    let (tools_registry, _run_resources, _approval_rx) = build_tools_registry(config, cli.insecure, cli.agent_mode, &mimetypes, cli.ask_network)?;
 
     // Set up chunk processor for large tool outputs
     let chunker_config = config.tools.chunker.to_chunker_config();
@@ -583,6 +597,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             has_task_tracking: false, // PM uses full task tools, not update_my_task
             has_preferences: false,   // PM delegates preference access to sub-agents
             has_bash: false,          // PM delegates bash to sub-agents
+            has_network: !cli.ask_network,
             is_read_only: false,
         }, &agent_ctx);
         let combined = format!("{}\n\n---\n\n{}", preamble, base_prompt);
@@ -602,7 +617,9 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         tracing::debug!("Tools disabled (--no-tools or --minimal)");
         (ToolRegistry::new(), None, None)
     } else {
-        build_tools_registry(config, cli.insecure, cli.agent_mode)?
+        let mimetypes = settings.supported_content_types.clone()
+            .unwrap_or_else(|| vec!["text".into(), "image".into()]);
+        build_tools_registry(config, cli.insecure, cli.agent_mode, &mimetypes, cli.ask_network)?
     };
 
     // Register task tracking tools (session-scoped, in-memory)
@@ -734,6 +751,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             task_store.clone(),
             compactor.clone(),
             context_window,
+            cli.ask_network,
         )
     };
 
