@@ -63,8 +63,18 @@ impl RunTool {
         approval: ApprovalChannel,
         path_policy: Arc<RwLock<SandboxPathPolicy>>,
     ) -> Self {
+        Self::with_network_mode(mounts, permissions, approval, path_policy, false)
+    }
+
+    pub fn with_network_mode(
+        mounts: Arc<SandboxMounts>,
+        permissions: Arc<PermissionStore>,
+        approval: ApprovalChannel,
+        path_policy: Arc<RwLock<SandboxPathPolicy>>,
+        has_network: bool,
+    ) -> Self {
         let executor = SandboxExecutor::detect();
-        let tool_desc = build_tool_description(&mounts, &executor);
+        let tool_desc = build_tool_description(&mounts, &executor, has_network);
         Self {
             mounts,
             permissions,
@@ -511,7 +521,7 @@ fn is_snap_binary(cmd_name: &str) -> bool {
 }
 
 /// Build the dynamic tool description based on current mounts and sandbox mode.
-fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) -> String {
+fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, has_network: bool) -> String {
     let mode = executor.mode_name();
     let supports_shell = executor.supports_shell();
     let root = mounts.project_root().display();
@@ -547,7 +557,14 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
             - Simple commands only (e.g., 'ls -la', 'grep pattern file')\n");
     }
 
-    desc.push_str("\nFile operations:\n\
+    let network_text = if has_network {
+        "Network access is available — commands like curl, wget, git clone, npm install, etc. can use the network freely."
+    } else {
+        "Network access is blocked by default — use request_network_access tool to request permission. \
+If you have trouble connecting, check that you have requested network access first."
+    };
+
+    desc.push_str(&format!("\nFile operations:\n\
         - Read: cat file.txt, head -n 50 file.txt, tail -n 20 file.txt\n\
         - Write: cat > file.txt << 'EOF'\\n...\\nEOF, or tee file.txt\n\
         - Edit: sed -i 's/old/new/g' file.txt\n\
@@ -559,10 +576,8 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor) ->
         Permission tiers:\n\
         - Session (run immediately): ls, cat, grep, find, git log, git diff, cargo build, cargo test, npm test, etc.\n\
         - Per-call (requires user approval): cargo run, npm install, git commit, rm, mv, python, etc.\n\
-        - Restricted (blocked by default): sudo, dd, kill, iptables, etc.\n\
-        - Network transfer (curl, wget, ssh, etc.) requires per-call approval — use request_network_access first.\n\n\
-        Network access is not available by default — use request_network_access tool to request permission. \
-If you have trouble connecting, check that you have requested network access first. \
+        - Restricted (blocked by default): sudo, dd, kill, iptables, etc.\n\n\
+        {}\n\
 Commands execute with a 30-second default timeout.\n\n\
         Examples:\n\
         - List files: ls -la src/\n\
@@ -574,34 +589,40 @@ Commands execute with a 30-second default timeout.\n\n\
         - Write file: cat > output.txt << 'EOF'\\ncontent here\\nEOF\n\
         - Edit file: sed -i 's/old_func/new_func/g' src/lib.rs\n\
         - Run binary: cargo run --bin myapp (requires approval)\n\
-        - Install deps: npm install (requires approval)");
+        - Install deps: npm install (requires approval)", network_text));
 
     desc
 }
 
 /// Create run tools for registration in a tool registry.
 ///
-/// Returns `run`, `mount_external`, `request_network_access`, and
-/// `request_sensitive_access` as a bundle. The `path_policy` is wrapped in an
-/// `Arc<RwLock<>>` shared between `RunTool` and `RequestSensitiveAccessTool`
-/// so that approved sensitive-directory access takes effect immediately.
+/// Returns `run`, `mount_external`, and `request_sensitive_access` as a bundle,
+/// plus `request_network_access` when `ask_network` is true. The `path_policy`
+/// is wrapped in an `Arc<RwLock<>>` shared between `RunTool` and
+/// `RequestSensitiveAccessTool` so that approved sensitive-directory access
+/// takes effect immediately.
 pub fn create_run_tools(
     mounts: Arc<SandboxMounts>,
     permissions: Arc<PermissionStore>,
     approval: ApprovalChannel,
     path_policy: SandboxPathPolicy,
+    ask_network: bool,
 ) -> Vec<Arc<dyn Tool>> {
     let path_policy = Arc::new(RwLock::new(path_policy));
-    let run = Arc::new(RunTool::new(
+    let run = Arc::new(RunTool::with_network_mode(
         Arc::clone(&mounts),
         Arc::clone(&permissions),
         approval.clone(),
         Arc::clone(&path_policy),
+        !ask_network,
     ));
     let mount_ext = Arc::new(MountExternalTool::new(mounts, approval.clone()));
-    let network = Arc::new(RequestNetworkAccessTool::new(approval.clone()));
-    let sensitive = Arc::new(RequestSensitiveAccessTool::new(path_policy, approval));
-    vec![run, mount_ext, network, sensitive]
+    let sensitive = Arc::new(RequestSensitiveAccessTool::new(path_policy, approval.clone()));
+    let mut tools: Vec<Arc<dyn Tool>> = vec![run, mount_ext, sensitive];
+    if ask_network {
+        tools.push(Arc::new(RequestNetworkAccessTool::new(approval)));
+    }
+    tools
 }
 
 #[cfg(test)]

@@ -99,6 +99,7 @@ async fn execute_agent(
     task_store: &Option<Arc<qq_tools::TaskStore>>,
     compactor: &Option<Arc<dyn ContextCompactor>>,
     context_window: Option<u32>,
+    ask_network: bool,
 ) -> Result<ToolOutput, Error> {
     let child_scope = match &instance_id {
         Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, config.agent_name, id),
@@ -150,6 +151,7 @@ async fn execute_agent(
             task_store.clone(),
             compactor.clone(),
             context_window,
+            ask_network,
         );
         for tool in nested_agent_tools {
             agent_tools.register(tool);
@@ -181,6 +183,7 @@ async fn execute_agent(
         has_task_tracking,
         has_preferences,
         has_bash: has_run,
+        has_network: !ask_network,
         is_read_only: config.is_read_only,
     }, &agent_ctx);
     let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
@@ -400,6 +403,8 @@ pub struct InternalAgentTool {
     compactor: Option<Arc<dyn ContextCompactor>>,
     /// Context window size in tokens for deriving obs thresholds
     context_window: Option<u32>,
+    /// Whether network access requires approval (--ask-network)
+    ask_network: bool,
 }
 
 impl InternalAgentTool {
@@ -419,6 +424,7 @@ impl InternalAgentTool {
         task_store: Option<Arc<qq_tools::TaskStore>>,
         compactor: Option<Arc<dyn ContextCompactor>>,
         context_window: Option<u32>,
+        ask_network: bool,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -438,6 +444,7 @@ impl InternalAgentTool {
             task_store,
             compactor,
             context_window,
+            ask_network,
         }
     }
 }
@@ -518,7 +525,7 @@ impl Tool for InternalAgentTool {
             if !tool_names.iter().any(|n| n == "mount_external") {
                 tool_names.push("mount_external".to_string());
             }
-            if !tool_names.iter().any(|n| n == "request_network_access") {
+            if self.ask_network && !tool_names.iter().any(|n| n == "request_network_access") {
                 tool_names.push("request_network_access".to_string());
             }
             if !tool_names.iter().any(|n| n == "request_sensitive_access") {
@@ -564,6 +571,7 @@ impl Tool for InternalAgentTool {
             &self.task_store,
             &self.compactor,
             self.context_window,
+            self.ask_network,
         )
         .await;
 
@@ -614,6 +622,8 @@ pub struct ExternalAgentTool {
     compactor: Option<Arc<dyn ContextCompactor>>,
     /// Context window size in tokens for deriving obs thresholds
     context_window: Option<u32>,
+    /// Whether network access requires approval (--ask-network)
+    ask_network: bool,
 }
 
 impl ExternalAgentTool {
@@ -634,6 +644,7 @@ impl ExternalAgentTool {
         task_store: Option<Arc<qq_tools::TaskStore>>,
         compactor: Option<Arc<dyn ContextCompactor>>,
         context_window: Option<u32>,
+        ask_network: bool,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -654,6 +665,7 @@ impl ExternalAgentTool {
             task_store,
             compactor,
             context_window,
+            ask_network,
         }
     }
 }
@@ -700,7 +712,7 @@ impl Tool for ExternalAgentTool {
             if !tool_names.iter().any(|n| n == "mount_external") {
                 tool_names.push("mount_external".to_string());
             }
-            if !tool_names.iter().any(|n| n == "request_network_access") {
+            if self.ask_network && !tool_names.iter().any(|n| n == "request_network_access") {
                 tool_names.push("request_network_access".to_string());
             }
             if !tool_names.iter().any(|n| n == "request_sensitive_access") {
@@ -770,6 +782,7 @@ impl Tool for ExternalAgentTool {
             &self.task_store,
             &self.compactor,
             self.context_window,
+            self.ask_network,
         )
         .await;
 
@@ -818,6 +831,7 @@ pub fn create_agent_tools(
     task_store: Option<Arc<qq_tools::TaskStore>>,
     compactor: Option<Arc<dyn ContextCompactor>>,
     context_window: Option<u32>,
+    ask_network: bool,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -849,6 +863,7 @@ pub fn create_agent_tools(
                 task_store.clone(),
                 compactor.clone(),
                 context_window,
+                ask_network,
             )));
         }
     }
@@ -872,6 +887,7 @@ pub fn create_agent_tools(
                 task_store.clone(),
                 compactor.clone(),
                 context_window,
+                ask_network,
             )));
         }
     }
