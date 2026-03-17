@@ -1928,24 +1928,25 @@ async fn run_streaming_completion(
                     // Pop the tool context
                     execution_context.pop().await;
 
-                    // Log full tool result
+                    // Log full tool result (re-extract text after potential chunking)
                     let result_text = result.text_content();
+                    let ToolExecutionResult { tool_call_id, content, is_error, .. } = result;
                     if let Some(ref logger) = debug_logger {
-                        let name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
-                        logger.log_tool_result_full(&result.tool_call_id, name, &result_text, result.is_error);
+                        let name = id_to_name.get(&tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
+                        logger.log_tool_result_full(&tool_call_id, name, &result_text, is_error);
                     }
 
                     // Send completion event immediately
                     let _ = tx
                         .send(StreamEvent::ToolComplete {
-                            id: result.tool_call_id.clone(),
+                            id: tool_call_id.clone(),
                             name: tool_name,
                             result_len: result_text.len(),
-                            is_error: result.is_error,
+                            is_error,
                         })
                         .await;
 
-                    let tool_msg = Message::tool_result(&result.tool_call_id, &result_text);
+                    let tool_msg = Message::tool_result(&tool_call_id, content);
                     iteration_messages.push(tool_msg.clone());
                     tool_result_messages.push(tool_msg);
                 }
@@ -2268,24 +2269,25 @@ async fn run_streaming_completion(
                 // Pop the tool context
                 execution_context.pop().await;
 
-                // Log full tool result
+                // Log full tool result (re-extract text after potential chunking)
                 let result_text = result.text_content();
+                let ToolExecutionResult { tool_call_id, content, is_error, .. } = result;
                 if let Some(ref logger) = debug_logger {
-                    let name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
-                    logger.log_tool_result_full(&result.tool_call_id, name, &result_text, result.is_error);
+                    let name = id_to_name.get(&tool_call_id).map(|s| s.as_str()).unwrap_or(&tool_name);
+                    logger.log_tool_result_full(&tool_call_id, name, &result_text, is_error);
                 }
 
                 // Send completion event immediately
                 let _ = tx
                     .send(StreamEvent::ToolComplete {
-                        id: result.tool_call_id.clone(),
+                        id: tool_call_id.clone(),
                         name: tool_name,
                         result_len: result_text.len(),
-                        is_error: result.is_error,
+                        is_error,
                     })
                     .await;
 
-                let tool_msg = Message::tool_result(&result.tool_call_id, &result_text);
+                let tool_msg = Message::tool_result(&tool_call_id, content);
                 iteration_messages.push(tool_msg.clone());
                 tool_result_messages.push(tool_msg);
             }

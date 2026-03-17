@@ -7,6 +7,7 @@
 
 pub mod approval;
 pub mod bash;
+pub mod image;
 pub mod tasks;
 pub mod web;
 
@@ -16,5 +17,6 @@ pub use bash::{
     RequestNetworkAccessTool, RequestSensitiveAccessTool, SandboxExecutor, SandboxMounts,
     SandboxPathPolicy,
 };
+pub use image::{create_image_tools, ReadImageTool};
 pub use tasks::{create_task_tools, create_task_tools_arc, TaskStore};
 pub use web::{create_web_tools, create_web_tools_arc, create_web_tools_with_search, WebSearchConfig};

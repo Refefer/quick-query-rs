@@ -18,6 +18,29 @@ pub struct McpClient {
 }
 
 impl McpClient {
+    /// Create an McpClient from a pre-built RunningService.
+    ///
+    /// This is useful for testing with duplex transports where the service
+    /// is created outside of the standard connect methods.
+    pub async fn from_service(
+        name: String,
+        service: RunningService<RoleClient, ()>,
+    ) -> Result<Self, McpError> {
+        let tools = service
+            .list_all_tools()
+            .await
+            .map_err(|e| McpError::Connection {
+                server: name.clone(),
+                source: Box::new(e),
+            })?;
+
+        Ok(Self {
+            name,
+            service,
+            tools,
+        })
+    }
+
     /// Connect to an MCP server via stdio (child process).
     pub async fn connect_stdio(
         name: String,

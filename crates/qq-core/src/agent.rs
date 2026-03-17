@@ -1463,7 +1463,7 @@ async fn run_complete_iteration(
 /// Matches `ChunkerConfig::default_threshold_bytes` (50KB).
 const MAX_AGENT_TOOL_RESULT_BYTES: usize = 50_000;
 
-/// Truncate a tool result to fit within a byte budget.
+/// Truncate a tool result string to fit within a byte budget.
 ///
 /// If the content exceeds `max_bytes`, truncates at the last newline before
 /// the limit (respecting UTF-8 char boundaries) and appends a note.
@@ -1499,7 +1499,13 @@ fn truncate_tool_result(content: String, max_bytes: usize) -> String {
     }
 }
 
-/// Execute a single tool call.
+/// Execute a single tool call, returning text-only content.
+///
+/// Agents use observation memory with limited context budgets. Passing raw
+/// image data would bloat messages, get stripped during compaction, and cause
+/// the agent to lose track of results and retry in a loop. Instead, agents
+/// receive only the text portions of tool output (which includes metadata
+/// like dimensions and format for images).
 async fn execute_tool(
     registry: &ToolRegistry,
     tool_call: &crate::message::ToolCall,
