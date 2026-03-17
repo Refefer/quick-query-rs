@@ -531,20 +531,21 @@ async fn completion_mode(cli: &Cli, config: &Config, prompt: &str) -> Result<()>
 
             for result in results {
                 let result_text = result.text_content();
+                let qq_core::ToolExecutionResult { tool_call_id, content, is_error, .. } = result;
                 tracing::debug!(
-                    tool_call_id = %result.tool_call_id,
+                    tool_call_id = %tool_call_id,
                     result_len = result_text.len(),
-                    is_error = result.is_error,
+                    is_error = is_error,
                     "Tool result"
                 );
                 tracing::trace!(
-                    tool_call_id = %result.tool_call_id,
+                    tool_call_id = %tool_call_id,
                     content = %result_text,
                     "Tool result content"
                 );
 
-                // Add tool result to messages
-                messages.push(Message::tool_result(&result.tool_call_id, result_text));
+                // Add tool result to messages (preserves images)
+                messages.push(Message::tool_result(&tool_call_id, content));
             }
 
             // Continue loop to get next response

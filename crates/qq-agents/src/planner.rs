@@ -189,7 +189,7 @@ impl InternalAgent for PlannerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["run", "update_my_task"]
+        &["run", "read_image", "update_my_task"]
     }
 
     fn tool_limits(&self) -> Option<HashMap<String, usize>> {
@@ -224,6 +224,7 @@ mod tests {
         assert!(!agent.description().is_empty());
         assert!(!agent.system_prompt().is_empty());
         assert!(agent.tool_names().contains(&"run"));
+        assert!(agent.tool_names().contains(&"read_image"));
         assert!(agent.tool_names().contains(&"update_my_task"));
     }
 

@@ -327,6 +327,11 @@ impl ToolExecutionResult {
             .collect::<Vec<_>>()
             .join("")
     }
+
+    /// Consume and return the full content (text + images).
+    pub fn into_content(self) -> Vec<crate::message::TypedContent> {
+        self.content
+    }
 }
 
 /// Execute multiple tool calls in parallel.

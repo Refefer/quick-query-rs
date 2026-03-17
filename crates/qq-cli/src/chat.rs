@@ -15,7 +15,7 @@ use futures::StreamExt;
 use qq_core::{
     execute_tools_parallel_with_chunker, AgentMemory, ChunkProcessor, ChunkerConfig,
     CompletionRequest, ContextCompactor, Message, ObservationConfig, ObservationalMemory,
-    Provider, StreamChunk, ToolCall, ToolRegistry,
+    Provider, StreamChunk, ToolCall, ToolExecutionResult, ToolRegistry,
 };
 
 use crate::agents::AgentExecutor;
@@ -1011,21 +1011,22 @@ async fn run_completion(
 
                 for result in results {
                     let result_text = result.text_content();
+                    let ToolExecutionResult { tool_call_id, content, is_error, .. } = result;
                     tracing::debug!(
-                        tool_call_id = %result.tool_call_id,
+                        tool_call_id = %tool_call_id,
                         result_len = result_text.len(),
-                        is_error = result.is_error,
+                        is_error = is_error,
                         "Tool result received"
                     );
 
                     // Log tool result
                     if let Some(logger) = debug_logger {
-                        logger.log_tool_result(&result.tool_call_id, result_text.len(), result.is_error);
-                        let tool_name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
-                        logger.log_tool_result_full(&result.tool_call_id, tool_name, &result_text, result.is_error);
+                        logger.log_tool_result(&tool_call_id, result_text.len(), is_error);
+                        let tool_name = id_to_name.get(&tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
+                        logger.log_tool_result_full(&tool_call_id, tool_name, &result_text, is_error);
                     }
 
-                    session.add_tool_result(&result.tool_call_id, &result_text);
+                    session.add_tool_result(&tool_call_id, content);
                 }
 
                 // Continue to get next response
@@ -1192,26 +1193,27 @@ async fn run_completion(
 
             for result in results {
                 let result_text = result.text_content();
+                let ToolExecutionResult { tool_call_id, content, is_error, .. } = result;
                 tracing::debug!(
-                    tool_call_id = %result.tool_call_id,
+                    tool_call_id = %tool_call_id,
                     result_len = result_text.len(),
-                    is_error = result.is_error,
+                    is_error = is_error,
                     "Tool result received"
                 );
                 tracing::trace!(
-                    tool_call_id = %result.tool_call_id,
+                    tool_call_id = %tool_call_id,
                     content = %result_text,
                     "Tool result content"
                 );
 
                 // Log tool result
                 if let Some(logger) = debug_logger {
-                    logger.log_tool_result(&result.tool_call_id, result_text.len(), result.is_error);
-                    let tool_name = id_to_name.get(&result.tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
-                    logger.log_tool_result_full(&result.tool_call_id, tool_name, &result_text, result.is_error);
+                    logger.log_tool_result(&tool_call_id, result_text.len(), is_error);
+                    let tool_name = id_to_name.get(&tool_call_id).map(|s| s.as_str()).unwrap_or("unknown");
+                    logger.log_tool_result_full(&tool_call_id, tool_name, &result_text, is_error);
                 }
 
-                session.add_tool_result(&result.tool_call_id, &result_text);
+                session.add_tool_result(&tool_call_id, content);
             }
 
             // Continue to get next response
