@@ -84,7 +84,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
             let input_hint = if app.is_streaming {
                 "Press Ctrl+C to cancel"
             } else if !app.mouse_captured {
-                "SELECT MODE \u{2014} Ctrl+Y to resume mouse scroll"
+                "SELECT MODE \u{2014} Ctrl+Y to resume scroll"
             } else if !app.pending_content.is_empty() {
                 pending_hint = format!(
                     "{} image(s) attached | /clear-attachments | /help",
@@ -92,7 +92,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
                 );
                 &pending_hint
             } else {
-                "/help | /quit | PgUp/PgDn scroll | Ctrl+Y select mode"
+                "/help | /quit | PgUp/PgDn scroll | Shift+select to copy"
             };
 
             let input = InputArea::new(&app.input)
@@ -175,7 +175,8 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  /clear-attachments  Remove all attachments"),
         Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Cyan))),
-        Line::from("  Ctrl+Y       Toggle select mode (for copy)"),
+        Line::from("  Shift+drag   Select text (works in most terminals)"),
+        Line::from("  Ctrl+Y       Toggle select mode (fallback for copy)"),
         Line::from("  Alt+V        Paste image from clipboard"),
         Line::from("  Ctrl+C       Cancel streaming"),
         Line::from("  Ctrl+D       Exit"),

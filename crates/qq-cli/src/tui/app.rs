@@ -871,8 +871,8 @@ pub async fn run_tui(
                 let layout = layout_config.compute(area);
                 if let Some(&content_rect) = layout.get(&PaneId::Content) {
                     // Update scroll dimensions BEFORE rendering
-                    // Subtract 2 for borders
-                    let viewport_height = content_rect.height.saturating_sub(2);
+                    // Subtract 1 for top border; width subtracts 2 for horizontal padding
+                    let viewport_height = content_rect.height.saturating_sub(1);
                     let content_width = content_rect.width.saturating_sub(2);
                     app.update_scroll_dimensions(viewport_height, content_width);
                 }

@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Padding, Paragraph, Widget},
 };
 
 use crate::tui::markdown::markdown_to_text;
@@ -59,8 +59,9 @@ impl Widget for ContentArea<'_> {
 
         let block = Block::default()
             .title(Span::styled(title, Style::default().fg(Color::Cyan)))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .padding(Padding::horizontal(1));
 
         let inner = block.inner(area);
         block.render(area, buf);
