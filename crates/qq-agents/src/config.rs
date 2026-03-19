@@ -15,19 +15,14 @@ fn default_compaction_strategy() -> AgentMemoryStrategy {
 }
 
 /// Strategy for managing agent memory across execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentMemoryStrategy {
     /// Post-execution LLM summarization with continuation support.
     Compaction,
     /// In-loop observational memory (messages -> observations -> reflections).
+    #[default]
     ObsMemory,
-}
-
-impl Default for AgentMemoryStrategy {
-    fn default() -> Self {
-        Self::ObsMemory
-    }
 }
 
 /// Configuration overrides for built-in agents.

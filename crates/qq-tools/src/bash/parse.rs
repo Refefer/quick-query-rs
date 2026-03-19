@@ -168,18 +168,118 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
+/// Parse a heredoc delimiter from the characters after `<<` or `<<-`.
+/// Returns `Some((delimiter, chars_consumed))` or `None` if no valid delimiter found.
+fn parse_heredoc_delimiter(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut pos = start;
+
+    // Skip whitespace between << and delimiter
+    while pos < chars.len() && (chars[pos] == ' ' || chars[pos] == '\t') {
+        pos += 1;
+    }
+
+    if pos >= chars.len() || chars[pos] == '\n' {
+        return None;
+    }
+
+    let delimiter;
+    match chars[pos] {
+        '\'' => {
+            // Single-quoted: << 'EOF'
+            pos += 1; // skip opening quote
+            let word_start = pos;
+            while pos < chars.len() && chars[pos] != '\'' {
+                pos += 1;
+            }
+            if pos >= chars.len() {
+                return None; // unterminated quote
+            }
+            delimiter = chars[word_start..pos].iter().collect::<String>();
+            pos += 1; // skip closing quote
+        }
+        '"' => {
+            // Double-quoted: << "EOF"
+            pos += 1;
+            let word_start = pos;
+            while pos < chars.len() && chars[pos] != '"' {
+                pos += 1;
+            }
+            if pos >= chars.len() {
+                return None;
+            }
+            delimiter = chars[word_start..pos].iter().collect::<String>();
+            pos += 1;
+        }
+        _ => {
+            // Bare word: << EOF
+            let word_start = pos;
+            while pos < chars.len()
+                && !chars[pos].is_whitespace()
+                && chars[pos] != ';'
+                && chars[pos] != '&'
+                && chars[pos] != '|'
+            {
+                pos += 1;
+            }
+            if pos == word_start {
+                return None;
+            }
+            delimiter = chars[word_start..pos].iter().collect::<String>();
+        }
+    }
+
+    if delimiter.is_empty() {
+        return None;
+    }
+
+    Some((delimiter, pos - start))
+}
+
+/// Return the last line of `s` (from after the last `\n` to end).
+fn extract_last_line(s: &str) -> &str {
+    match s.rfind('\n') {
+        Some(pos) => &s[pos + 1..],
+        None => s,
+    }
+}
+
 /// Split a command string on pipeline operators (`|`, `&&`, `||`, `;`)
-/// while respecting quotes.
+/// while respecting quotes and heredoc syntax.
 fn split_pipeline(input: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    let mut heredoc_delimiter: Option<String> = None;
+    let mut heredoc_strip_tabs = false;
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         let ch = chars[i];
+
+        // Heredoc body mode: consume everything until we see the delimiter on its own line
+        if let Some(ref delim) = heredoc_delimiter {
+            current.push(ch);
+            if ch == '\n' || i + 1 == chars.len() {
+                let last_line = extract_last_line(&current);
+                let mut check_line = last_line;
+                // Strip trailing \r for \r\n line endings
+                if let Some(stripped) = check_line.strip_suffix('\r') {
+                    check_line = stripped;
+                }
+                // For <<-, strip leading tabs before comparison
+                if heredoc_strip_tabs {
+                    check_line = check_line.trim_start_matches('\t');
+                }
+                if check_line == delim.as_str() {
+                    heredoc_delimiter = None;
+                    heredoc_strip_tabs = false;
+                }
+            }
+            i += 1;
+            continue;
+        }
 
         match ch {
             '\'' if !in_double_quote => {
@@ -189,6 +289,44 @@ fn split_pipeline(input: &str) -> Vec<String> {
             '"' if !in_single_quote => {
                 in_double_quote = !in_double_quote;
                 current.push(ch);
+            }
+            '<' if !in_single_quote && !in_double_quote => {
+                if i + 1 < chars.len() && chars[i + 1] == '<' {
+                    if i + 2 < chars.len() && chars[i + 2] == '<' {
+                        // <<< here-string: push all three chars, no body to skip
+                        current.push('<');
+                        current.push('<');
+                        current.push('<');
+                        i += 2;
+                    } else {
+                        // << or <<-
+                        current.push('<');
+                        current.push('<');
+                        let mut after = i + 2;
+                        let strip_tabs = after < chars.len() && chars[after] == '-';
+                        if strip_tabs {
+                            current.push('-');
+                            after += 1;
+                        }
+                        if let Some((delim, consumed)) =
+                            parse_heredoc_delimiter(&chars, after)
+                        {
+                            // Push the delimiter text into current segment
+                            for &c in &chars[after..after + consumed] {
+                                current.push(c);
+                            }
+                            heredoc_delimiter = Some(delim);
+                            heredoc_strip_tabs = strip_tabs;
+                            i = after + consumed - 1; // -1 because loop does i += 1
+                        } else {
+                            // Malformed heredoc, just treat as regular chars
+                            i += 1; // skip second <, loop will advance past
+                        }
+                    }
+                } else {
+                    // Single < (redirect), push as-is
+                    current.push(ch);
+                }
             }
             '|' if !in_single_quote && !in_double_quote => {
                 if i + 1 < chars.len() && chars[i + 1] == '|' {
@@ -549,5 +687,87 @@ mod tests {
             extract_commands("npx prettier --write .").unwrap(),
             vec!["npx-prettier"]
         );
+    }
+
+    // --- Heredoc tests ---
+
+    #[test]
+    fn test_heredoc_basic() {
+        assert_eq!(
+            extract_commands("cat << EOF\nhello\nEOF").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_single_quoted_delimiter() {
+        assert_eq!(
+            extract_commands("cat > file.md << 'EOF'\ncontent | pipes\nEOF").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_double_quoted_delimiter() {
+        assert_eq!(
+            extract_commands("cat << \"END\"\nsome | content\nEND").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_strip_tabs() {
+        assert_eq!(
+            extract_commands("cat <<- EOF\n\thello\n\tEOF").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_with_redirect() {
+        assert_eq!(
+            extract_commands("cat > out.txt << 'EOF'\nline with | pipe\nEOF").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_pipe_before() {
+        assert_eq!(
+            extract_commands("generate | cat << 'EOF'\nstuff\nEOF").unwrap(),
+            vec!["generate", "cat"]
+        );
+    }
+
+    #[test]
+    fn test_here_string() {
+        assert_eq!(
+            extract_commands("cat <<< 'hello world'").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_empty_body() {
+        assert_eq!(
+            extract_commands("cat << EOF\nEOF").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_real_world_bug() {
+        // This is the scenario that triggered the bug: document content with
+        // shell operators being parsed as pipeline separators
+        assert_eq!(
+            extract_commands("cat > prd.md << 'EOF'\n# Doc with | && ; ||\nEOF").unwrap(),
+            vec!["cat"]
+        );
+    }
+
+    #[test]
+    fn test_heredoc_single_segment() {
+        let segments = split_pipeline("cat > file << 'EOF'\nline | pipe && and\nEOF");
+        assert_eq!(segments.len(), 1);
     }
 }

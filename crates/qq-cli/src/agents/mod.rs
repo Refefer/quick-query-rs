@@ -138,7 +138,7 @@ impl AgentExecutor {
         let mut patterns = agent.tool_patterns();
 
         for tool_str in self.external_agents.get_builtin_tools(agent.name()) {
-            let pattern = qq_core::ToolPattern::from_str(tool_str);
+            let pattern = qq_core::ToolPattern::parse(tool_str);
             if !patterns.contains(&pattern) {
                 patterns.push(pattern);
             }
@@ -171,7 +171,7 @@ impl AgentExecutor {
     async fn run_external(&self, def: &AgentDefinition, task: &str) -> Result<String> {
         // Parse external agent tool entries as patterns, then resolve
         let patterns: Vec<qq_core::ToolPattern> = def.tools.iter()
-            .map(|s| qq_core::ToolPattern::from_str(s))
+            .map(|s| qq_core::ToolPattern::parse(s))
             .collect();
         let resolved = self.tools.resolve_patterns(&patterns);
         let agent_tools = Arc::new(self.tools.subset(&resolved));

@@ -722,7 +722,7 @@ pub async fn run_chat(
                         println!();
                     }
                     ChatCommand::Mcp => {
-                        if let Some(ref mgr) = mcp_manager {
+                        if let Some(mgr) = &mcp_manager {
                             let info = mgr.server_info();
                             if info.is_empty() {
                                 println!("\nNo MCP servers connected.\n");

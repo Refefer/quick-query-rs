@@ -541,7 +541,7 @@ impl Tool for InternalAgentTool {
 
         // Append config tools (replaces extra_tools)
         for tool_str in self.external_agents.get_builtin_tools(self.agent.name()) {
-            let pattern = qq_core::ToolPattern::from_str(tool_str);
+            let pattern = qq_core::ToolPattern::parse(tool_str);
             if !patterns.contains(&pattern) {
                 patterns.push(pattern);
             }
