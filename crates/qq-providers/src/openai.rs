@@ -606,15 +606,13 @@ pub async fn probe_context_window(
             .and_then(|v| v.as_u64()),
     ];
 
-    for candidate in candidates {
-        if let Some(value) = candidate {
-            tracing::debug!(
-                model = model,
-                context_window = value,
-                "Context window probed from API"
-            );
-            return Some(value as u32);
-        }
+    if let Some(value) = candidates.into_iter().flatten().next() {
+        tracing::debug!(
+            model = model,
+            context_window = value,
+            "Context window probed from API"
+        );
+        return Some(value as u32);
     }
 
     tracing::debug!(

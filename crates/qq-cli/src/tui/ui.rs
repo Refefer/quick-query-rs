@@ -216,7 +216,7 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
 
     // Calculate how many lines the command will wrap to
     let cmd_lines = if inner_width > 0 {
-        (request.full_command.len() + inner_width - 1) / inner_width
+        request.full_command.len().div_ceil(inner_width)
     } else {
         1
     };

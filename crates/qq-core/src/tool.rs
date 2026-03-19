@@ -100,7 +100,7 @@ impl ToolPattern {
     /// - `"mcp:ws/*"` → `McpGlob("ws")`
     /// - `"internal:*"` → `AllInternal`
     /// - anything else → `Exact(ToolRef::from_uri(s))`
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         if let Some(rest) = s.strip_prefix("mcp:") {
             if let Some(server) = rest.strip_suffix("/*") {
                 return ToolPattern::McpGlob(server.to_string());
@@ -923,16 +923,16 @@ mod tests {
     #[test]
     fn test_tool_pattern_from_str() {
         assert_eq!(
-            ToolPattern::from_str("mcp:ws/*"),
+            ToolPattern::parse("mcp:ws/*"),
             ToolPattern::McpGlob("ws".to_string())
         );
-        assert_eq!(ToolPattern::from_str("internal:*"), ToolPattern::AllInternal);
+        assert_eq!(ToolPattern::parse("internal:*"), ToolPattern::AllInternal);
         assert_eq!(
-            ToolPattern::from_str("run"),
+            ToolPattern::parse("run"),
             ToolPattern::Exact(ToolRef::Internal("run".to_string()))
         );
         assert_eq!(
-            ToolPattern::from_str("mcp:ws/web_search"),
+            ToolPattern::parse("mcp:ws/web_search"),
             ToolPattern::Exact(ToolRef::Mcp {
                 server: "ws".to_string(),
                 tool: "web_search".to_string(),

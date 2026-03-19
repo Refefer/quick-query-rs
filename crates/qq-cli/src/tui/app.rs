@@ -917,7 +917,7 @@ pub async fn run_tui(
                         } else if msg.role == qq_core::Role::Tool && msg.tool_call_id.is_some() {
                             session.add_tool_result(
                                 msg.tool_call_id.as_ref().unwrap(),
-                                &msg.content.to_string_lossy(),
+                                msg.content.to_string_lossy(),
                             );
                         }
                     }

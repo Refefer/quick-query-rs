@@ -86,7 +86,7 @@ impl Tool for RequestSensitiveAccessTool {
         } else {
             // Try with leading '.' in case user passed "ssh" instead of ".ssh"
             let with_dot = format!(".{}", dir_name);
-            if SENSITIVE_DIR_NAMES.iter().any(|d| *d == with_dot.as_str()) {
+            if SENSITIVE_DIR_NAMES.contains(&with_dot.as_str()) {
                 // We need to return a reference that lives long enough; fall through to the error
                 // instead of borrowing a temporary. Just validate below.
                 dir_name
