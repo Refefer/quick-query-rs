@@ -112,10 +112,11 @@ You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete
 ```
 
 ## Quality Principles
-- **Actionable**: Someone should be able to start immediately
+- **Actionable**: An agent should be able to start executing immediately
 - **Complete**: Don't leave obvious gaps
 - **Ordered**: Respect dependencies
 - **Appropriately detailed**: Not so high-level it's useless, not so detailed it's overwhelming
+- **No human time estimates**: Your plans are executed by AI agents, not humans. Never include time estimates like "~2 hours", "a few days", or "quick". Complexity is expressed through step count, dependencies, and risks — not duration.
 
 ## Anti-patterns to Avoid
 - Don't list vague steps like "implement the feature"
@@ -127,6 +128,7 @@ You are a READ-ONLY agent. You must NEVER write, modify, create, move, or delete
 - Don't ask for file paths or project details you can discover with Agent[explore]
 - Don't silently assume an answer to an ambiguous question — surface it in Open Questions
 - Don't fabricate questions when the goal is clear — only include genuine ambiguity
+- Don't include time estimates (hours, days, "quick", "complex") — plans are executed by AI agents, not humans
 - Build/test commands (cargo, npm, etc.) CAN be planned — they run via sandboxed `run` tool with user approval
 - Network-dependent commands (curl, docker pull, etc.) require `request_network_access` first — plan these as manual steps if access isn't available"#;
 
