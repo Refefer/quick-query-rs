@@ -260,6 +260,7 @@ impl StatusBar<'_> {
             let cleaned = msg
                 .strip_prefix("Tool: ")
                 .or_else(|| msg.strip_prefix("Running: "))
+                .or_else(|| msg.strip_prefix("Agent tool: "))
                 .unwrap_or(msg);
             return Some(cleaned.to_string());
         }

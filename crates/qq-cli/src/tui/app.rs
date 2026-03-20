@@ -361,7 +361,8 @@ impl TuiApp {
                     notif.status = ToolNotificationStatus::Executing;
                     notif.preview = arguments;
                 }
-                self.status_message = Some(format!("Running: {}", name));
+                let display = qq_core::ToolRef::from_wire_name(&name).to_string();
+                self.status_message = Some(format!("Running: {}", display));
             }
             StreamEvent::ToolComplete {
                 id,
@@ -433,13 +434,13 @@ impl TuiApp {
             } => {
                 self.streaming_state = StreamingState::Listening;
                 let display = qq_core::ToolRef::from_wire_name(&tool_name).to_string();
+                self.status_message = Some(format!("Agent tool: {}", &display));
                 let mut notif = ToolNotification::new(
                     display,
                     ToolNotificationStatus::Executing,
                 );
                 notif.preview = arguments;
                 self.tool_notifications.push(notif);
-                self.status_message = Some(format!("Agent tool: {}", tool_name));
             }
             AgentEvent::ToolComplete {
                 agent_name: _,
@@ -1861,7 +1862,8 @@ async fn run_streaming_completion(
 
                 // Execute tools
                 for tool_call in &tool_calls {
-                    execution_context.push_tool(&tool_call.name).await;
+                    let display = qq_core::ToolRef::from_wire_name(&tool_call.name).to_string();
+                    execution_context.push_tool(&display).await;
                     let _ = tx
                         .send(StreamEvent::ToolExecuting {
                             id: tool_call.id.clone(),
@@ -2202,7 +2204,8 @@ async fn run_streaming_completion(
 
             // Execute tools with streaming - send events as each tool completes
             for tool_call in &tool_calls {
-                execution_context.push_tool(&tool_call.name).await;
+                let display = qq_core::ToolRef::from_wire_name(&tool_call.name).to_string();
+                execution_context.push_tool(&display).await;
                 let _ = tx
                     .send(StreamEvent::ToolExecuting {
                         id: tool_call.id.clone(),
