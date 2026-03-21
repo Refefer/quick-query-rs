@@ -183,6 +183,17 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
         );
     }
 
+    // Work Discipline (conditional: has tools)
+    if ctx.has_tools {
+        sections.push(
+            "### Work Discipline\n\
+             - Do not describe what you are going to do — just do it and report findings.\n\
+             - Do not leave placeholder code, TODOs, or stub implementations.\n\
+             - Always read related existing content before writing or modifying anything."
+                .to_string(),
+        );
+    }
+
     // Task tracking (conditional)
     if ctx.has_task_tracking {
         sections.push(
@@ -235,12 +246,20 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
              any command that needs the internet (curl, wget, git clone, npm install from remote, etc.)."
         };
 
-        sections.push(format!(
-            "### Shell Access\n\
-             You have sandboxed shell access via the `run` tool. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
+        let run_capability = if ctx.is_read_only {
+            "You have sandboxed shell access via the `run` tool.\n\
+             The `run` tool is your primary tool for reading (cat, head, tail), searching (grep -rn, find), \
+             and inspection commands."
+        } else {
+            "You have sandboxed shell access via the `run` tool. Read-only commands (grep, find, git log, git diff, wc, tree, etc.)\n\
              run without approval. Write commands (cargo build, git commit, npm install, rm, etc.) require user approval.\n\
              The `run` tool is your primary tool for ALL file operations — reading (cat, head), writing (cat >, tee),\n\
-             editing (sed -i), searching (grep -rn, find), and file management (cp, mv, mkdir -p, rm).\n\
+             editing (sed -i), searching (grep -rn, find), and file management (cp, mv, mkdir -p, rm)."
+        };
+
+        sections.push(format!(
+            "### Shell Access\n\
+             {}\n\
              {}\n\
              Sensitive home directories (.ssh, .aws, .kube, .docker, etc.) are hidden by default — call\n\
              `request_sensitive_access` before running tools that need stored credentials (gh, kubectl, docker, aws, etc.).\n\
@@ -263,7 +282,7 @@ pub fn generate_preamble(ctx: &PreambleContext, agent_ctx: &AgentContext) -> Str
              \n\
              Rule of thumb: if a task involves more than 2-3 intermediate steps, use /tmp files to track\n\
              state between steps rather than relying on context alone.",
-            network_section
+            run_capability, network_section
         ));
     }
 
@@ -359,6 +378,7 @@ mod tests {
         assert!(!preamble.contains("Delegating to Sub-Agents"));
         assert!(!preamble.contains("Keeping the User Informed"));
         assert!(!preamble.contains("Tool Usage Efficiency"));
+        assert!(!preamble.contains("Work Discipline"));
         assert!(!preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Task Tracking"));
         assert!(!preamble.contains("User Preferences"));
@@ -381,6 +401,7 @@ mod tests {
         }, &agent_ctx);
 
         assert!(preamble.contains("Tool Usage Efficiency"));
+        assert!(preamble.contains("Work Discipline"));
         assert!(preamble.contains("Resourcefulness"));
         assert!(!preamble.contains("Delegating to Sub-Agents"));
         assert!(!preamble.contains("Keeping the User Informed"));
@@ -484,6 +505,8 @@ mod tests {
 
         assert!(preamble.contains("Shell Access"));
         assert!(preamble.contains("sandboxed shell access"));
+        assert!(preamble.contains("writing (cat >, tee)"));
+        assert!(preamble.contains("editing (sed -i)"));
         assert!(preamble.contains("/tmp"));
         assert!(preamble.contains("Cross-agent data"));
         assert!(!preamble.contains("CRITICAL: Read-Only Agent"));
@@ -526,6 +549,9 @@ mod tests {
         // Both sections should appear
         assert!(preamble.contains("Shell Access"));
         assert!(preamble.contains("CRITICAL: Read-Only Agent"));
+        // Shell access should NOT contain write ops when read-only
+        assert!(!preamble.contains("writing (cat >, tee)"));
+        assert!(!preamble.contains("editing (sed -i)"));
     }
 
     #[test]
@@ -550,6 +576,7 @@ mod tests {
         assert!(preamble.contains("Keeping the User Informed"));
         assert!(preamble.contains("Tool Usage Efficiency"));
         assert!(preamble.contains("Resourcefulness"));
+        assert!(preamble.contains("Work Discipline"));
         assert!(preamble.contains("Task Tracking"));
         assert!(preamble.contains("User Preferences"));
         assert!(preamble.contains("Shell Access"));

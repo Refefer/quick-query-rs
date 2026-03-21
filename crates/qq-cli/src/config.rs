@@ -149,6 +149,11 @@ pub struct ProfileEntry {
     /// Can be any internal or external agent name (e.g., "pm", "explore", "researcher").
     #[serde(default)]
     pub agent: Option<String>,
+
+    /// Whether to preserve reasoning/thinking content during tool-call exchanges.
+    /// Overrides the provider-level setting. Default: None (use provider setting).
+    #[serde(default)]
+    pub include_tool_reasoning: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -170,14 +175,6 @@ pub struct ProviderConfigEntry {
     /// Extra parameters to pass to the API (e.g., reasoning_effort, chat_template_kwargs)
     #[serde(default)]
     pub parameters: std::collections::HashMap<String, serde_json::Value>,
-
-    /// Preserve reasoning/thinking content on assistant messages during tool-call
-    /// exchanges. When enabled, reasoning tokens from models like o1, DeepSeek-R1,
-    /// and Qwen3 are kept on intermediate messages and sent back to the API, then
-    /// stripped after the final answer. This improves tool-call quality for reasoning
-    /// models. Default: false
-    #[serde(default)]
-    pub include_tool_reasoning: bool,
 
     /// Context window size in tokens. Overrides automatic detection.
     /// Used to derive compaction thresholds when [compaction] fields are unset.
@@ -440,6 +437,7 @@ impl Config {
             parameters,
             agents: profile.agents.clone(),
             agent: profile.agent.clone().unwrap_or_else(|| "pm".to_string()),
+            include_tool_reasoning: profile.include_tool_reasoning,
         })
     }
 }
@@ -456,6 +454,9 @@ pub struct ResolvedProfile {
     pub agents: Option<Vec<String>>,
     /// Primary agent for interactive sessions (default: "pm")
     pub agent: String,
+    /// Whether to preserve reasoning/thinking content during tool-call exchanges.
+    /// Profile-level override; None means fall back to provider setting.
+    pub include_tool_reasoning: Option<bool>,
 }
 
 // Re-export agent config types from qq-agents

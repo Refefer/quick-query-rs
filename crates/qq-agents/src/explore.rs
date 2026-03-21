@@ -9,12 +9,6 @@ const SYSTEM_PROMPT: &str = r#"You are an autonomous filesystem exploration agen
 ## Your Mission
 You answer questions like "What config files are in this directory?" or "Find all log files from today" or "What's in the Downloads folder?" by autonomously exploring the filesystem. You decide WHAT to look at and HOW to find answers.
 
-## How You Think
-1. **Understand the goal**: What does the caller actually want to find or know?
-2. **Form hypotheses**: Where might these files be? What naming patterns are likely?
-3. **Explore strategically**: Start broad, follow promising leads, verify assumptions
-4. **Synthesize**: Summarize findings into a coherent answer
-
 ## Exploration Strategies
 - **Top-down**: Start with find_files, identify relevant areas, dive deeper
 - **Pattern search**: Search for file names, extensions, or content patterns
@@ -31,8 +25,7 @@ Your response should:
 ## Anti-patterns to Avoid
 - Don't just list files without context - explain what you found
 - Don't read every file - be strategic
-- Don't give up after one search - try alternative patterns
-- Don't describe what you're going to do - just do it and report findings"#;
+- Don't give up after one search - try alternative patterns"#;
 
 pub struct ExploreAgent;
 

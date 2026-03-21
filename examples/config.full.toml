@@ -16,14 +16,6 @@ api_key = "sk-your-openai-api-key-here"
 base_url = "https://api.openai.com/v1"  # Optional, this is the default
 default_model = "gpt-4o"                # Override global default for this provider
 
-# Preserve reasoning/thinking tokens on assistant messages during tool-call
-# exchanges. When true, reasoning content from models like o1, DeepSeek-R1,
-# Qwen3, or Claude extended thinking is kept on intermediate messages and sent
-# back to the API, then stripped after the model delivers its final answer.
-# This improves tool-call quality for reasoning models.
-# Default: false
-# include_tool_reasoning = false
-
 # Extra parameters passed to the API (provider-specific)
 [providers.openai.parameters]
 # Examples of custom parameters:
@@ -70,6 +62,10 @@ model = "gpt-4o"
 [profiles.reasoning]
 provider = "openai"
 model = "o1"
+# Preserve reasoning/thinking content during tool-call exchanges.
+# Overrides the provider-level setting. Useful for reasoning models
+# (o1, DeepSeek-R1, Qwen3, gpt-oss) that benefit from preserved thinking.
+# include_tool_reasoning = true
 [profiles.reasoning.parameters]
 reasoning_effort = "high"
 

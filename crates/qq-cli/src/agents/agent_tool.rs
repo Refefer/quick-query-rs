@@ -134,6 +134,13 @@ async fn execute_agent(
     let resolved_names = base_tools.resolve_tool_refs(&config.tool_names);
     let mut agent_tools = base_tools.subset(&resolved_names);
 
+    // Enforce read-only at the sandbox level for read-only agents
+    if config.is_read_only {
+        if let Some(ro_run) = base_tools.get_arc("__run_ro") {
+            agent_tools.register_with_key("run", ro_run);
+        }
+    }
+
     // If not at max depth, add agent tools so this agent can call other agents
     let next_depth = current_depth + 1;
     if next_depth < max_depth {
