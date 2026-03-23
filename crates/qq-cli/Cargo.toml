@@ -47,8 +47,8 @@ image = { workspace = true }
 
 [features]
 default = ["native-tls"]
-native-tls = ["reqwest/default-tls"]
-static-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/default-tls", "qq-mcp/native-tls"]
+static-tls = ["reqwest/rustls-tls", "qq-mcp/static-tls"]
 
 [dev-dependencies]
 tempfile = "3.10"
