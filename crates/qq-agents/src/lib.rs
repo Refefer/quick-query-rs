@@ -16,6 +16,7 @@ mod preamble;
 mod researcher;
 mod reviewer;
 mod summarizer;
+mod qa;
 mod writer;
 
 pub use project_manager::ProjectManagerAgent;
@@ -41,6 +42,7 @@ pub use researcher::ResearcherAgent;
 pub use reviewer::ReviewerAgent;
 pub use summarizer::SummarizerAgent;
 pub use writer::WriterAgent;
+pub use qa::QaAgent;
 
 /// Trait for internal agents.
 ///
@@ -160,6 +162,7 @@ pub enum InternalAgentType {
     Explore,
     Planner,
     Writer,
+    Qa,
 }
 
 impl InternalAgentType {
@@ -173,6 +176,7 @@ impl InternalAgentType {
             Self::Explore,
             Self::Planner,
             Self::Writer,
+            Self::Qa,
         ]
     }
 
@@ -187,6 +191,7 @@ impl InternalAgentType {
             Self::Explore,
             Self::Planner,
             Self::Writer,
+            Self::Qa,
         ]
     }
 
@@ -201,6 +206,7 @@ impl InternalAgentType {
             Self::Explore => "explore",
             Self::Planner => "planner",
             Self::Writer => "writer",
+            Self::Qa => "qa",
         }
     }
 
@@ -215,6 +221,7 @@ impl InternalAgentType {
             Self::Explore => Box::new(ExploreAgent::new()),
             Self::Planner => Box::new(PlannerAgent::new()),
             Self::Writer => Box::new(WriterAgent::new()),
+            Self::Qa => Box::new(QaAgent::new()),
         }
     }
 
@@ -229,6 +236,7 @@ impl InternalAgentType {
             "explore" => Some(Self::Explore),
             "planner" => Some(Self::Planner),
             "writer" => Some(Self::Writer),
+            "qa" => Some(Self::Qa),
             _ => None,
         }
     }
@@ -241,7 +249,7 @@ mod tests {
     #[test]
     fn test_internal_agent_types() {
         let types = InternalAgentType::all();
-        assert_eq!(types.len(), 7);
+        assert_eq!(types.len(), 8);
 
         for t in types {
             let agent = t.create();
@@ -254,7 +262,7 @@ mod tests {
     #[test]
     fn test_internal_agent_types_with_pm() {
         let types = InternalAgentType::all_with_pm();
-        assert_eq!(types.len(), 8);
+        assert_eq!(types.len(), 9);
 
         // Verify pm is included
         assert!(types.iter().any(|t| t.name() == "pm"));
@@ -270,6 +278,7 @@ mod tests {
         assert!(InternalAgentType::from_name("explore").is_some());
         assert!(InternalAgentType::from_name("planner").is_some());
         assert!(InternalAgentType::from_name("writer").is_some());
+        assert!(InternalAgentType::from_name("qa").is_some());
         assert!(InternalAgentType::from_name("unknown").is_none());
     }
 
@@ -294,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_agent_is_read_only() {
-        let read_only_agents = ["explore", "reviewer", "researcher", "planner"];
+        let read_only_agents = ["explore", "reviewer", "researcher", "planner", "qa"];
         let write_agents = ["pm", "coder", "writer", "summarizer"];
 
         for t in InternalAgentType::all_with_pm() {

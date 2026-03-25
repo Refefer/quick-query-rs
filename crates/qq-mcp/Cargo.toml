@@ -12,7 +12,6 @@ rmcp = { version = "1.2", default-features = false, features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
-    "reqwest-native-tls",
 ] }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -21,6 +20,11 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 http = "1"
+
+[features]
+default = ["native-tls"]
+native-tls = ["rmcp/reqwest-native-tls"]
+static-tls = ["rmcp/reqwest"]
 
 [dev-dependencies]
 toml = { workspace = true }

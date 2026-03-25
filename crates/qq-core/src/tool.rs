@@ -455,6 +455,16 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Register a tool under a specific key, regardless of the tool's `name()`.
+    ///
+    /// Used for storing alternative tool variants (e.g., read-only run tool
+    /// under `__run_ro`) that will be swapped in under the canonical name at
+    /// runtime. Keys starting with `__` are excluded from `definitions()` and
+    /// `names()` so they don't leak into LLM tool schemas.
+    pub fn register_with_key(&mut self, key: &str, tool: Arc<dyn Tool>) {
+        self.tools.insert(key.to_string(), tool);
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
     }
@@ -465,19 +475,27 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.definition()).collect()
+        self.tools
+            .iter()
+            .filter(|(k, _)| !k.starts_with("__"))
+            .map(|(_, t)| t.definition())
+            .collect()
     }
 
     pub fn names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+        self.tools
+            .keys()
+            .filter(|k| !k.starts_with("__"))
+            .map(|s| s.as_str())
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.keys().all(|k| k.starts_with("__"))
     }
 
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.tools.keys().filter(|k| !k.starts_with("__")).count()
     }
 
     /// Create a subset registry containing only the specified tools.
@@ -530,9 +548,9 @@ impl ToolRegistry {
                 }
             } else if let Some(rest) = r.strip_prefix("internal:") {
                 if rest == "*" {
-                    // Glob: internal:* → all non-MCP tools
+                    // Glob: internal:* → all non-MCP, non-internal-slot tools
                     for name in self.tools.keys() {
-                        if !name.starts_with("mcp__") && !result.contains(name) {
+                        if !name.starts_with("mcp__") && !name.starts_with("__") && !result.contains(name) {
                             result.push(name.clone());
                         }
                     }
@@ -587,7 +605,7 @@ impl ToolRegistry {
                 }
                 ToolPattern::AllInternal => {
                     for name in self.tools.keys() {
-                        if !name.starts_with("mcp__") && !result.contains(name) {
+                        if !name.starts_with("mcp__") && !name.starts_with("__") && !result.contains(name) {
                             result.push(name.clone());
                         }
                     }
@@ -1021,5 +1039,84 @@ mod tests {
     fn test_tool_display_name_default() {
         let tool = NonBlockingTool;
         assert_eq!(tool.display_name(), tool.name());
+    }
+
+    // =========================================================================
+    // register_with_key tests
+    // =========================================================================
+
+    #[test]
+    fn test_register_with_key() {
+        let mut reg = ToolRegistry::new();
+        let tool: Arc<dyn Tool> = Arc::new(NamedTool("run"));
+        reg.register_with_key("__run_ro", tool);
+
+        // Retrievable by the custom key
+        assert!(reg.get("__run_ro").is_some());
+        assert_eq!(reg.get("__run_ro").unwrap().name(), "run");
+
+        // Not retrievable by the tool's own name
+        assert!(reg.get("run").is_none());
+    }
+
+    #[test]
+    fn test_register_with_key_hidden_from_definitions() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NamedTool("run")));
+        reg.register_with_key("__run_ro", Arc::new(NamedTool("run")));
+
+        // definitions() should only return the non-__ tool
+        let defs = reg.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "run");
+    }
+
+    #[test]
+    fn test_register_with_key_hidden_from_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NamedTool("run")));
+        reg.register_with_key("__run_ro", Arc::new(NamedTool("run")));
+
+        let names = reg.names();
+        assert_eq!(names, vec!["run"]);
+    }
+
+    #[test]
+    fn test_register_with_key_hidden_from_len() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NamedTool("run")));
+        reg.register_with_key("__run_ro", Arc::new(NamedTool("run")));
+
+        assert_eq!(reg.len(), 1);
+        assert!(!reg.is_empty());
+    }
+
+    #[test]
+    fn test_register_with_key_hidden_from_internal_glob() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NamedTool("run")));
+        reg.register_with_key("__run_ro", Arc::new(NamedTool("run")));
+
+        let resolved = reg.resolve_tool_refs(&["internal:*".into()]);
+        assert_eq!(resolved, vec!["run"]);
+    }
+
+    #[test]
+    fn test_register_with_key_can_overwrite_in_subset() {
+        let mut reg = ToolRegistry::new();
+        let rw_tool: Arc<dyn Tool> = Arc::new(NamedTool("run"));
+        let ro_tool: Arc<dyn Tool> = Arc::new(NamedTool("run"));
+        reg.register(rw_tool);
+        reg.register_with_key("__run_ro", ro_tool);
+
+        // Create a subset with "run", then overwrite with the __run_ro variant
+        let mut subset = reg.subset(&["run".to_string()]);
+        if let Some(ro) = reg.get_arc("__run_ro") {
+            subset.register_with_key("run", ro);
+        }
+
+        // The subset should still have exactly 1 tool named "run"
+        assert_eq!(subset.len(), 1);
+        assert!(subset.get("run").is_some());
     }
 }

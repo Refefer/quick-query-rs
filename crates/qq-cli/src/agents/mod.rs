@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn test_internal_agent_types() {
         let types = InternalAgentType::all();
-        assert_eq!(types.len(), 7);
+        assert_eq!(types.len(), 8);
 
         for t in types {
             let agent = t.create();
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn test_internal_agent_types_with_pm() {
         let types = InternalAgentType::all_with_pm();
-        assert_eq!(types.len(), 8);
+        assert_eq!(types.len(), 9);
 
         // Verify pm is included
         assert!(types.iter().any(|t| t.name() == "pm"));

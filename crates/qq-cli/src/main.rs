@@ -373,15 +373,17 @@ fn build_tools_registry(config: &Config, insecure: bool, agent_mode: bool, suppo
             qq_tools::SandboxPathPolicy::from_host_env(&config.tools.bash_sensitive_dirs)
         };
 
-        for tool in qq_tools::create_run_tools(
+        let (run_tools, read_only_run) = qq_tools::create_run_tools(
             Arc::clone(&mounts),
             Arc::clone(&permissions),
             approval_tx,
             path_policy,
             ask_network,
-        ) {
+        );
+        for tool in run_tools {
             registry.register(tool);
         }
+        registry.register_with_key("__run_ro", read_only_run);
 
         Some(RunResources {
             mounts,
@@ -1097,8 +1099,7 @@ fn resolve_settings(cli: &Cli, config: &Config) -> Result<ResolvedSettings> {
         parameters,
         agents: resolved_profile.agents.clone(),
         agent,
-        include_tool_reasoning: provider_config
-            .map(|p| p.include_tool_reasoning)
+        include_tool_reasoning: resolved_profile.include_tool_reasoning
             .unwrap_or(false),
         context_window,
         supported_content_types,
@@ -1160,7 +1161,7 @@ fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result
         parameters: provider_config.parameters.clone(),
         agents: None,
         agent: String::new(),
-        include_tool_reasoning: provider_config.include_tool_reasoning,
+        include_tool_reasoning: false,
         context_window: provider_config.context_window,
         supported_content_types: provider_config.supported_content_types.clone(),
     })

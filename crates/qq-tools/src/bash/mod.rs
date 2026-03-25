@@ -43,6 +43,7 @@ pub struct RunTool {
     path_policy: Arc<RwLock<SandboxPathPolicy>>,
     tool_desc: String,
     timeout_secs: u64,
+    read_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -74,7 +75,7 @@ impl RunTool {
         has_network: bool,
     ) -> Self {
         let executor = SandboxExecutor::detect();
-        let tool_desc = build_tool_description(&mounts, &executor, has_network);
+        let tool_desc = build_tool_description(&mounts, &executor, has_network, false);
         Self {
             mounts,
             permissions,
@@ -83,11 +84,25 @@ impl RunTool {
             path_policy,
             tool_desc,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            read_only: false,
         }
     }
 
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
+        self
+    }
+
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        if read_only {
+            self.tool_desc = build_tool_description(
+                &self.mounts,
+                &self.executor,
+                false, // network irrelevant for read-only
+                true,
+            );
+        }
         self
     }
 }
@@ -189,6 +204,15 @@ impl Tool for RunTool {
                 )));
             }
             permissions::PipelinePermission::NeedsApproval(trigger_cmds) => {
+                // Read-only agents: block all per-call (write) commands
+                if self.read_only {
+                    return Ok(ToolOutput::error(format!(
+                        "Read-only agent: write commands blocked: {}. \
+                         Only read-only commands (grep, find, cat, git log, cargo test, etc.) are allowed.",
+                        trigger_cmds.join(", ")
+                    )));
+                }
+
                 // In app-level mode, per-call commands are not allowed
                 if !self.executor.supports_shell() {
                     return Ok(ToolOutput::error(format!(
@@ -242,6 +266,7 @@ impl Tool for RunTool {
             timeout,
             &path_policy,
             args.stdin.as_deref(),
+            self.read_only,
         ).await {
             Ok(result) => result,
             Err(e) => return Ok(ToolOutput::error(format!("Execution failed: {}", e))),
@@ -521,10 +546,60 @@ fn is_snap_binary(cmd_name: &str) -> bool {
 }
 
 /// Build the dynamic tool description based on current mounts and sandbox mode.
-fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, has_network: bool) -> String {
+fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, has_network: bool, read_only: bool) -> String {
     let mode = executor.mode_name();
     let supports_shell = executor.supports_shell();
     let root = mounts.project_root().display();
+
+    if read_only {
+        let mut desc = format!(
+            "Execute read-only shell commands in a sandboxed environment. \
+             This tool is restricted to read-only operations — all write commands are blocked.\n\n\
+             Sandbox mode: {mode}\n\
+             Project root: {root} (read-only)\n\
+             /tmp: writable scratch space (persists across commands, session-scoped)\n"
+        );
+
+        let extra = mounts.list_extra();
+        if !extra.is_empty() {
+            desc.push_str("Extra mounts (read-only):\n");
+            for m in &extra {
+                desc.push_str(&format!("  - {}\n", m.host_path.display()));
+            }
+        }
+
+        if supports_shell {
+            desc.push_str("\nCapabilities:\n\
+                - Pipes: grep pattern file | sort | uniq -c\n\
+                - Globs: ls *.rs\n\
+                - Environment variables: echo $PWD\n\
+                - Subshells: echo $(git rev-parse HEAD)\n\
+                - Stdin: pass data via the 'stdin' parameter to pipe into the command\n");
+        }
+
+        desc.push_str("\nAllowed operations (read-only):\n\
+            - Read: cat file.txt, head -n 50 file.txt, tail -n 20 file.txt\n\
+            - Search: grep -rn 'pattern' src/, find . -name '*.rs'\n\
+            - Build/test: cargo build, cargo test, cargo clippy, npm test\n\
+            - Git (read): git log, git diff, git status, git show\n\n\
+            Blocked operations:\n\
+            - All writes: cat > file, tee file, sed -i, echo > file\n\
+            - File mutations: rm, mv, cp, mkdir\n\
+            - Executables: cargo run, python, node, sh scripts\n\
+            - Git mutations: git commit, git push, git checkout\n\n\
+            Scratch space (/tmp):\n\
+            Use /tmp for intermediate results — it is the only writable location.\n\n\
+            Commands execute with a 30-second default timeout.\n\n\
+            Examples:\n\
+            - List files: ls -la src/\n\
+            - Read file: cat src/main.rs\n\
+            - Search code: grep -rn 'TODO' src/ | sort\n\
+            - Git history: git log --oneline -10\n\
+            - Build project: cargo build\n\
+            - Run tests: cargo test && cargo clippy");
+
+        return desc;
+    }
 
     let mut desc = format!(
         "Execute shell commands in a sandboxed environment. This is your primary tool for \
@@ -596,9 +671,13 @@ Commands execute with a 30-second default timeout.\n\n\
 
 /// Create run tools for registration in a tool registry.
 ///
-/// Returns `run`, `mount_external`, and `request_sensitive_access` as a bundle,
-/// plus `request_network_access` when `ask_network` is true. The `path_policy`
-/// is wrapped in an `Arc<RwLock<>>` shared between `RunTool` and
+/// Returns `(tools, read_only_run)`:
+/// - `tools`: `run`, `mount_external`, and `request_sensitive_access` as a bundle,
+///   plus `request_network_access` when `ask_network` is true.
+/// - `read_only_run`: a read-only variant of the `run` tool that blocks write commands
+///   and mounts the project root read-only in kernel sandbox mode.
+///
+/// The `path_policy` is wrapped in an `Arc<RwLock<>>` shared between `RunTool` and
 /// `RequestSensitiveAccessTool` so that approved sensitive-directory access
 /// takes effect immediately.
 pub fn create_run_tools(
@@ -607,7 +686,7 @@ pub fn create_run_tools(
     approval: ApprovalChannel,
     path_policy: SandboxPathPolicy,
     ask_network: bool,
-) -> Vec<Arc<dyn Tool>> {
+) -> (Vec<Arc<dyn Tool>>, Arc<dyn Tool>) {
     let path_policy = Arc::new(RwLock::new(path_policy));
     let run = Arc::new(RunTool::with_network_mode(
         Arc::clone(&mounts),
@@ -616,13 +695,20 @@ pub fn create_run_tools(
         Arc::clone(&path_policy),
         !ask_network,
     ));
+    let read_only_run: Arc<dyn Tool> = Arc::new(RunTool::with_network_mode(
+        Arc::clone(&mounts),
+        Arc::clone(&permissions),
+        approval.clone(),
+        Arc::clone(&path_policy),
+        !ask_network,
+    ).with_read_only(true));
     let mount_ext = Arc::new(MountExternalTool::new(mounts, approval.clone()));
     let sensitive = Arc::new(RequestSensitiveAccessTool::new(path_policy, approval.clone()));
     let mut tools: Vec<Arc<dyn Tool>> = vec![run, mount_ext, sensitive];
     if ask_network {
         tools.push(Arc::new(RequestNetworkAccessTool::new(approval)));
     }
-    tools
+    (tools, read_only_run)
 }
 
 #[cfg(test)]
@@ -761,5 +847,78 @@ mod tests {
         let output = format_output(result);
         assert!(output.text_content().contains("Binary output detected"));
         assert!(!output.is_error);
+    }
+
+    // =========================================================================
+    // Read-only RunTool tests
+    // =========================================================================
+
+    fn make_read_only_run_tool() -> RunTool {
+        let mounts = Arc::new(SandboxMounts::new(std::env::current_dir().unwrap()).unwrap());
+        let permissions = Arc::new(PermissionStore::new(std::collections::HashMap::new()));
+        let (approval, _rx) = create_approval_channel();
+        let path_policy = Arc::new(RwLock::new(SandboxPathPolicy::system_only()));
+        RunTool::new(mounts, permissions, approval, path_policy)
+            .with_read_only(true)
+    }
+
+    #[tokio::test]
+    async fn test_read_only_run_tool_blocks_write() {
+        let tool = make_read_only_run_tool();
+
+        // sed -i is a per-call command → should be blocked by read-only gate
+        let result = tool.execute(serde_json::json!({
+            "command": "sed -i 's/a/b/' somefile.txt"
+        })).await.unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("Read-only agent"));
+
+        // rm is also per-call → blocked
+        let result = tool.execute(serde_json::json!({
+            "command": "rm somefile.txt"
+        })).await.unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("Read-only agent"));
+
+        // python is per-call → blocked
+        let result = tool.execute(serde_json::json!({
+            "command": "python -c 'print(1)'"
+        })).await.unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("Read-only agent"));
+    }
+
+    #[tokio::test]
+    async fn test_read_only_run_tool_allows_reads() {
+        let tool = make_read_only_run_tool();
+
+        // grep is a session command → should be allowed
+        let result = tool.execute(serde_json::json!({
+            "command": "grep -rn 'fn main' Cargo.toml"
+        })).await.unwrap();
+        // May or may not find matches, but should not be blocked
+        assert!(!result.text_content().contains("Read-only agent"));
+
+        // cat is a session command → should be allowed
+        let result = tool.execute(serde_json::json!({
+            "command": "cat Cargo.toml"
+        })).await.unwrap();
+        assert!(!result.text_content().contains("Read-only agent"));
+        assert!(!result.is_error);
+
+        // find is a session command → should be allowed
+        let result = tool.execute(serde_json::json!({
+            "command": "find . -name 'Cargo.toml' -maxdepth 1"
+        })).await.unwrap();
+        assert!(!result.text_content().contains("Read-only agent"));
+    }
+
+    #[test]
+    fn test_read_only_tool_description() {
+        let tool = make_read_only_run_tool();
+        let desc = tool.tool_description();
+        assert!(desc.contains("read-only"), "Description should mention read-only");
+        assert!(desc.contains("Blocked operations"), "Description should list blocked operations");
+        assert!(!desc.contains("Permission tiers"), "Description should not show permission tiers");
     }
 }

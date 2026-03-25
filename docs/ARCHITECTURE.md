@@ -779,6 +779,12 @@ classDiagram
         +tool_names() [read_file, write_file, replace_in_file, insert_in_file, delete_lines, replace_lines, ...]
     }
 
+    class QaAgent {
+        +name() "qa"
+        +max_turns() 100
+        +tool_names() [run, read_image, update_my_task]
+    }
+
     InternalAgent <|.. ProjectManagerAgent
     InternalAgent <|.. ExploreAgent
     InternalAgent <|.. ResearcherAgent
@@ -787,6 +793,7 @@ classDiagram
     InternalAgent <|.. SummarizerAgent
     InternalAgent <|.. PlannerAgent
     InternalAgent <|.. WriterAgent
+    InternalAgent <|.. QaAgent
 ```
 
 ### InternalAgentType Enum
@@ -794,7 +801,7 @@ classDiagram
 ```rust
 enum InternalAgentType {
     ProjectManager, Researcher, Summarizer, Coder,
-    Reviewer, Explore, Planner, Writer,
+    Reviewer, Explore, Planner, Writer, Qa,
 }
 ```
 

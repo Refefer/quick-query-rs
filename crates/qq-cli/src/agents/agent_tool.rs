@@ -134,6 +134,13 @@ async fn execute_agent(
     let resolved_names = base_tools.resolve_tool_refs(&config.tool_names);
     let mut agent_tools = base_tools.subset(&resolved_names);
 
+    // Enforce read-only at the sandbox level for read-only agents
+    if config.is_read_only {
+        if let Some(ro_run) = base_tools.get_arc("__run_ro") {
+            agent_tools.register_with_key("run", ro_run);
+        }
+    }
+
     // If not at max depth, add agent tools so this agent can call other agents
     let next_depth = current_depth + 1;
     if next_depth < max_depth {
@@ -153,8 +160,12 @@ async fn execute_agent(
             context_window,
             ask_network,
         );
+        // Exclude self-agent to prevent recursive self-calls
+        let self_tool_name = format!("Agent[{}]", config.agent_name);
         for tool in nested_agent_tools {
-            agent_tools.register(tool);
+            if tool.name() != self_tool_name {
+                agent_tools.register(tool);
+            }
         }
     }
 
@@ -203,8 +214,11 @@ async fn execute_agent(
         task
     };
 
-    // Create progress handler if event bus is available
-    let progress = event_bus.as_ref().map(|bus| bus.create_handler());
+    // Create progress handler if event bus is available.
+    // Pass the child_scope so the handler can inject the correct agent chain
+    // into IterationStart events (avoids the shared ExecutionContext stack bug
+    // where parallel agents appear as nested).
+    let progress = event_bus.as_ref().map(|bus| bus.create_handler_with_chain(&child_scope));
 
     // Branch on memory strategy
     match config.memory_strategy {

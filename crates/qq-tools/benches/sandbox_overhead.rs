@@ -80,7 +80,7 @@ fn bench_sandbox(c: &mut Criterion) {
     for &(label, cmd) in COMMANDS {
         group.bench_with_input(BenchmarkId::from_parameter(label), &cmd, |b, &cmd| {
             b.iter(|| {
-                let result = execute_kernel(black_box(cmd), &mounts, 30, &policy, None)
+                let result = execute_kernel(black_box(cmd), &mounts, 30, &policy, None, false)
                     .expect("sandbox execution failed");
                 black_box(result);
             });

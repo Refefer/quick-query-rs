@@ -213,6 +213,10 @@ impl SandboxExecutor {
     }
 
     /// Execute a command string in the sandbox.
+    ///
+    /// When `read_only` is true, the kernel sandbox mounts the project root
+    /// read-only so that even shell redirects (`echo > file`) fail at the
+    /// filesystem level.
     pub async fn execute(
         &self,
         command: &str,
@@ -220,6 +224,7 @@ impl SandboxExecutor {
         timeout_secs: u64,
         path_policy: &SandboxPathPolicy,
         stdin_data: Option<&str>,
+        read_only: bool,
     ) -> Result<CommandResult, String> {
         match self {
             #[cfg(feature = "sandbox")]
@@ -229,7 +234,7 @@ impl SandboxExecutor {
                 let policy = path_policy.clone();
                 let stdin = stdin_data.map(|s| s.as_bytes().to_vec());
                 tokio::task::spawn_blocking(move || {
-                    execute_kernel(&cmd, &mounts, timeout_secs, &policy, stdin.as_deref())
+                    execute_kernel(&cmd, &mounts, timeout_secs, &policy, stdin.as_deref(), read_only)
                 })
                 .await
                 .map_err(|e| format!("Sandbox task failed: {}", e))?
@@ -287,6 +292,10 @@ fn probe_user_namespaces_uncached() -> bool {
 }
 
 /// Execute a command in a hakoniwa kernel sandbox.
+///
+/// When `read_only` is true, the project root is mounted read-only so that
+/// write operations (including shell redirects) fail at the filesystem level.
+/// `/tmp` remains writable for scratch work.
 #[cfg(feature = "sandbox")]
 pub fn execute_kernel(
     command: &str,
@@ -294,6 +303,7 @@ pub fn execute_kernel(
     timeout_secs: u64,
     policy: &SandboxPathPolicy,
     stdin_data: Option<&[u8]>,
+    read_only: bool,
 ) -> Result<CommandResult, String> {
     use hakoniwa::Container;
 
@@ -334,8 +344,12 @@ pub fn execute_kernel(
     let tmp_str = tmp_path.to_str().ok_or("Instance /tmp path is not valid UTF-8")?;
     container.bindmount_rw(tmp_str, "/tmp");
 
-    // Project root: read-write
-    container.bindmount_rw(root_str, root_str);
+    // Project root: read-only for read-only agents, read-write otherwise
+    if read_only {
+        container.bindmount_ro(root_str, root_str);
+    } else {
+        container.bindmount_rw(root_str, root_str);
+    }
 
     // Extra user mounts: read-only
     let extra_mounts = mounts.list_extra();
@@ -837,7 +851,7 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello", &mounts, 10, &sys_policy(), None).unwrap();
+            let result = execute_kernel("echo hello", &mounts, 10, &sys_policy(), None, false).unwrap();
             assert_eq!(
 result.stdout.trim(), "hello");
             assert_eq!(result.exit_code, 0);
@@ -850,7 +864,7 @@ result.stdout.trim(), "hello");
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello | cat", &mounts, 10, &sys_policy(), None).unwrap();
+            let result = execute_kernel("echo hello | cat", &mounts, 10, &sys_policy(), None, false).unwrap();
             assert_eq!(
 result.stdout.trim(), "hello");
         }
@@ -868,6 +882,7 @@ result.stdout.trim(), "hello");
                 10,
                 &sys_policy(),
                 None,
+                false,
             )
             .unwrap();
             assert_eq!(result.stdout.trim(), "test");
@@ -882,10 +897,10 @@ result.stdout.trim(), "hello");
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let policy = sys_policy();
             // Write in first command
-            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10, &policy, None).unwrap();
+            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10, &policy, None, false).unwrap();
             assert_eq!(r1.exit_code, 0);
             // Read in second, separate command
-            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy, None).unwrap();
+            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy, None, false).unwrap();
             assert_eq!(r2.stdout.trim(), "persist");
         }
 
@@ -896,7 +911,7 @@ result.stdout.trim(), "hello");
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10, &sys_policy(), None).unwrap();
+            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10, &sys_policy(), None, false).unwrap();
             // Should either list toml files or say no-match
             assert!(!result.stdout.is_empty());
         }
@@ -908,7 +923,7 @@ result.stdout.trim(), "hello");
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo $PATH", &mounts, 10, &sys_policy(), None).unwrap();
+            let result = execute_kernel("echo $PATH", &mounts, 10, &sys_policy(), None, false).unwrap();
             assert_eq!(
 
                 result.stdout.trim(),
@@ -928,7 +943,7 @@ result.stdout.trim(), "hello");
                 path_value: custom_path.into(),
                 ..SandboxPathPolicy::system_only()
             };
-            let result = execute_kernel("echo $PATH", &mounts, 10, &policy, None).unwrap();
+            let result = execute_kernel("echo $PATH", &mounts, 10, &policy, None, false).unwrap();
             assert_eq!(result.stdout.trim(), custom_path);
         }
 
@@ -949,7 +964,7 @@ result.stdout.trim(), "hello");
             let policy = SandboxPathPolicy::from_host_env(&[]);
             // Should be able to list the home directory contents
             let cmd = format!("ls -d {}", home);
-            let result = execute_kernel(&cmd, &mounts, 10, &policy, None).unwrap();
+            let result = execute_kernel(&cmd, &mounts, 10, &policy, None, false).unwrap();
             assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
             assert!(result.stdout.trim().contains(&home));
         }
@@ -976,12 +991,79 @@ result.stdout.trim(), "hello");
             let policy = SandboxPathPolicy::from_host_env(&[]);
             // .ssh should be empty (hidden by tmpfs)
             let cmd = format!("ls -A {}/.ssh 2>&1", home);
-            let result = execute_kernel(&cmd, &mounts, 10, &policy, None).unwrap();
+            let result = execute_kernel(&cmd, &mounts, 10, &policy, None, false).unwrap();
             assert!(
                 result.stdout.trim().is_empty(),
                 "Expected ~/.ssh to be empty in sandbox, got: {}",
                 result.stdout.trim()
             );
+        }
+
+        #[test]
+        fn test_kernel_read_only_blocks_write() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            // Attempt to write to the project root — should fail with read-only mount
+            let _result = execute_kernel(
+                "echo test > /tmp/ro_test_canary.txt 2>&1; echo test > Cargo.toml.bak 2>&1; echo $?",
+                &mounts,
+                10,
+                &sys_policy(),
+                None,
+                true, // read_only
+            )
+            .unwrap();
+            // The write to Cargo.toml.bak should fail (read-only filesystem)
+            // while /tmp write should succeed
+            assert!(
+                !std::path::Path::new("Cargo.toml.bak").exists(),
+                "Write to project root should have been blocked by read-only mount"
+            );
+        }
+
+        #[test]
+        fn test_kernel_read_only_allows_tmp_write() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            // /tmp should still be writable even in read-only mode
+            let result = execute_kernel(
+                "echo scratch > /tmp/ro_scratch.txt && cat /tmp/ro_scratch.txt",
+                &mounts,
+                10,
+                &sys_policy(),
+                None,
+                true, // read_only
+            )
+            .unwrap();
+            assert_eq!(result.stdout.trim(), "scratch");
+            assert_eq!(result.exit_code, 0);
+        }
+
+        #[test]
+        fn test_kernel_read_only_allows_reads() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            // Reading from the project root should work fine
+            let result = execute_kernel(
+                "cat Cargo.toml | head -1",
+                &mounts,
+                10,
+                &sys_policy(),
+                None,
+                true, // read_only
+            )
+            .unwrap();
+            assert_eq!(result.exit_code, 0);
+            assert!(!result.stdout.trim().is_empty());
         }
     }
 }

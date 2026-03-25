@@ -58,7 +58,13 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
             let agent_progress = app
                 .agent_progress
                 .as_ref()
-                .map(|(name, iter, max)| (name.as_str(), *iter, *max));
+                .map(|(name, iter, max, chain)| (name.as_str(), *iter, *max, chain.as_slice()));
+            // Show top border only when thinking panel isn't visible (avoids double line)
+            let thinking_visible = has_thinking
+                && layout
+                    .get(&PaneId::Thinking)
+                    .is_some_and(|r| r.height > 0);
+
             let mut status_bar = StatusBar::new(&app.profile, &app.primary_agent)
                 .tokens(app.prompt_tokens, app.completion_tokens)
                 .streaming(app.is_streaming)
@@ -67,7 +73,8 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
                 .iteration(app.tool_iteration)
                 .agent_progress(agent_progress)
                 .agent_bytes(app.agent_input_bytes, app.agent_output_bytes)
-                .session_bytes(app.session_input_bytes, app.session_output_bytes);
+                .session_bytes(app.session_input_bytes, app.session_output_bytes)
+                .show_top_border(!thinking_visible);
 
             if let Some(ref msg) = app.status_message {
                 status_bar = status_bar.status(msg);
