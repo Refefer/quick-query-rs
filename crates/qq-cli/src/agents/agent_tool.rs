@@ -160,8 +160,12 @@ async fn execute_agent(
             context_window,
             ask_network,
         );
+        // Exclude self-agent to prevent recursive self-calls
+        let self_tool_name = format!("Agent[{}]", config.agent_name);
         for tool in nested_agent_tools {
-            agent_tools.register(tool);
+            if tool.name() != self_tool_name {
+                agent_tools.register(tool);
+            }
         }
     }
 
