@@ -185,8 +185,8 @@ pub struct TuiApp {
     // Execution context (for displaying call stack)
     pub execution_context: ExecutionContext,
 
-    // Agent progress tracking (agent_name, iteration, max_turns)
-    pub agent_progress: Option<(String, u32, u32)>,
+    // Agent progress tracking (agent_name, iteration, max_turns, agent_chain)
+    pub agent_progress: Option<(String, u32, u32, Vec<String>)>,
 
     // Agent byte counts (cumulative input/output bytes for current agent)
     pub agent_input_bytes: usize,
@@ -416,8 +416,9 @@ impl TuiApp {
                 agent_name,
                 iteration,
                 max_turns,
+                agent_chain,
             } => {
-                self.agent_progress = Some((agent_name, iteration, max_turns));
+                self.agent_progress = Some((agent_name, iteration, max_turns, agent_chain));
                 self.streaming_state = StreamingState::Asking;
             }
             AgentEvent::ThinkingDelta {
@@ -863,6 +864,10 @@ pub async fn run_tui(
                 let has_thinking = app.show_thinking && !app.thinking_content.is_empty();
                 let thinking_lines = app.thinking_content.line_count() as u16;
                 layout_config.set_thinking(has_thinking, app.thinking_expanded, thinking_lines);
+
+                // Status bar: 2 rows when top border shown (thinking hidden), 1 row without
+                let thinking_visible = has_thinking && app.show_thinking;
+                layout_config.set_status_height(if thinking_visible { 1 } else { 2 });
 
                 // Configure input pane based on text wrapping
                 let input_lines = ui::calculate_input_lines(app.input.value(), area.width);

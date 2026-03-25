@@ -214,8 +214,11 @@ async fn execute_agent(
         task
     };
 
-    // Create progress handler if event bus is available
-    let progress = event_bus.as_ref().map(|bus| bus.create_handler());
+    // Create progress handler if event bus is available.
+    // Pass the child_scope so the handler can inject the correct agent chain
+    // into IterationStart events (avoids the shared ExecutionContext stack bug
+    // where parallel agents appear as nested).
+    let progress = event_bus.as_ref().map(|bus| bus.create_handler_with_chain(&child_scope));
 
     // Branch on memory strategy
     match config.memory_strategy {

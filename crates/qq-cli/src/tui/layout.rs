@@ -133,6 +133,11 @@ impl LayoutConfig {
         self.set_pane(PaneId::Thinking, visible, size);
     }
 
+    /// Update status bar height (2 when top border shown, 1 without).
+    pub fn set_status_height(&mut self, height: u16) {
+        self.set_pane(PaneId::Status, true, PaneSize::Fixed(height));
+    }
+
     /// Update input pane size based on content.
     pub fn set_input_lines(&mut self, content_lines: u16) {
         self.set_pane(

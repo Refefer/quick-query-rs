@@ -20,6 +20,9 @@ pub enum AgentEvent {
         agent_name: String,
         iteration: u32,
         max_turns: u32,
+        /// The full agent chain from root to this agent, derived from the scope path.
+        /// e.g., ["pm", "researcher", "doc-researcher"]
+        agent_chain: Vec<String>,
     },
     /// Thinking content from an agent.
     ThinkingDelta {
@@ -86,6 +89,7 @@ impl From<AgentProgressEvent> for AgentEvent {
                 agent_name,
                 iteration,
                 max_turns,
+                agent_chain: vec![],
             },
             AgentProgressEvent::ThinkingDelta { agent_name, content } => {
                 AgentEvent::ThinkingDelta { agent_name, content }
@@ -187,6 +191,19 @@ impl AgentEventBus {
     pub fn create_handler(&self) -> Arc<dyn AgentProgressHandler> {
         Arc::new(EventBusProgressHandler {
             bus: self.clone(),
+            agent_chain: vec![],
+        })
+    }
+
+    /// Create a progress handler that carries the agent's scope-derived chain.
+    ///
+    /// The chain is injected into `IterationStart` events so the TUI can display
+    /// the correct agent path even when parallel agents share the ExecutionContext stack.
+    pub fn create_handler_with_chain(&self, scope: &str) -> Arc<dyn AgentProgressHandler> {
+        let agent_chain: Vec<String> = scope.split('/').map(String::from).collect();
+        Arc::new(EventBusProgressHandler {
+            bus: self.clone(),
+            agent_chain,
         })
     }
 }
@@ -194,6 +211,8 @@ impl AgentEventBus {
 /// Progress handler that publishes events to an event bus and optionally logs to DebugLogger.
 struct EventBusProgressHandler {
     bus: AgentEventBus,
+    /// The full agent chain from root to the agent this handler belongs to.
+    agent_chain: Vec<String>,
 }
 
 #[async_trait]
@@ -234,7 +253,12 @@ impl AgentProgressHandler for EventBusProgressHandler {
 
         // Broadcast to TUI/subscribers (skipping events that are only for logging)
         if !matches!(event, AgentProgressEvent::AssistantResponse { .. }) {
-            self.bus.publish(event.into());
+            let mut agent_event: AgentEvent = event.into();
+            // Inject the scope-derived chain into IterationStart events
+            if let AgentEvent::IterationStart { ref mut agent_chain, .. } = agent_event {
+                *agent_chain = self.agent_chain.clone();
+            }
+            self.bus.publish(agent_event);
         }
     }
 }
