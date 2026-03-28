@@ -88,8 +88,12 @@ impl Tool for RequestNetworkAccessTool {
                 }
                 Ok(ToolOutput::success("Network access approved."))
             }
-            Ok(ApprovalResponse::Deny) => {
-                Ok(ToolOutput::error("Network access denied by user."))
+            Ok(ApprovalResponse::Deny(reason)) => {
+                let msg = match reason {
+                    Some(r) => format!("Network access denied by user: {r}"),
+                    None => "Network access denied by user.".to_string(),
+                };
+                Ok(ToolOutput::error(msg))
             }
             Err(e) => Ok(ToolOutput::error(format!(
                 "Approval system unavailable: {}",
@@ -128,7 +132,7 @@ mod tests {
 
         tokio::spawn(async move {
             if let Some(req) = rx.recv().await {
-                let _ = req.response_tx.send(ApprovalResponse::Deny);
+                let _ = req.response_tx.send(ApprovalResponse::Deny(None));
             }
         });
 

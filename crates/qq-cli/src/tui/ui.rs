@@ -117,7 +117,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
 
     // Show approval overlay if pending (renders on top of everything)
     if let Some(ref request) = app.pending_approval {
-        render_approval_overlay(frame, request);
+        render_approval_overlay(frame, request, app.denial_reason_input.as_deref());
     }
 }
 
@@ -207,7 +207,11 @@ fn render_help_overlay(frame: &mut Frame) {
 }
 
 /// Render approval overlay modal for per-call approval (bash commands, file operations, mounts)
-fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalRequest) {
+fn render_approval_overlay(
+    frame: &mut Frame,
+    request: &qq_tools::ApprovalRequest,
+    denial_reason: Option<&str>,
+) {
     let area = frame.area();
 
     // Use up to 80% of terminal width for the overlay
@@ -231,9 +235,11 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
     let max_cmd_lines: usize = 8;
     let cmd_lines = cmd_lines.min(max_cmd_lines);
 
-    // Height: border(1) + header(1) + blank(1) + cmd_lines + triggers(0..1) + blank(1) + keys(1) + border(1)
+    // Height: border(1) + header(1) + blank(1) + cmd_lines + triggers(0..1) + blank(1) + keys/reason(1..3) + border(1)
     let triggers_line = if triggers.is_empty() { 0u16 } else { 1 };
-    let overlay_height = (6 + cmd_lines as u16 + triggers_line).min(area.height.saturating_sub(4));
+    let reason_lines = if denial_reason.is_some() { 2u16 } else { 0 };
+    let overlay_height =
+        (6 + cmd_lines as u16 + triggers_line + reason_lines).min(area.height.saturating_sub(4));
 
     let x = (area.width.saturating_sub(overlay_width)) / 2;
     let y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -278,17 +284,27 @@ fn render_approval_overlay(frame: &mut Frame, request: &qq_tools::ApprovalReques
         )));
     }
 
-    lines.extend([
-        Line::from(""),
-        Line::from(vec![
+    lines.push(Line::from(""));
+    if let Some(reason_text) = denial_reason {
+        lines.push(Line::from(Span::styled(
+            "Deny reason (Enter to submit, Esc to skip):",
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Red)),
+            Span::styled(reason_text.to_string(), Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::DarkGray)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
             Span::styled("[a]", Style::default().fg(Color::Green)),
             Span::raw("llow once  "),
             Span::styled("[s]", Style::default().fg(Color::Cyan)),
             Span::raw("ession allow  "),
             Span::styled("[d]", Style::default().fg(Color::Red)),
             Span::raw("eny"),
-        ]),
-    ]);
+        ]));
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(

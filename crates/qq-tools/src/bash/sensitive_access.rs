@@ -174,7 +174,13 @@ impl Tool for RequestSensitiveAccessTool {
                     )),
                 }
             }
-            Ok(ApprovalResponse::Deny) => Ok(ToolOutput::error("Access request denied by user.")),
+            Ok(ApprovalResponse::Deny(reason)) => {
+                let msg = match reason {
+                    Some(r) => format!("Access request denied by user: {r}"),
+                    None => "Access request denied by user.".to_string(),
+                };
+                Ok(ToolOutput::error(msg))
+            }
             Err(e) => Ok(ToolOutput::error(format!(
                 "Approval system unavailable: {}",
                 e

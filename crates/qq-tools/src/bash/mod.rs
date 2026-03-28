@@ -234,8 +234,12 @@ impl Tool for RunTool {
                             self.permissions.promote_to_session(cmd);
                         }
                     }
-                    Ok(permissions::ApprovalResponse::Deny) => {
-                        return Ok(ToolOutput::error("Command denied by user."));
+                    Ok(permissions::ApprovalResponse::Deny(reason)) => {
+                        let msg = match reason {
+                            Some(r) => format!("Command denied by user: {r}"),
+                            None => "Command denied by user.".to_string(),
+                        };
+                        return Ok(ToolOutput::error(msg));
                     }
                     Err(e) => {
                         return Ok(ToolOutput::error(format!(

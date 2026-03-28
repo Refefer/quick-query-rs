@@ -334,6 +334,19 @@ pub fn execute_kernel(
         container.bindmount_ro("/lib32", "/lib32");
     }
 
+    // DNS resolution: /etc/resolv.conf is often a symlink (e.g. to
+    // /run/systemd/resolve/stub-resolv.conf). Resolve the real path and
+    // bind-mount its parent directory so DNS works inside the sandbox.
+    if let Ok(real) = std::fs::canonicalize("/etc/resolv.conf") {
+        if let Some(parent) = real.parent() {
+            if !is_under_system_prefix(&parent.to_string_lossy()) {
+                if let Some(parent_str) = parent.to_str() {
+                    container.bindmount_ro(parent_str, parent_str);
+                }
+            }
+        }
+    }
+
     // Virtual filesystems
     container
         .procfsmount("/proc")

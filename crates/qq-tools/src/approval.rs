@@ -24,8 +24,8 @@ pub enum ApprovalResponse {
     Allow,
     /// Allow and promote trigger commands to session tier.
     AllowForSession,
-    /// Deny execution.
-    Deny,
+    /// Deny execution, with an optional reason from the user.
+    Deny(Option<String>),
 }
 
 /// Sender side of the approval channel, held by tools that need user consent.

@@ -114,8 +114,12 @@ impl Tool for RequestInternetAccessTool {
                     cmds_list
                 )))
             }
-            Ok(ApprovalResponse::Deny) => {
-                Ok(ToolOutput::error("Internet access denied by user."))
+            Ok(ApprovalResponse::Deny(reason)) => {
+                let msg = match reason {
+                    Some(r) => format!("Internet access denied by user: {r}"),
+                    None => "Internet access denied by user.".to_string(),
+                };
+                Ok(ToolOutput::error(msg))
             }
             Err(e) => Ok(ToolOutput::error(format!(
                 "Approval system unavailable: {}",
@@ -214,7 +218,7 @@ mod tests {
         // Spawn a task that auto-denies so execute() returns
         tokio::spawn(async move {
             if let Some(req) = rx.recv().await {
-                let _ = req.response_tx.send(ApprovalResponse::Deny);
+                let _ = req.response_tx.send(ApprovalResponse::Deny(None));
             }
         });
 
