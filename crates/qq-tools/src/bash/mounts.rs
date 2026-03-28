@@ -224,8 +224,12 @@ impl Tool for MountExternalTool {
                     canonical.display()
                 )))
             }
-            Ok(super::permissions::ApprovalResponse::Deny) => {
-                Ok(ToolOutput::error("Mount request denied by user."))
+            Ok(super::permissions::ApprovalResponse::Deny(reason)) => {
+                let msg = match reason {
+                    Some(r) => format!("Mount request denied by user: {r}"),
+                    None => "Mount request denied by user.".to_string(),
+                };
+                Ok(ToolOutput::error(msg))
             }
             Err(e) => Ok(ToolOutput::error(format!("Mount approval failed: {}", e))),
         }

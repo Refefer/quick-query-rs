@@ -209,6 +209,9 @@ pub struct TuiApp {
     /// Pending approval request (shown as overlay, user responds with a/s/d keys)
     pub pending_approval: Option<qq_tools::ApprovalRequest>,
 
+    /// When Some, user has chosen to deny and is typing a reason.
+    pub denial_reason_input: Option<String>,
+
     /// Pending image/content attachments for the next message
     pub pending_content: Vec<TypedContent>,
 }
@@ -251,6 +254,7 @@ impl TuiApp {
             content_dirty: true,
             needs_redraw: true,
             pending_approval: None,
+            denial_reason_input: None,
             pending_content: Vec::new(),
         }
     }
@@ -980,6 +984,43 @@ pub async fn run_tui(
                     // Handle pending approval
                     if app.pending_approval.is_some() {
                         use crossterm::event::KeyCode;
+
+                        // Sub-state: typing a denial reason
+                        if let Some(ref mut reason) = app.denial_reason_input {
+                            match key.code {
+                                KeyCode::Enter => {
+                                    let reason_opt = if reason.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(reason.trim().to_string())
+                                    };
+                                    if let Some(request) = app.pending_approval.take() {
+                                        let _ = request.response_tx.send(
+                                            qq_tools::ApprovalResponse::Deny(reason_opt),
+                                        );
+                                    }
+                                    app.denial_reason_input = None;
+                                }
+                                KeyCode::Esc => {
+                                    if let Some(request) = app.pending_approval.take() {
+                                        let _ = request.response_tx.send(
+                                            qq_tools::ApprovalResponse::Deny(None),
+                                        );
+                                    }
+                                    app.denial_reason_input = None;
+                                }
+                                KeyCode::Backspace => {
+                                    reason.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    reason.push(c);
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        // Primary approval state
                         let response = match key.code {
                             KeyCode::Char('a') | KeyCode::Char('A') => {
                                 Some(qq_tools::ApprovalResponse::Allow)
@@ -987,8 +1028,14 @@ pub async fn run_tui(
                             KeyCode::Char('s') | KeyCode::Char('S') => {
                                 Some(qq_tools::ApprovalResponse::AllowForSession)
                             }
-                            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
-                                Some(qq_tools::ApprovalResponse::Deny)
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                // Transition to reason input sub-state
+                                app.denial_reason_input = Some(String::new());
+                                None
+                            }
+                            KeyCode::Esc => {
+                                // Quick deny, no reason prompt
+                                Some(qq_tools::ApprovalResponse::Deny(None))
                             }
                             _ => None,
                         };

@@ -570,12 +570,30 @@ pub async fn run_chat(
                         let response = match input.trim().to_lowercase().as_str() {
                             "a" | "allow" => qq_tools::ApprovalResponse::Allow,
                             "s" | "session" => qq_tools::ApprovalResponse::AllowForSession,
-                            _ => qq_tools::ApprovalResponse::Deny,
+                            _ => {
+                                eprint!("  Reason (optional, Enter to skip): ");
+                                let mut reason_input = String::new();
+                                let reason = match std::io::stdin().read_line(&mut reason_input) {
+                                    Ok(_) => {
+                                        let trimmed = reason_input.trim();
+                                        if trimmed.is_empty() {
+                                            None
+                                        } else {
+                                            Some(trimmed.to_string())
+                                        }
+                                    }
+                                    Err(_) => None,
+                                };
+                                qq_tools::ApprovalResponse::Deny(reason)
+                            }
                         };
                         let _ = request.response_tx.send(response);
                     }
                     Err(_) => {
-                        let _ = request.response_tx.send(qq_tools::ApprovalResponse::Deny);
+                        let _ =
+                            request
+                                .response_tx
+                                .send(qq_tools::ApprovalResponse::Deny(None));
                     }
                 }
             }
