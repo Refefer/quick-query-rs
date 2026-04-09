@@ -7,6 +7,7 @@
 //! - Streaming support for real-time agent-to-agent communication
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,9 +22,8 @@ use crate::tool::ToolRegistry;
 
 /// Result of a single agent execution.
 ///
-/// Distinguishes between successful completion and hitting the max iterations limit.
-/// `MaxIterationsExceeded` carries the full conversation history so callers (e.g.
-/// continuation logic) can generate meaningful summaries.
+/// Distinguishes between successful completion, hitting limits, and repetition detection.
+/// History-carrying variants allow callers (e.g. continuation logic) to generate summaries.
 #[derive(Debug)]
 pub enum AgentRunResult {
     /// Agent completed successfully with a final response and conversation messages.
@@ -33,7 +33,7 @@ pub enum AgentRunResult {
         /// Observation log from observational memory (empty if not used).
         observation_log: String,
     },
-    /// Agent hit the max iterations limit. Contains the full message history.
+    /// Agent hit the max iterations safety ceiling. Contains the full message history.
     MaxIterationsExceeded {
         messages: Vec<Message>,
         /// Observation log from observational memory (empty if not used).
@@ -45,6 +45,82 @@ pub enum AgentRunResult {
         messages: Vec<Message>,
         observation_log: String,
     },
+    /// Agent was stuck calling the same tool(s) with the same arguments repeatedly.
+    RepetitionDetected {
+        messages: Vec<Message>,
+        observation_log: String,
+    },
+}
+
+/// Default repetition threshold: block after this many identical calls.
+const REPETITION_THRESHOLD: usize = 3;
+
+/// Detects when an agent is stuck calling the same tool with the same arguments.
+///
+/// Tracks total invocations per `(tool_name, canonical_args)` hash. When any
+/// call exceeds the threshold, it is soft-blocked (error returned to LLM).
+/// When ALL calls in an iteration are blocked, the agent is hard-terminated.
+struct RepetitionDetector {
+    /// hash(tool_name, canonical_args) -> total call count
+    call_counts: HashMap<u64, usize>,
+    threshold: usize,
+}
+
+impl RepetitionDetector {
+    fn new() -> Self {
+        Self {
+            call_counts: HashMap::new(),
+            threshold: REPETITION_THRESHOLD,
+        }
+    }
+
+    /// Check whether this tool call is a repetition. Increments the counter.
+    /// Returns `Some(count)` if blocked (count >= threshold), `None` if allowed.
+    fn check(&mut self, tool_name: &str, arguments: &serde_json::Value) -> Option<usize> {
+        let hash = Self::canonical_hash(tool_name, arguments);
+        let count = self.call_counts.entry(hash).or_insert(0);
+        *count += 1;
+        if *count >= self.threshold {
+            Some(*count)
+        } else {
+            None
+        }
+    }
+
+    /// Compute a deterministic hash of (tool_name, arguments) with sorted JSON keys.
+    fn canonical_hash(tool_name: &str, arguments: &serde_json::Value) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool_name.hash(&mut hasher);
+        Self::hash_value(arguments, &mut hasher);
+        hasher.finish()
+    }
+
+    /// Recursively hash a JSON value with sorted object keys for determinism.
+    fn hash_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
+        match value {
+            serde_json::Value::Null => 0u8.hash(hasher),
+            serde_json::Value::Bool(b) => { 1u8.hash(hasher); b.hash(hasher); }
+            serde_json::Value::Number(n) => { 2u8.hash(hasher); n.to_string().hash(hasher); }
+            serde_json::Value::String(s) => { 3u8.hash(hasher); s.hash(hasher); }
+            serde_json::Value::Array(arr) => {
+                4u8.hash(hasher);
+                arr.len().hash(hasher);
+                for v in arr {
+                    Self::hash_value(v, hasher);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                5u8.hash(hasher);
+                map.len().hash(hasher);
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for key in keys {
+                    key.hash(hasher);
+                    Self::hash_value(&map[key], hasher);
+                }
+            }
+        }
+    }
 }
 
 /// Metadata about an agent instance's execution history.
@@ -531,7 +607,7 @@ impl AgentConfig {
         Self {
             id: id.into(),
             system_prompt: None,
-            max_turns: 20,
+            max_turns: 10_000,
             stateful: false,
             tool_limits: None,
             compactor: None,
@@ -620,7 +696,6 @@ pub enum AgentProgressEvent {
     IterationStart {
         agent_name: String,
         iteration: u32,
-        max_turns: u32,
     },
     /// A chunk of thinking/reasoning content.
     ThinkingDelta {
@@ -759,6 +834,9 @@ impl Agent {
             AgentRunResult::MaxIterationsExceeded { .. } => {
                 Err(Error::Unknown("Agent exceeded max iterations".into()))
             }
+            AgentRunResult::RepetitionDetected { .. } => {
+                Err(Error::Unknown("Agent stuck in repetitive loop".into()))
+            }
         }
     }
 
@@ -819,16 +897,17 @@ impl Agent {
             None
         };
 
-        let max_turns = config.max_turns as u32;
-
         // Track tool call counts for enforcing limits
         let mut tool_call_counts: HashMap<String, usize> = HashMap::new();
+
+        // Repetition detector: catches agents stuck calling the same tool with same args
+        let mut repetition_detector = RepetitionDetector::new();
 
         // Wrap-up tracking for obs memory
         let mut wrap_up_injected = false;
         let mut wrap_up_iteration: usize = 0;
 
-        // Run agentic loop
+        // Run agentic loop (safety ceiling only; repetition detector is primary stop)
         for iteration in 0..config.max_turns {
             // Emit iteration start event
             if let Some(ref handler) = progress {
@@ -836,7 +915,6 @@ impl Agent {
                     .on_progress(AgentProgressEvent::IterationStart {
                         agent_name: agent_name.clone(),
                         iteration: iteration as u32 + 1,
-                        max_turns,
                     })
                     .await;
             }
@@ -993,9 +1071,11 @@ impl Agent {
                     .with_reasoning(reasoning);
                 messages.push(msg);
 
-                // Check tool limits and partition into executable vs limit-exceeded
+                // Check tool limits and repetition, partition into executable vs blocked
                 let mut executable_calls = Vec::new();
+                let mut blocked_count = 0usize;
                 for tool_call in &tool_calls {
+                    // Check per-tool call limits
                     let limit_exceeded = if let Some(ref limits) = config.tool_limits {
                         if let Some(&limit) = limits.get(&tool_call.name) {
                             let count = tool_call_counts.get(&tool_call.name).copied().unwrap_or(0);
@@ -1053,10 +1133,65 @@ impl Agent {
                         }
 
                         messages.push(Message::tool_result(&tool_call.id, result));
-                    } else {
-                        *tool_call_counts.entry(tool_call.name.clone()).or_insert(0) += 1;
-                        executable_calls.push(tool_call);
+                        blocked_count += 1;
+                        continue;
                     }
+
+                    // Check repetition detector
+                    if let Some(rep_count) = repetition_detector.check(&tool_call.name, &tool_call.arguments) {
+                        debug!(
+                            agent = %config.id,
+                            tool = %tool_call.name,
+                            count = rep_count,
+                            "Repetitive tool call detected"
+                        );
+
+                        if let Some(ref handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::ToolStart {
+                                    agent_name: agent_name.clone(),
+                                    tool_name: tool_call.name.clone(),
+                                    arguments: tool_call.arguments.to_string(),
+                                })
+                                .await;
+                        }
+
+                        let result = format!(
+                            "Error: You have called '{}' with identical arguments {} times. \
+                            The result will not change. Try a different approach or provide your final response.",
+                            tool_call.name, rep_count
+                        );
+
+                        if let Some(ref handler) = progress {
+                            handler
+                                .on_progress(AgentProgressEvent::ToolComplete {
+                                    agent_name: agent_name.clone(),
+                                    tool_name: tool_call.name.clone(),
+                                    tool_call_id: tool_call.id.clone(),
+                                    result: result.clone(),
+                                    is_error: true,
+                                })
+                                .await;
+                        }
+
+                        messages.push(Message::tool_result(&tool_call.id, result));
+                        blocked_count += 1;
+                        continue;
+                    }
+
+                    *tool_call_counts.entry(tool_call.name.clone()).or_insert(0) += 1;
+                    executable_calls.push(tool_call);
+                }
+
+                // If ALL tool calls were blocked, the agent is stuck — hard terminate
+                if blocked_count == tool_calls.len() {
+                    let obs_log = obs_memory
+                        .map(|om| om.into_parts().0)
+                        .unwrap_or_default();
+                    return Ok(AgentRunResult::RepetitionDetected {
+                        messages,
+                        observation_log: obs_log,
+                    });
                 }
 
                 // Emit tool start events for all executable calls
@@ -1663,5 +1798,76 @@ mod tests {
         let content = "exact".to_string();
         let result = truncate_tool_result(content.clone(), 5);
         assert_eq!(result, "exact");
+    }
+
+    #[test]
+    fn test_repetition_detector_allows_below_threshold() {
+        let mut detector = RepetitionDetector::new();
+        let args = serde_json::json!({"query": "test"});
+        assert!(detector.check("web_search", &args).is_none());
+        assert!(detector.check("web_search", &args).is_none());
+    }
+
+    #[test]
+    fn test_repetition_detector_blocks_at_threshold() {
+        let mut detector = RepetitionDetector::new();
+        let args = serde_json::json!({"query": "test"});
+        detector.check("web_search", &args); // 1
+        detector.check("web_search", &args); // 2
+        let result = detector.check("web_search", &args); // 3
+        assert_eq!(result, Some(3));
+    }
+
+    #[test]
+    fn test_repetition_detector_different_args_independent() {
+        let mut detector = RepetitionDetector::new();
+        let args1 = serde_json::json!({"query": "hello"});
+        let args2 = serde_json::json!({"query": "world"});
+        detector.check("web_search", &args1);
+        detector.check("web_search", &args2);
+        detector.check("web_search", &args1);
+        // Still below threshold for args1 (2 calls) and args2 (1 call)
+        assert!(detector.check("web_search", &args2).is_none());
+    }
+
+    #[test]
+    fn test_repetition_detector_different_tools_independent() {
+        let mut detector = RepetitionDetector::new();
+        let args = serde_json::json!({"path": "foo.rs"});
+        detector.check("read_file", &args);
+        detector.check("read_file", &args);
+        detector.check("write_file", &args);
+        // read_file at 2, write_file at 1 — neither at threshold
+        assert!(detector.check("write_file", &args).is_none());
+    }
+
+    #[test]
+    fn test_canonical_hash_key_order_independent() {
+        let args1 = serde_json::json!({"a": 1, "b": 2});
+        let args2 = serde_json::json!({"b": 2, "a": 1});
+        assert_eq!(
+            RepetitionDetector::canonical_hash("tool", &args1),
+            RepetitionDetector::canonical_hash("tool", &args2),
+        );
+    }
+
+    #[test]
+    fn test_canonical_hash_nested_key_order() {
+        let args1 = serde_json::json!({"outer": {"z": 1, "a": 2}});
+        let args2 = serde_json::json!({"outer": {"a": 2, "z": 1}});
+        assert_eq!(
+            RepetitionDetector::canonical_hash("tool", &args1),
+            RepetitionDetector::canonical_hash("tool", &args2),
+        );
+    }
+
+    #[test]
+    fn test_canonical_hash_different_values_differ() {
+        let args1 = serde_json::json!({"query": "hello"});
+        let args2 = serde_json::json!({"query": "world"});
+        assert_ne!(
+            RepetitionDetector::canonical_hash("tool", &args1),
+            RepetitionDetector::canonical_hash("tool", &args2),
+        );
     }
 }

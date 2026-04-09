@@ -62,11 +62,6 @@ pub trait InternalAgent: Send + Sync {
     /// Get the tool names this agent needs
     fn tool_names(&self) -> &[&str];
 
-    /// Get the default max iterations for the agentic loop
-    fn max_turns(&self) -> usize {
-        20
-    }
-
     /// Get the description for when this agent is exposed as a tool to an LLM.
     ///
     /// This should be concise and guide proper usage (goals not commands).

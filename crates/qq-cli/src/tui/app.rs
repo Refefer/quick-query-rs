@@ -185,8 +185,8 @@ pub struct TuiApp {
     // Execution context (for displaying call stack)
     pub execution_context: ExecutionContext,
 
-    // Agent progress tracking (agent_name, iteration, max_turns, agent_chain)
-    pub agent_progress: Option<(String, u32, u32, Vec<String>)>,
+    // Agent progress tracking (agent_name, iteration, agent_chain)
+    pub agent_progress: Option<(String, u32, Vec<String>)>,
 
     // Agent byte counts (cumulative input/output bytes for current agent)
     pub agent_input_bytes: usize,
@@ -419,10 +419,9 @@ impl TuiApp {
             AgentEvent::IterationStart {
                 agent_name,
                 iteration,
-                max_turns,
                 agent_chain,
             } => {
-                self.agent_progress = Some((agent_name, iteration, max_turns, agent_chain));
+                self.agent_progress = Some((agent_name, iteration, agent_chain));
                 self.streaming_state = StreamingState::Asking;
             }
             AgentEvent::ThinkingDelta {
@@ -1719,7 +1718,7 @@ async fn run_streaming_completion(
     let include_tool_reasoning = provider.include_tool_reasoning();
     // Create chunk processor for large tool outputs
     let chunk_processor = ChunkProcessor::new(Arc::clone(&provider), chunker_config);
-    let max_turns = 100u32;
+    let max_turns = 10_000u32;
 
     // Keep iteration messages separate to avoid cloning all messages each iteration
     // On each iteration, we build request from base_messages + iteration_messages

@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 fn default_max_turns() -> usize {
-    20
+    10_000
 }
 
 fn default_compaction_strategy() -> AgentMemoryStrategy {

@@ -23,8 +23,8 @@ pub struct StatusBar<'a> {
     status_message: Option<&'a str>,
     execution_context: Option<&'a ExecutionContext>,
     tool_iteration: u32,
-    /// Agent progress: (agent_name, current_iteration, max_iterations, agent_chain)
-    agent_progress: Option<(&'a str, u32, u32, &'a [String])>,
+    /// Agent progress: (agent_name, current_iteration, agent_chain)
+    agent_progress: Option<(&'a str, u32, &'a [String])>,
     /// Agent byte counts: (input_bytes, output_bytes)
     agent_bytes: Option<(usize, usize)>,
     /// Session byte counts: (input_bytes, output_bytes)
@@ -83,7 +83,7 @@ impl<'a> StatusBar<'a> {
         self
     }
 
-    pub fn agent_progress(mut self, progress: Option<(&'a str, u32, u32, &'a [String])>) -> Self {
+    pub fn agent_progress(mut self, progress: Option<(&'a str, u32, &'a [String])>) -> Self {
         self.agent_progress = progress;
         self
     }
@@ -135,7 +135,7 @@ impl Widget for StatusBar<'_> {
         ));
 
         // Show nested agent progress if a sub-agent is running
-        if let Some((agent_name, iteration, max_iterations, agent_chain)) = self.agent_progress {
+        if let Some((agent_name, iteration, agent_chain)) = self.agent_progress {
             let style_agent = Style::default().fg(Color::Magenta);
 
             // Use the scope-derived agent chain from the event (correct for parallel agents).
@@ -147,10 +147,9 @@ impl Widget for StatusBar<'_> {
                 spans.push(Span::styled(" > ", style_dim));
                 spans.push(Span::styled(
                     format!(
-                        "Agent[{}] turn {}/{}",
+                        "Agent[{}] turn {}",
                         capitalize_first(agent_name),
                         iteration,
-                        max_iterations
                     ),
                     style_agent,
                 ));
@@ -169,7 +168,6 @@ impl Widget for StatusBar<'_> {
                 let chain_spans = build_chain_spans(
                     &collapsed,
                     iteration,
-                    max_iterations,
                     budget,
                     style_dim,
                     style_agent,
@@ -350,15 +348,15 @@ fn format_agent_segment(name: &str, count: usize) -> String {
 }
 
 /// Format the leaf (last) agent segment with turn info.
-fn format_leaf_segment(name: &str, count: usize, iteration: u32, max_iterations: u32) -> String {
+fn format_leaf_segment(name: &str, count: usize, iteration: u32) -> String {
     let cap = capitalize_first(name);
     if count > 1 {
         format!(
-            "Agent[{}] \u{00d7}{} turn {}/{}",
-            cap, count, iteration, max_iterations
+            "Agent[{}] \u{00d7}{} turn {}",
+            cap, count, iteration
         )
     } else {
-        format!("Agent[{}] turn {}/{}", cap, iteration, max_iterations)
+        format!("Agent[{}] turn {}", cap, iteration)
     }
 }
 
@@ -416,7 +414,6 @@ fn estimate_right_width(
 fn build_chain_spans(
     collapsed: &[(&str, usize)],
     iteration: u32,
-    max_iterations: u32,
     budget: usize,
     style_dim: Style,
     style_agent: Style,
@@ -433,7 +430,7 @@ fn build_chain_spans(
     let mut segments: Vec<String> = Vec::with_capacity(collapsed.len());
     for (i, &(name, count)) in collapsed.iter().enumerate() {
         let seg = if i == collapsed.len() - 1 {
-            format_leaf_segment(name, count, iteration, max_iterations)
+            format_leaf_segment(name, count, iteration)
         } else {
             format_agent_segment(name, count)
         };
@@ -556,16 +553,16 @@ mod tests {
     #[test]
     fn format_leaf_no_repeat() {
         assert_eq!(
-            format_leaf_segment("explore", 1, 26, 100),
-            "Agent[Explore] turn 26/100"
+            format_leaf_segment("explore", 1, 26),
+            "Agent[Explore] turn 26"
         );
     }
 
     #[test]
     fn format_leaf_with_repeat() {
         assert_eq!(
-            format_leaf_segment("explore", 3, 26, 100),
-            "Agent[Explore] \u{00d7}3 turn 26/100"
+            format_leaf_segment("explore", 3, 26),
+            "Agent[Explore] \u{00d7}3 turn 26"
         );
     }
 
@@ -573,13 +570,13 @@ mod tests {
     fn build_spans_fits_in_budget() {
         let collapsed = vec![("researcher", 2), ("explore", 3)];
         let style = Style::default();
-        let spans = build_chain_spans(&collapsed, 26, 100, 200, style, style);
+        let spans = build_chain_spans(&collapsed, 26, 200, style, style);
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("Researcher"));
         assert!(text.contains("\u{00d7}2"));
         assert!(text.contains("Explore"));
         assert!(text.contains("\u{00d7}3"));
-        assert!(text.contains("turn 26/100"));
+        assert!(text.contains("turn 26"));
     }
 
     #[test]
@@ -587,7 +584,7 @@ mod tests {
         let collapsed = vec![("researcher", 2), ("coder", 1), ("explore", 3)];
         let style = Style::default();
         // Budget too small for all three but enough for ellipsis form
-        let spans = build_chain_spans(&collapsed, 26, 100, 65, style, style);
+        let spans = build_chain_spans(&collapsed, 26, 65, style, style);
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("\u{2026}")); // ellipsis
         assert!(text.contains("Researcher"));
@@ -600,18 +597,18 @@ mod tests {
         let collapsed = vec![("researcher", 2), ("coder", 1), ("explore", 3)];
         let style = Style::default();
         // Very tight budget — only leaf should show
-        let spans = build_chain_spans(&collapsed, 26, 100, 40, style, style);
+        let spans = build_chain_spans(&collapsed, 26, 40, style, style);
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("\u{2026}"));
         assert!(text.contains("Explore"));
-        assert!(text.contains("turn 26/100"));
+        assert!(text.contains("turn 26"));
     }
 
     #[test]
     fn build_spans_empty() {
         let collapsed: Vec<(&str, usize)> = vec![];
         let style = Style::default();
-        let spans = build_chain_spans(&collapsed, 26, 100, 200, style, style);
+        let spans = build_chain_spans(&collapsed, 26, 200, style, style);
         assert!(spans.is_empty());
     }
 }

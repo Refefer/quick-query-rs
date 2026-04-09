@@ -58,7 +58,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
             let agent_progress = app
                 .agent_progress
                 .as_ref()
-                .map(|(name, iter, max, chain)| (name.as_str(), *iter, *max, chain.as_slice()));
+                .map(|(name, iter, chain)| (name.as_str(), *iter, chain.as_slice()));
             // Show top border only when thinking panel isn't visible (avoids double line)
             let thinking_visible = has_thinking
                 && layout

@@ -19,7 +19,6 @@ pub enum AgentEvent {
     IterationStart {
         agent_name: String,
         iteration: u32,
-        max_turns: u32,
         /// The full agent chain from root to this agent, derived from the scope path.
         /// e.g., ["pm", "researcher", "doc-researcher"]
         agent_chain: Vec<String>,
@@ -84,11 +83,9 @@ impl From<AgentProgressEvent> for AgentEvent {
             AgentProgressEvent::IterationStart {
                 agent_name,
                 iteration,
-                max_turns,
             } => AgentEvent::IterationStart {
                 agent_name,
                 iteration,
-                max_turns,
                 agent_chain: vec![],
             },
             AgentProgressEvent::ThinkingDelta { agent_name, content } => {

@@ -32,7 +32,6 @@ struct AgentToolConfig {
     agent_name: String,
     system_prompt: String,
     tool_names: Vec<String>,
-    max_turns: usize,
     tool_limits: Option<HashMap<String, usize>>,
     compact_prompt: String,
     is_read_only: bool,
@@ -69,6 +68,18 @@ fn agent_tool_definition(name: &str, description: &str) -> ToolDefinition {
                      for a tracked task. Agents with different instance_ids maintain \
                      separate memory, enabling parallel dispatch of the same agent type."
                 ),
+                false,
+            )
+            .add_property(
+                "background",
+                PropertySchema::boolean(
+                    "Run this agent in the background. Returns immediately with a \
+                     confirmation. The agent runs concurrently and its result is stored \
+                     in the task when complete (check via list_tasks / get_task_result). \
+                     Use wait_for_tasks to block until completion. \
+                     Requires instance_id in '{agent}-agent:{task_id}' format. \
+                     Default: false."
+                ).with_default(serde_json::Value::Bool(false)),
                 false,
             ),
     )
@@ -160,10 +171,19 @@ async fn execute_agent(
             context_window,
             ask_network,
         );
-        // Exclude self-agent to prevent recursive self-calls
-        let self_tool_name = format!("Agent[{}]", config.agent_name);
+        // Exclude all ancestors in the call chain to prevent mutual recursion.
+        // The scope tracks the full chain (e.g. "pm/researcher/doc-researcher"),
+        // so we extract each agent name and block it from being called again.
+        let ancestor_names: std::collections::HashSet<String> = child_scope
+            .split('/')
+            .map(|segment| {
+                // Strip instance_id suffix if present (e.g. "coder:3" -> "coder")
+                segment.split(':').next().unwrap_or(segment).to_string()
+            })
+            .map(|name| format!("Agent[{}]", name))
+            .collect();
         for tool in nested_agent_tools {
-            if tool.name() != self_tool_name {
+            if !ancestor_names.contains(tool.name()) {
                 agent_tools.register(tool);
             }
         }
@@ -223,12 +243,9 @@ async fn execute_agent(
     // Branch on memory strategy
     match config.memory_strategy {
         AgentMemoryStrategy::ObsMemory => {
-            // Obs-memory path: compactor in the loop, higher max_turns, no continuation
-            let max_turns = if config.max_turns == 20 { 500 } else { config.max_turns };
-
+            // Obs-memory path: compactor in the loop, no continuation
             let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
                 .with_system_prompt(&full_prompt)
-                .with_max_turns(max_turns)
                 .with_prior_observation_log(prior_observation_log);
 
             if let Some(limits) = config.tool_limits.clone() {
@@ -269,11 +286,13 @@ async fn execute_agent(
             match &result {
                 Ok(qq_core::AgentRunResult::Success { messages, observation_log, .. })
                 | Ok(qq_core::AgentRunResult::ObservationLimitReached { messages, observation_log, .. })
-                | Ok(qq_core::AgentRunResult::MaxIterationsExceeded { messages, observation_log }) => {
+                | Ok(qq_core::AgentRunResult::MaxIterationsExceeded { messages, observation_log })
+                | Ok(qq_core::AgentRunResult::RepetitionDetected { messages, observation_log }) => {
                     let variant = match &result {
                         Ok(qq_core::AgentRunResult::Success { .. }) => "success",
                         Ok(qq_core::AgentRunResult::ObservationLimitReached { .. }) => "obs_limit_reached",
                         Ok(qq_core::AgentRunResult::MaxIterationsExceeded { .. }) => "max_iterations",
+                        Ok(qq_core::AgentRunResult::RepetitionDetected { .. }) => "repetition_detected",
                         _ => unreachable!(),
                     };
                     tracing::info!(
@@ -313,6 +332,9 @@ async fn execute_agent(
                 Ok(qq_core::AgentRunResult::MaxIterationsExceeded { .. }) => {
                     Ok(ToolOutput::error("Agent exceeded max iterations".to_string()))
                 }
+                Ok(qq_core::AgentRunResult::RepetitionDetected { .. }) => {
+                    Ok(ToolOutput::error("Agent stuck in repetitive loop".to_string()))
+                }
                 Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
             }
         }
@@ -320,8 +342,7 @@ async fn execute_agent(
         AgentMemoryStrategy::Compaction => {
             // Compaction path: post-execution LLM summarization with continuation
             let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
-                .with_system_prompt(&full_prompt)
-                .with_max_turns(config.max_turns);
+                .with_system_prompt(&full_prompt);
 
             if let Some(limits) = config.tool_limits {
                 agent_cfg = agent_cfg.with_tool_limits(
@@ -379,6 +400,144 @@ async fn execute_agent(
             }
         }
     }
+}
+
+// =============================================================================
+// Background dispatch helpers
+// =============================================================================
+
+/// Extract the task_id from an instance_id in format "{agent}-agent:{task_id}".
+fn extract_task_id(instance_id: &Option<String>) -> Result<String, Error> {
+    let id = instance_id.as_deref().ok_or_else(|| {
+        Error::tool(
+            "agent",
+            "background=true requires instance_id in format '{agent}-agent:{task_id}'",
+        )
+    })?;
+    id.rsplit_once(':')
+        .map(|(_, tid)| tid.to_string())
+        .ok_or_else(|| {
+            Error::tool(
+                "agent",
+                format!(
+                    "instance_id '{}' must contain ':' to extract task_id \
+                     (expected format: '{{agent}}-agent:{{task_id}}')",
+                    id
+                ),
+            )
+        })
+}
+
+/// Validate task exists in the store and mark it as in_progress.
+fn mark_task_dispatched(
+    task_store: &Option<Arc<qq_tools::TaskStore>>,
+    task_id: &str,
+) -> Result<(), Error> {
+    let store = task_store.as_ref().ok_or_else(|| {
+        Error::tool(
+            "agent",
+            "background dispatch requires task tracking to be enabled",
+        )
+    })?;
+    if !store.has_task(task_id) {
+        return Err(Error::tool(
+            "agent",
+            format!("Task #{} not found in task store", task_id),
+        ));
+    }
+    store.set_status(task_id, qq_tools::tasks::TaskStatus::InProgress);
+    Ok(())
+}
+
+/// Spawn an agent in the background, storing results in TaskStore when done.
+///
+/// Returns immediately with a confirmation message. The agent runs
+/// concurrently via `tokio::spawn` and auto-updates the task on completion.
+#[allow(clippy::too_many_arguments)]
+fn spawn_background_agent(
+    config: AgentToolConfig,
+    task: String,
+    new_instance: bool,
+    instance_id: Option<String>,
+    task_id: String,
+    base_tools: Arc<ToolRegistry>,
+    provider: Arc<dyn Provider>,
+    external_agents: AgentsConfig,
+    enabled_agents: Option<Vec<String>>,
+    current_depth: u32,
+    max_depth: u32,
+    event_bus: Option<AgentEventBus>,
+    agent_memory: Option<AgentMemory>,
+    scope: String,
+    task_store: Option<Arc<qq_tools::TaskStore>>,
+    compactor: Option<Arc<dyn ContextCompactor>>,
+    context_window: Option<u32>,
+    ask_network: bool,
+) -> ToolOutput {
+    let return_agent_name = config.agent_name.clone();
+    let return_task_id = task_id.clone();
+
+    tokio::spawn(async move {
+        let spawn_agent_name = config.agent_name.clone();
+        let result = execute_agent(
+            config,
+            task,
+            new_instance,
+            instance_id,
+            &base_tools,
+            &provider,
+            &external_agents,
+            &enabled_agents,
+            current_depth,
+            max_depth,
+            &None, // No execution context for background agents
+            &event_bus,
+            &agent_memory,
+            &scope,
+            &task_store,
+            &compactor,
+            context_window,
+            ask_network,
+        )
+        .await;
+
+        if let Some(ref store) = task_store {
+            match result {
+                Ok(output) if !output.is_error => {
+                    store.set_result(
+                        &task_id,
+                        output.text_content(),
+                        qq_tools::tasks::TaskStatus::Done,
+                    );
+                }
+                Ok(output) => {
+                    store.set_result(
+                        &task_id,
+                        output.text_content(),
+                        qq_tools::tasks::TaskStatus::Blocked,
+                    );
+                }
+                Err(e) => {
+                    store.set_result(
+                        &task_id,
+                        format!("Agent error: {}", e),
+                        qq_tools::tasks::TaskStatus::Blocked,
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                agent = %spawn_agent_name,
+                task_id = %task_id,
+                "Background agent completed but no task store to write result to"
+            );
+        }
+    });
+
+    ToolOutput::success(format!(
+        "Agent [{}] dispatched in background for task #{}.",
+        return_agent_name, return_task_id
+    ))
 }
 
 // =============================================================================
@@ -469,6 +628,8 @@ struct AgentArgs {
     #[serde(default)]
     new_instance: bool,
     instance_id: Option<String>,
+    #[serde(default)]
+    background: bool,
 }
 
 #[async_trait]
@@ -489,17 +650,7 @@ impl Tool for InternalAgentTool {
         let args: AgentArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool(&self.tool_name, format!("Invalid arguments: {}", e)))?;
 
-        // Push agent context
-        if let Some(ref ctx) = self.execution_context {
-            ctx.push_agent(self.agent.name()).await;
-        }
-
         // Resolve config: builtin overrides > agent defaults
-        let max_turns = self
-            .external_agents
-            .get_builtin_max_turns(self.agent.name())
-            .unwrap_or_else(|| self.agent.max_turns());
-
         let tool_limits = if let Some(limits) = self.external_agents.get_builtin_tool_limits(self.agent.name()) {
             Some(limits.clone())
         } else {
@@ -567,7 +718,6 @@ impl Tool for InternalAgentTool {
             agent_name: self.agent.name().to_string(),
             system_prompt: self.agent.system_prompt().to_string(),
             tool_names,
-            max_turns,
             tool_limits,
             compact_prompt,
             is_read_only: self.agent.is_read_only(),
@@ -575,6 +725,38 @@ impl Tool for InternalAgentTool {
             max_observations,
             observation_config,
         };
+
+        // Background dispatch: spawn agent as tokio task, return immediately
+        if args.background {
+            let task_id = extract_task_id(&args.instance_id)?;
+            mark_task_dispatched(&self.task_store, &task_id)?;
+
+            return Ok(spawn_background_agent(
+                config,
+                args.task,
+                args.new_instance,
+                args.instance_id,
+                task_id,
+                Arc::clone(&self.base_tools),
+                Arc::clone(&self.provider),
+                self.external_agents.clone(),
+                self.enabled_agents.clone(),
+                self.current_depth,
+                self.max_depth,
+                self.event_bus.clone(),
+                self.agent_memory.clone(),
+                self.scope.clone(),
+                self.task_store.clone(),
+                self.compactor.clone(),
+                self.context_window,
+                self.ask_network,
+            ));
+        }
+
+        // Synchronous dispatch: push context, execute, pop context
+        if let Some(ref ctx) = self.execution_context {
+            ctx.push_agent(self.agent.name()).await;
+        }
 
         let output = execute_agent(
             config,
@@ -714,11 +896,6 @@ impl Tool for ExternalAgentTool {
         let args: AgentArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool(&self.tool_name, format!("Invalid arguments: {}", e)))?;
 
-        // Push agent context
-        if let Some(ref ctx) = self.execution_context {
-            ctx.push_agent(&self.agent_name).await;
-        }
-
         let tool_limits = if self.agent_def.tool_limits.is_empty() {
             None
         } else {
@@ -775,7 +952,6 @@ impl Tool for ExternalAgentTool {
             agent_name: self.agent_name.clone(),
             system_prompt: self.agent_def.system_prompt.clone(),
             tool_names,
-            max_turns: self.agent_def.max_turns,
             tool_limits,
             compact_prompt: self.agent_def.compact_prompt
                 .as_deref()
@@ -786,6 +962,38 @@ impl Tool for ExternalAgentTool {
             max_observations: self.agent_def.max_observations,
             observation_config,
         };
+
+        // Background dispatch: spawn agent as tokio task, return immediately
+        if args.background {
+            let task_id = extract_task_id(&args.instance_id)?;
+            mark_task_dispatched(&self.task_store, &task_id)?;
+
+            return Ok(spawn_background_agent(
+                config,
+                args.task,
+                args.new_instance,
+                args.instance_id,
+                task_id,
+                Arc::clone(&self.base_tools),
+                Arc::clone(&self.provider),
+                self.external_agents.clone(),
+                self.enabled_agents.clone(),
+                self.current_depth,
+                self.max_depth,
+                self.event_bus.clone(),
+                self.agent_memory.clone(),
+                self.scope.clone(),
+                self.task_store.clone(),
+                self.compactor.clone(),
+                self.context_window,
+                self.ask_network,
+            ));
+        }
+
+        // Synchronous dispatch: push context, execute, pop context
+        if let Some(ref ctx) = self.execution_context {
+            ctx.push_agent(&self.agent_name).await;
+        }
 
         let output = execute_agent(
             config,
