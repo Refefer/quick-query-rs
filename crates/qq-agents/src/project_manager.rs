@@ -70,10 +70,19 @@ Tasks dispatch in parallel when independent. Code review and content review both
 Execute tasks using this loop:
 
 1. **FIND READY TASKS**: `list_tasks` to identify all "todo" tasks whose `blocked_by` dependencies are all "done".
-2. **DISPATCH BATCH**: For every ready task, mark it "in_progress" and call Agent[X] — put ALL ready-task Agent calls in a single response for parallel execution. When dispatching agents for tracked tasks, ALWAYS pass `instance_id` using the format `{agent}-agent:{task_id}` (e.g. `coder-agent:3`). This ensures each task gets its own agent memory context and enables safe parallel dispatch of the same agent type.
-3. **REVIEW RESULTS**: Check each agent's output. Mark successful tasks "done". For failures: re-delegate with adjusted instructions, or mark "blocked" with a note explaining why.
+2. **DISPATCH BATCH**: For every ready task, call Agent[X] with `background: true` and `instance_id: "{agent}-agent:{task_id}"`. Put ALL dispatches AND a `wait_for_tasks` call (with the dispatched task IDs) in a **single response**. The dispatches return instantly; `wait_for_tasks` blocks until at least one agent finishes.
+3. **REVIEW RESULTS**: Use `get_task_result` to retrieve the full output from each completed task. For failures (status "blocked"): re-delegate with adjusted instructions, or add a note explaining why.
 4. **NEXT BATCH**: `list_tasks` again — completing tasks may have unblocked new ones. Repeat from step 1.
 5. **COMPLETE**: When all tasks are "done", summarize results to the user.
+
+**Critical dispatch pattern** — always include `wait_for_tasks` in the same response as your dispatches:
+```
+[Single response with:]
+  Agent[coder] {task: "...", instance_id: "coder-agent:3", background: true}
+  Agent[coder] {task: "...", instance_id: "coder-agent:4", background: true}
+  wait_for_tasks {task_ids: ["3", "4"]}
+```
+The dispatches return immediately, then `wait_for_tasks` blocks until agents finish. NEVER use `run` with `sleep` to wait — always use `wait_for_tasks`.
 
 If a parallel agent fails, the others still complete successfully. Address failures independently — retry with adjusted instructions, modify the plan, or create a new task.
 
@@ -88,12 +97,14 @@ If a parallel agent fails, the others still complete successfully. Address failu
 
 ## TASK TRACKING
 
-You have 4 task tools for managing work:
+You have 6 task tools for managing work:
 
 - **create_task** — Create a tracked task with title, optional description, assignee, status, and `blocked_by` (list of prerequisite task IDs).
 - **update_task** — Update a task's title, status, assignee, description, `blocked_by` (replace dependency list, use `[]` to clear), or `add_note` (append a progress note).
 - **list_tasks** — List all tasks, optionally filtered by status or assignee. Output includes a derived `blocks` field showing which tasks each task blocks.
 - **delete_task** — Remove a task that is no longer relevant.
+- **get_task_result** — Retrieve the full output from a completed background agent task. Use after `wait_for_tasks` returns to read what each agent produced.
+- **wait_for_tasks** — Block until specified background tasks complete (reach "done" or "blocked" status). Include in the same response as background agent dispatches.
 
 ### Dependencies
 Use `blocked_by` on create or update to express prerequisite relationships between tasks. The `list_tasks` output automatically derives a `blocks` field showing the inverse. This helps you sequence work correctly.
@@ -108,7 +119,23 @@ Use task tracking for any work that involves 2 or more steps. This keeps you and
 
 ## PARALLELISM
 
-Calling multiple Agent[X] tools in a single response executes them concurrently. **When multiple tasks have no pending dependencies, ALWAYS dispatch them in the same response for concurrent execution.**
+Use `background: true` to dispatch agents concurrently. Background agents run independently via separate threads and automatically update their task status when done.
+
+**Dispatch pattern — ALWAYS follow this:**
+1. Dispatch all ready agents with `background: true` in one response
+2. Include `wait_for_tasks` with the dispatched task IDs in the SAME response
+3. Dispatches return instantly; `wait_for_tasks` blocks until completions
+4. Use `get_task_result` to read each completed agent's output
+
+**Batch dispatch example:**
+After tasks 1 and 2 complete, tasks 3 and 4 become unblocked:
+```
+[Single response with:]
+  Agent[coder] {task: "...", instance_id: "coder-agent:3", background: true}
+  Agent[coder] {task: "...", instance_id: "coder-agent:4", background: true}
+  wait_for_tasks {task_ids: ["3", "4"]}
+```
+Both agents run concurrently. `wait_for_tasks` returns when at least one finishes. Then `get_task_result` retrieves the output.
 
 **Good parallelism patterns:**
 - Explore directory A + Explore directory B (independent searches)
@@ -123,14 +150,7 @@ Calling multiple Agent[X] tools in a single response executes them concurrently.
 - Code a change, then review that change (review depends on code)
 - Research findings, then write report based on those findings
 
-**Batch dispatch example:**
-After tasks 1 (explore) and 2 (research) complete, tasks 3 and 4 (both coding, independent) become unblocked. Dispatch them together with unique instance_ids:
-```
-[Single response with:]
-  Agent[coder] {task: "...", instance_id: "coder-agent:3"}
-  Agent[coder] {task: "...", instance_id: "coder-agent:4"}
-```
-Both execute concurrently with separate memory. When both finish, check `list_tasks` for the next batch.
+**NEVER use `run` with `sleep` to wait for agents. ALWAYS use `wait_for_tasks`.** Sleeping wastes time and does not unblock agents.
 
 ## DELEGATION AND AUTONOMY
 
@@ -247,12 +267,9 @@ impl InternalAgent for ProjectManagerAgent {
     }
 
     fn tool_names(&self) -> &[&str] {
-        &["create_task", "update_task", "list_tasks", "delete_task"]
+        &["create_task", "update_task", "list_tasks", "delete_task", "get_task_result", "wait_for_tasks"]
     }
 
-    fn max_turns(&self) -> usize {
-        100 // Allow many iterations for complex conversations
-    }
 
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
@@ -278,6 +295,8 @@ mod tests {
         assert!(agent.tool_names().contains(&"update_task"));
         assert!(agent.tool_names().contains(&"list_tasks"));
         assert!(agent.tool_names().contains(&"delete_task"));
+        assert!(agent.tool_names().contains(&"get_task_result"));
+        assert!(agent.tool_names().contains(&"wait_for_tasks"));
     }
 
     #[test]

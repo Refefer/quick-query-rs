@@ -241,6 +241,11 @@ pub async fn execute_with_continuation(
                     "Agent exceeded max iterations".into(),
                 ))
             }
+            Ok(AgentRunResult::RepetitionDetected { .. }) => {
+                AgentExecutionResult::Error(qq_core::Error::Unknown(
+                    "Agent stuck in repetitive loop".into(),
+                ))
+            }
             Err(e) => AgentExecutionResult::Error(e),
         };
     }
@@ -266,6 +271,12 @@ pub async fn execute_with_continuation(
             }
             Ok(AgentRunResult::ObservationLimitReached { content, messages, .. }) => {
                 return AgentExecutionResult::Success { content, messages };
+            }
+            Ok(AgentRunResult::RepetitionDetected { .. }) => {
+                // Agent is stuck in a loop — do NOT continue
+                return AgentExecutionResult::Error(qq_core::Error::Unknown(
+                    "Agent stuck in repetitive loop".into(),
+                ));
             }
             Ok(AgentRunResult::MaxIterationsExceeded { messages: agent_messages, .. }) => {
 

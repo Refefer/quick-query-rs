@@ -131,10 +131,6 @@ impl InternalAgent for ReviewerAgent {
         None
     }
 
-    fn max_turns(&self) -> usize {
-        100
-    }
-
     fn tool_description(&self) -> &str {
         TOOL_DESCRIPTION
     }
