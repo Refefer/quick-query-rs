@@ -8,7 +8,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
-pub use crate::approval::{create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse};
+pub use crate::approval::{
+    create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse,
+};
 
 /// Permission tier for a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -125,99 +127,300 @@ fn default_tier(command: &str) -> Tier {
 
 const SESSION_COMMANDS: &[&str] = &[
     // File viewing / text processing
-    "ls", "cat", "head", "tail", "wc", "sort", "uniq", "diff", "comm", "join",
-    "paste", "cut", "tr", "fold", "nl", "od", "xxd", "strings", "tac", "rev",
-    "column", "seq", "yes", "tee", "less", "more",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "sort",
+    "uniq",
+    "diff",
+    "comm",
+    "join",
+    "paste",
+    "cut",
+    "tr",
+    "fold",
+    "nl",
+    "od",
+    "xxd",
+    "strings",
+    "tac",
+    "rev",
+    "column",
+    "seq",
+    "yes",
+    "tee",
+    "less",
+    "more",
     // File finding / searching
-    "find", "grep", "egrep", "fgrep", "rg", "ag",
+    "find",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
     // File info
-    "file", "stat", "du", "df", "tree", "basename", "dirname", "realpath",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "tree",
+    "basename",
+    "dirname",
+    "realpath",
     "readlink",
     // System info
-    "pwd", "uname", "whoami", "which", "env", "printenv", "echo", "printf",
-    "date", "true", "false", "test",
+    "pwd",
+    "uname",
+    "whoami",
+    "which",
+    "env",
+    "printenv",
+    "echo",
+    "printf",
+    "date",
+    "true",
+    "false",
+    "test",
     // Checksums
-    "sha256sum", "sha1sum", "md5sum", "b2sum",
+    "sha256sum",
+    "sha1sum",
+    "md5sum",
+    "b2sum",
     // Git read-only operations
-    "git-log", "git-diff", "git-show", "git-status", "git-blame", "git-branch",
-    "git-tag", "git-rev-parse", "git-describe", "git-shortlog", "git-ls-files",
-    "git-ls-tree", "git-cat-file", "git-rev-list", "git-name-rev",
-    "git-merge-base", "git-remote", "git-stash-list",
+    "git-log",
+    "git-diff",
+    "git-show",
+    "git-status",
+    "git-blame",
+    "git-branch",
+    "git-tag",
+    "git-rev-parse",
+    "git-describe",
+    "git-shortlog",
+    "git-ls-files",
+    "git-ls-tree",
+    "git-cat-file",
+    "git-rev-list",
+    "git-name-rev",
+    "git-merge-base",
+    "git-remote",
+    "git-stash-list",
     // Cargo read-only operations
-    "cargo-build", "cargo-test", "cargo-check", "cargo-clippy", "cargo-bench",
-    "cargo-doc", "cargo-tree", "cargo-metadata",
+    "cargo-build",
+    "cargo-test",
+    "cargo-check",
+    "cargo-clippy",
+    "cargo-bench",
+    "cargo-doc",
+    "cargo-tree",
+    "cargo-metadata",
     // npm read-only operations
-    "npm-test", "npm-ls", "npm-list", "npm-outdated", "npm-view", "npm-audit",
+    "npm-test",
+    "npm-ls",
+    "npm-list",
+    "npm-outdated",
+    "npm-view",
+    "npm-audit",
     // yarn read-only operations
-    "yarn-list", "yarn-outdated", "yarn-info", "yarn-audit",
+    "yarn-list",
+    "yarn-outdated",
+    "yarn-info",
+    "yarn-audit",
     // pnpm read-only operations
-    "pnpm-list", "pnpm-outdated", "pnpm-audit",
+    "pnpm-list",
+    "pnpm-outdated",
+    "pnpm-audit",
     // pip/pip3 read-only operations
-    "pip-list", "pip-freeze", "pip-show", "pip-check",
-    "pip3-list", "pip3-freeze", "pip3-show", "pip3-check",
+    "pip-list",
+    "pip-freeze",
+    "pip-show",
+    "pip-check",
+    "pip3-list",
+    "pip3-freeze",
+    "pip3-show",
+    "pip3-check",
     // poetry read-only operations
-    "poetry-show", "poetry-check", "poetry-version",
+    "poetry-show",
+    "poetry-check",
+    "poetry-version",
     // Misc
-    "xargs", "id",
+    "xargs",
+    "id",
 ];
 
 const PER_CALL_COMMANDS: &[&str] = &[
     // Network transfer (requires per-call approval)
-    "curl", "wget", "nc", "ncat", "socat", "ssh", "scp", "rsync", "ftp",
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "socat",
+    "ssh",
+    "scp",
+    "rsync",
+    "ftp",
     // Git write operations
-    "git-commit", "git-add", "git-checkout", "git-switch", "git-merge",
-    "git-rebase", "git-stash", "git-stash-push", "git-stash-pop",
-    "git-stash-apply", "git-stash-drop", "git-push", "git-pull", "git-fetch",
-    "git-reset", "git-clean", "git-restore", "git-cherry-pick", "git-revert",
-    "git-init", "git-clone",
+    "git-commit",
+    "git-add",
+    "git-checkout",
+    "git-switch",
+    "git-merge",
+    "git-rebase",
+    "git-stash",
+    "git-stash-push",
+    "git-stash-pop",
+    "git-stash-apply",
+    "git-stash-drop",
+    "git-push",
+    "git-pull",
+    "git-fetch",
+    "git-reset",
+    "git-clean",
+    "git-restore",
+    "git-cherry-pick",
+    "git-revert",
+    "git-init",
+    "git-clone",
     // Cargo write/mutate operations
-    "cargo-fmt", "cargo-fix", "cargo-add", "cargo-remove", "cargo-install",
-    "cargo-uninstall", "cargo-publish", "cargo-init", "cargo-new", "cargo-run",
-    "cargo-clean", "cargo-update",
+    "cargo-fmt",
+    "cargo-fix",
+    "cargo-add",
+    "cargo-remove",
+    "cargo-install",
+    "cargo-uninstall",
+    "cargo-publish",
+    "cargo-init",
+    "cargo-new",
+    "cargo-run",
+    "cargo-clean",
+    "cargo-update",
     // npm write/mutate operations
-    "npm-install", "npm-uninstall", "npm-update", "npm-publish", "npm-init",
-    "npm-link", "npm-run", "npm-start", "npm-build", "npm-exec",
+    "npm-install",
+    "npm-uninstall",
+    "npm-update",
+    "npm-publish",
+    "npm-init",
+    "npm-link",
+    "npm-run",
+    "npm-start",
+    "npm-build",
+    "npm-exec",
     // yarn write/mutate operations
-    "yarn-add", "yarn-remove", "yarn-install", "yarn-upgrade", "yarn-publish",
-    "yarn-run", "yarn-start", "yarn-build", "yarn-exec",
+    "yarn-add",
+    "yarn-remove",
+    "yarn-install",
+    "yarn-upgrade",
+    "yarn-publish",
+    "yarn-run",
+    "yarn-start",
+    "yarn-build",
+    "yarn-exec",
     // pnpm write/mutate operations
-    "pnpm-add", "pnpm-remove", "pnpm-install", "pnpm-update", "pnpm-publish",
-    "pnpm-run", "pnpm-start", "pnpm-build", "pnpm-exec",
+    "pnpm-add",
+    "pnpm-remove",
+    "pnpm-install",
+    "pnpm-update",
+    "pnpm-publish",
+    "pnpm-run",
+    "pnpm-start",
+    "pnpm-build",
+    "pnpm-exec",
     // pip/pip3 write/mutate operations
-    "pip-install", "pip-uninstall",
-    "pip3-install", "pip3-uninstall",
+    "pip-install",
+    "pip-uninstall",
+    "pip3-install",
+    "pip3-uninstall",
     // poetry write/mutate operations
-    "poetry-add", "poetry-remove", "poetry-install", "poetry-update",
-    "poetry-build", "poetry-publish", "poetry-run", "poetry-init", "poetry-new",
+    "poetry-add",
+    "poetry-remove",
+    "poetry-install",
+    "poetry-update",
+    "poetry-build",
+    "poetry-publish",
+    "poetry-run",
+    "poetry-init",
+    "poetry-new",
     // npx (subcommands are arbitrary executables)
     "npx",
     // Build tools (no subcommand extraction)
-    "make", "cmake", "ninja", "meson",
+    "make",
+    "cmake",
+    "ninja",
+    "meson",
     // Interpreters
-    "python", "python3", "node", "ruby", "perl",
+    "python",
+    "python3",
+    "node",
+    "ruby",
+    "perl",
     // File modification
-    "mv", "cp", "rm", "mkdir", "rmdir", "touch", "chmod", "ln",
+    "mv",
+    "cp",
+    "rm",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "chmod",
+    "ln",
     // Text modification (in-place)
-    "sed", "awk", "patch",
+    "sed",
+    "awk",
+    "patch",
     // Shells (sub-shells)
-    "sh", "bash", "zsh",
+    "sh",
+    "bash",
+    "zsh",
     // Generic fallbacks (unrecognized subcommands default here)
-    "git", "cargo", "npm", "yarn", "pnpm", "pip", "pip3", "poetry",
+    "git",
+    "cargo",
+    "npm",
+    "yarn",
+    "pnpm",
+    "pip",
+    "pip3",
+    "poetry",
 ];
 
 const RESTRICTED_COMMANDS: &[&str] = &[
     // Privilege escalation
-    "sudo", "su", "doas", "pkexec",
+    "sudo",
+    "su",
+    "doas",
+    "pkexec",
     // Disk operations
-    "dd", "mkfs", "fdisk", "parted", "mount", "umount",
+    "dd",
+    "mkfs",
+    "fdisk",
+    "parted",
+    "mount",
+    "umount",
     // System control
-    "shutdown", "reboot", "halt", "poweroff", "init", "systemctl",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    "init",
+    "systemctl",
     // Process control (could affect host)
-    "kill", "killall", "pkill",
+    "kill",
+    "killall",
+    "pkill",
     // Network configuration
-    "iptables", "ip", "ifconfig", "route", "tc",
+    "iptables",
+    "ip",
+    "ifconfig",
+    "route",
+    "tc",
     // User management
-    "chown", "chgrp", "useradd", "userdel", "passwd", "usermod", "groupadd",
+    "chown",
+    "chgrp",
+    "useradd",
+    "userdel",
+    "passwd",
+    "usermod",
+    "groupadd",
 ];
 
 /// Parse config-level permission overrides into a tier map.
@@ -293,7 +496,10 @@ mod tests {
     fn test_pipeline_all_session() {
         let s = store();
         let cmds = vec!["grep".to_string(), "wc".to_string()];
-        assert!(matches!(s.check_pipeline(&cmds), PipelinePermission::Allowed));
+        assert!(matches!(
+            s.check_pipeline(&cmds),
+            PipelinePermission::Allowed
+        ));
     }
 
     #[test]
@@ -304,7 +510,10 @@ mod tests {
             PipelinePermission::NeedsApproval(trigger) => {
                 assert_eq!(trigger, vec!["cargo"]);
             }
-            other => panic!("Expected NeedsApproval, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected NeedsApproval, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -316,7 +525,10 @@ mod tests {
             PipelinePermission::Restricted(blocked) => {
                 assert_eq!(blocked, vec!["sudo"]);
             }
-            other => panic!("Expected Restricted, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Restricted, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -343,11 +555,7 @@ mod tests {
 
     #[test]
     fn test_config_override_beats_session_promotion() {
-        let overrides = parse_config_overrides(
-            &[],
-            &[],
-            &["cargo".to_string()],
-        );
+        let overrides = parse_config_overrides(&[], &[], &["cargo".to_string()]);
         let s = PermissionStore::new(overrides);
         s.promote_to_session("cargo");
         // Config override wins
@@ -452,14 +660,20 @@ mod tests {
         let s = store();
         // All session: cargo-build + grep
         let cmds = vec!["cargo-build".to_string(), "grep".to_string()];
-        assert!(matches!(s.check_pipeline(&cmds), PipelinePermission::Allowed));
+        assert!(matches!(
+            s.check_pipeline(&cmds),
+            PipelinePermission::Allowed
+        ));
         // Mixed: cargo-build (session) + cargo-run (per-call)
         let cmds = vec!["cargo-build".to_string(), "cargo-run".to_string()];
         match s.check_pipeline(&cmds) {
             PipelinePermission::NeedsApproval(trigger) => {
                 assert_eq!(trigger, vec!["cargo-run"]);
             }
-            other => panic!("Expected NeedsApproval, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected NeedsApproval, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 }

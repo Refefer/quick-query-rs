@@ -6,7 +6,10 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use qq_core::{Error, ImageData, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters, TypedContent};
+use qq_core::{
+    Error, ImageData, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters,
+    TypedContent,
+};
 
 const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
 
@@ -52,15 +55,15 @@ impl Tool for ReadImageTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new("read_image", self.tool_description())
-            .with_parameters(
-                ToolParameters::new()
-                    .add_property(
-                        "path",
-                        PropertySchema::string("Path to the image file (absolute or relative to project root)"),
-                        true,
-                    ),
-            )
+        ToolDefinition::new("read_image", self.tool_description()).with_parameters(
+            ToolParameters::new().add_property(
+                "path",
+                PropertySchema::string(
+                    "Path to the image file (absolute or relative to project root)",
+                ),
+                true,
+            ),
+        )
     }
 
     fn is_blocking(&self) -> bool {
@@ -74,11 +77,17 @@ impl Tool for ReadImageTool {
         let resolved = self.resolve_path(&args.path);
 
         if !resolved.exists() {
-            return Ok(ToolOutput::error(format!("File not found: {}", resolved.display())));
+            return Ok(ToolOutput::error(format!(
+                "File not found: {}",
+                resolved.display()
+            )));
         }
 
         if !resolved.is_file() {
-            return Ok(ToolOutput::error(format!("Not a file: {}", resolved.display())));
+            return Ok(ToolOutput::error(format!(
+                "Not a file: {}",
+                resolved.display()
+            )));
         }
 
         let metadata = std::fs::metadata(&resolved)
@@ -136,19 +145,28 @@ mod tests {
     #[test]
     fn test_resolve_path_absolute() {
         let tool = ReadImageTool::new(PathBuf::from("/project"));
-        assert_eq!(tool.resolve_path("/abs/path.png"), PathBuf::from("/abs/path.png"));
+        assert_eq!(
+            tool.resolve_path("/abs/path.png"),
+            PathBuf::from("/abs/path.png")
+        );
     }
 
     #[test]
     fn test_resolve_path_relative() {
         let tool = ReadImageTool::new(PathBuf::from("/project"));
-        assert_eq!(tool.resolve_path("img/photo.png"), PathBuf::from("/project/img/photo.png"));
+        assert_eq!(
+            tool.resolve_path("img/photo.png"),
+            PathBuf::from("/project/img/photo.png")
+        );
     }
 
     #[tokio::test]
     async fn test_not_found() {
         let tool = ReadImageTool::new(PathBuf::from("/tmp"));
-        let result = tool.execute(serde_json::json!({"path": "/nonexistent/file.png"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"path": "/nonexistent/file.png"}))
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.text_content().contains("not found"));
     }
@@ -162,9 +180,14 @@ mod tests {
         std::fs::write(&file, "hello world").unwrap();
 
         let tool = ReadImageTool::new(dir.clone());
-        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap()})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}))
+            .await
+            .unwrap();
         assert!(result.is_error);
-        assert!(result.text_content().contains("decode") || result.text_content().contains("image"));
+        assert!(
+            result.text_content().contains("decode") || result.text_content().contains("image")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -190,7 +213,10 @@ mod tests {
         std::fs::write(&file, &png_bytes).unwrap();
 
         let tool = ReadImageTool::new(dir.clone());
-        let result = tool.execute(serde_json::json!({"path": "test.png"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"path": "test.png"}))
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 2); // text info + image
         assert!(result.text_content().contains("image/png"));
