@@ -108,6 +108,12 @@ impl TaskStore {
         self.inner.lock().unwrap().tasks.contains_key(id)
     }
 
+    /// Snapshot a task by id. Returns an owned clone so callers do not
+    /// hold the store lock across their own logic.
+    pub fn get_task(&self, id: &str) -> Option<Task> {
+        self.inner.lock().unwrap().tasks.get(id).cloned()
+    }
+
     /// Set a task's status.
     pub fn set_status(&self, id: &str, status: TaskStatus) {
         let mut inner = self.inner.lock().unwrap();
@@ -898,10 +904,9 @@ impl Tool for GetTaskResultTool {
         let args: GetTaskResultArgs = serde_json::from_value(arguments)
             .map_err(|e| Error::tool("get_task_result", format!("Invalid arguments: {}", e)))?;
 
-        let inner = self.store.inner.lock().unwrap();
-        match inner.tasks.get(&args.id) {
-            Some(task) => match &task.result {
-                Some(result) => Ok(ToolOutput::success(result.clone())),
+        match self.store.get_task(&args.id) {
+            Some(task) => match task.result {
+                Some(result) => Ok(ToolOutput::success(result)),
                 None => Ok(ToolOutput::error(format!(
                     "Task #{} has no result yet (status: {})",
                     args.id, task.status
@@ -937,8 +942,12 @@ struct WaitForTasksArgs {
     timeout_secs: u64,
 }
 
+/// Default wait-for-tasks budget. 5 minutes is long enough to cover most
+/// agent jobs comfortably, but short enough that a PM that accidentally
+/// waits for a task that will never complete recovers within a reasonable
+/// window instead of appearing frozen for 10 minutes.
 fn default_timeout_secs() -> u64 {
-    600
+    300
 }
 
 #[async_trait]
@@ -969,7 +978,7 @@ impl Tool for WaitForTasksTool {
                 .add_property(
                     "timeout_secs",
                     PropertySchema::number(
-                        "Maximum seconds to wait (default: 600). Returns empty on timeout.",
+                        "Maximum seconds to wait (default: 300). Returns empty on timeout.",
                     ),
                     false,
                 ),
@@ -1005,10 +1014,9 @@ impl Tool for WaitForTasksTool {
         }
 
         // Build summary of completed tasks
-        let inner = self.store.inner.lock().unwrap();
         let mut lines = vec![format!("{} task(s) completed:", completed.len())];
         for id in &completed {
-            if let Some(task) = inner.tasks.get(id.as_str()) {
+            if let Some(task) = self.store.get_task(id) {
                 lines.push(format!("  #{} [{}]: {}", id, task.status, task.title));
             }
         }
