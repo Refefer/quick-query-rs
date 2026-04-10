@@ -13,10 +13,13 @@ pub mod web;
 
 pub use approval::{create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse};
 pub use bash::{
-    create_run_tools, RunTool, MountExternalTool, MountPoint, PermissionStore,
-    RequestNetworkAccessTool, RequestSensitiveAccessTool, SandboxExecutor, SandboxMounts,
-    SandboxPathPolicy,
+    create_run_tools, MountExternalTool, MountPoint, PermissionStore, RequestNetworkAccessTool,
+    RequestSensitiveAccessTool, RunTool, SandboxExecutor, SandboxMounts, SandboxPathPolicy,
 };
 pub use image::{create_image_tools, ReadImageTool};
-pub use tasks::{create_task_tools, create_task_tools_arc, TaskStore};
-pub use web::{create_web_tools, create_web_tools_arc, create_web_tools_with_search, WebSearchConfig};
+pub use tasks::{
+    create_task_tools, create_task_tools_arc, GetTaskResultTool, TaskStore, WaitForTasksTool,
+};
+pub use web::{
+    create_web_tools, create_web_tools_arc, create_web_tools_with_search, WebSearchConfig,
+};

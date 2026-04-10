@@ -3,10 +3,13 @@
 //! Provides in-memory task storage with CRUD operations, designed for
 //! the project manager agent to track delegated work items.
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
 
@@ -64,6 +67,9 @@ pub struct Task {
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Result output from a background agent execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
 }
 
 // =============================================================================
@@ -79,8 +85,11 @@ struct TaskStoreInner {
 /// In-memory task store, session-scoped.
 ///
 /// Thread-safe via `Mutex`. No persistence between sessions.
+/// Includes a `Notify` for signaling background agent completions.
 pub struct TaskStore {
     inner: Mutex<TaskStoreInner>,
+    /// Notified when any task's result/status is set (for `wait_for_tasks`).
+    completion_notify: Notify,
 }
 
 impl TaskStore {
@@ -90,6 +99,83 @@ impl TaskStore {
                 tasks: HashMap::new(),
                 next_id: 1,
             }),
+            completion_notify: Notify::new(),
+        }
+    }
+
+    /// Check if a task exists.
+    pub fn has_task(&self, id: &str) -> bool {
+        self.inner.lock().unwrap().tasks.contains_key(id)
+    }
+
+    /// Set a task's status.
+    pub fn set_status(&self, id: &str, status: TaskStatus) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(task) = inner.tasks.get_mut(id) {
+            task.status = status;
+        }
+    }
+
+    /// Set a task's result and status atomically.
+    ///
+    /// Used by background agent completions. Notifies any waiters
+    /// (i.e., `wait_for_tasks` calls) after the update.
+    pub fn set_result(&self, id: &str, result: String, status: TaskStatus) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(task) = inner.tasks.get_mut(id) {
+                task.result = Some(result);
+                task.status = status;
+            }
+        }
+        // Notify after releasing the lock
+        self.completion_notify.notify_waiters();
+    }
+
+    /// Wait until at least one task in `watched_ids` has status Done or Blocked.
+    ///
+    /// Returns the IDs of completed/blocked tasks. If any are already
+    /// complete, returns immediately. Returns an empty vec on timeout.
+    pub async fn wait_for_completion(
+        &self,
+        watched_ids: &[String],
+        timeout: Duration,
+    ) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Register the waiter BEFORE checking state. `Notify::notify_waiters`
+            // does not store permits — it only wakes waiters already registered
+            // on a `Notified` future. By calling `enable()` first, any
+            // `set_result` that runs between our state check and the `.await`
+            // is still captured, eliminating the missed-wakeup race.
+            let notified = self.completion_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Check current state.
+            let completed: Vec<String> = {
+                let inner = self.inner.lock().unwrap();
+                watched_ids
+                    .iter()
+                    .filter(|id| {
+                        inner
+                            .tasks
+                            .get(id.as_str())
+                            .map(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Blocked))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            };
+            if !completed.is_empty() {
+                return completed;
+            }
+
+            // Wait for notification or timeout.
+            match tokio::time::timeout_at(deadline, notified).await {
+                Ok(_) => continue,
+                Err(_) => return vec![],
+            }
         }
     }
 
@@ -133,7 +219,11 @@ impl TaskStore {
             ));
 
             if !task.blocked_by.is_empty() {
-                let deps: Vec<String> = task.blocked_by.iter().map(|id| format!("#{}", id)).collect();
+                let deps: Vec<String> = task
+                    .blocked_by
+                    .iter()
+                    .map(|id| format!("#{}", id))
+                    .collect();
                 lines.push(format!("  blocked by: {}", deps.join(", ")));
             }
 
@@ -148,6 +238,10 @@ impl TaskStore {
 
             if let Some(note) = task.notes.last() {
                 lines.push(format!("  latest note: {}", note));
+            }
+
+            if task.result.is_some() {
+                lines.push("  result: [available — use get_task_result to view]".to_string());
             }
         }
 
@@ -250,8 +344,7 @@ impl Tool for CreateTaskTool {
             .map_err(|e| Error::tool("create_task", format!("Invalid arguments: {}", e)))?;
 
         let status = match args.status {
-            Some(s) => TaskStatus::from_str(&s)
-                .map_err(|e| Error::tool("create_task", e))?,
+            Some(s) => TaskStatus::from_str(&s).map_err(|e| Error::tool("create_task", e))?,
             None => TaskStatus::Todo,
         };
 
@@ -278,6 +371,7 @@ impl Tool for CreateTaskTool {
             description: args.description,
             blocked_by: args.blocked_by,
             notes: Vec::new(),
+            result: None,
         };
 
         let output = serde_json::to_string_pretty(&task)
@@ -336,7 +430,11 @@ impl Tool for UpdateTaskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
-                .add_property("id", PropertySchema::string("ID of the task to update"), true)
+                .add_property(
+                    "id",
+                    PropertySchema::string("ID of the task to update"),
+                    true,
+                )
                 .add_property(
                     "title",
                     PropertySchema::string("New title for the task"),
@@ -344,9 +442,7 @@ impl Tool for UpdateTaskTool {
                 )
                 .add_property(
                     "status",
-                    PropertySchema::string(
-                        "New status: todo, in_progress, done, or blocked",
-                    ),
+                    PropertySchema::string("New status: todo, in_progress, done, or blocked"),
                     false,
                 )
                 .add_property(
@@ -416,8 +512,8 @@ impl Tool for UpdateTaskTool {
             task.title = title;
         }
         if let Some(status_str) = args.status {
-            task.status = TaskStatus::from_str(&status_str)
-                .map_err(|e| Error::tool("update_task", e))?;
+            task.status =
+                TaskStatus::from_str(&status_str).map_err(|e| Error::tool("update_task", e))?;
         }
         if let Some(assignee) = args.assignee {
             task.assignee = Some(assignee);
@@ -480,9 +576,7 @@ impl Tool for ListTasksTool {
             ToolParameters::new()
                 .add_property(
                     "status",
-                    PropertySchema::string(
-                        "Filter by status: todo, in_progress, done, or blocked",
-                    ),
+                    PropertySchema::string("Filter by status: todo, in_progress, done, or blocked"),
                     false,
                 )
                 .add_property(
@@ -502,10 +596,7 @@ impl Tool for ListTasksTool {
             .map_err(|e| Error::tool("list_tasks", format!("Invalid arguments: {}", e)))?;
 
         let status_filter = match args.status {
-            Some(s) => Some(
-                TaskStatus::from_str(&s)
-                    .map_err(|e| Error::tool("list_tasks", e))?,
-            ),
+            Some(s) => Some(TaskStatus::from_str(&s).map_err(|e| Error::tool("list_tasks", e))?),
             None => None,
         };
 
@@ -546,14 +637,11 @@ impl Tool for ListTasksTool {
         let mut blocks_map: HashMap<&str, Vec<&str>> = HashMap::new();
         for t in &all_tasks {
             for dep_id in &t.blocked_by {
-                blocks_map
-                    .entry(dep_id.as_str())
-                    .or_default()
-                    .push(&t.id);
+                blocks_map.entry(dep_id.as_str()).or_default().push(&t.id);
             }
         }
 
-        // Serialize with derived "blocks" field
+        // Serialize with derived "blocks" field; suppress full result text
         let output_values: Vec<serde_json::Value> = tasks
             .iter()
             .map(|task| {
@@ -562,7 +650,19 @@ impl Tool for ListTasksTool {
                     val.as_object_mut().unwrap().insert(
                         "blocks".to_string(),
                         serde_json::Value::Array(
-                            blocks.iter().map(|id| serde_json::Value::String(id.to_string())).collect(),
+                            blocks
+                                .iter()
+                                .map(|id| serde_json::Value::String(id.to_string()))
+                                .collect(),
+                        ),
+                    );
+                }
+                // Replace full result with availability hint
+                if task.result.is_some() {
+                    val.as_object_mut().unwrap().insert(
+                        "result".to_string(),
+                        serde_json::Value::String(
+                            "[available — use get_task_result to view]".to_string(),
                         ),
                     );
                 }
@@ -612,8 +712,11 @@ impl Tool for DeleteTaskTool {
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
-            ToolParameters::new()
-                .add_property("id", PropertySchema::string("ID of the task to delete"), true),
+            ToolParameters::new().add_property(
+                "id",
+                PropertySchema::string("ID of the task to delete"),
+                true,
+            ),
         )
     }
 
@@ -683,17 +786,21 @@ impl Tool for UpdateMyTaskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description()).with_parameters(
             ToolParameters::new()
-                .add_property("id", PropertySchema::string("ID of the task to update"), true)
+                .add_property(
+                    "id",
+                    PropertySchema::string("ID of the task to update"),
+                    true,
+                )
                 .add_property(
                     "status",
-                    PropertySchema::string(
-                        "New status: todo, in_progress, done, or blocked",
-                    ),
+                    PropertySchema::string("New status: todo, in_progress, done, or blocked"),
                     false,
                 )
                 .add_property(
                     "add_note",
-                    PropertySchema::string("Append a progress note (e.g., findings, blockers, completion summary)"),
+                    PropertySchema::string(
+                        "Append a progress note (e.g., findings, blockers, completion summary)",
+                    ),
                     false,
                 ),
         )
@@ -725,8 +832,8 @@ impl Tool for UpdateMyTaskTool {
         };
 
         if let Some(status_str) = args.status {
-            task.status = TaskStatus::from_str(&status_str)
-                .map_err(|e| Error::tool("update_my_task", e))?;
+            task.status =
+                TaskStatus::from_str(&status_str).map_err(|e| Error::tool("update_my_task", e))?;
         }
         if let Some(note) = args.add_note {
             task.notes.push(note);
@@ -736,6 +843,179 @@ impl Tool for UpdateMyTaskTool {
             .unwrap_or_else(|_| format!("Task '{}' updated", args.id));
 
         Ok(ToolOutput::success(output))
+    }
+}
+
+// =============================================================================
+// GetTaskResultTool
+// =============================================================================
+
+/// Tool to retrieve the full result output from a completed background agent task.
+pub struct GetTaskResultTool {
+    store: Arc<TaskStore>,
+}
+
+impl GetTaskResultTool {
+    pub fn new(store: Arc<TaskStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(Deserialize)]
+struct GetTaskResultArgs {
+    id: String,
+}
+
+#[async_trait]
+impl Tool for GetTaskResultTool {
+    fn name(&self) -> &str {
+        "get_task_result"
+    }
+
+    fn description(&self) -> &str {
+        "Get the full result output from a completed background agent task."
+    }
+
+    fn tool_description(&self) -> &str {
+        "Retrieve the result of a completed background agent task."
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new().add_property(
+                "id",
+                PropertySchema::string("ID of the task to get the result for"),
+                true,
+            ),
+        )
+    }
+
+    fn is_blocking(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        let args: GetTaskResultArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("get_task_result", format!("Invalid arguments: {}", e)))?;
+
+        let inner = self.store.inner.lock().unwrap();
+        match inner.tasks.get(&args.id) {
+            Some(task) => match &task.result {
+                Some(result) => Ok(ToolOutput::success(result.clone())),
+                None => Ok(ToolOutput::error(format!(
+                    "Task #{} has no result yet (status: {})",
+                    args.id, task.status
+                ))),
+            },
+            None => Ok(ToolOutput::error(format!(
+                "Task with id '{}' not found",
+                args.id
+            ))),
+        }
+    }
+}
+
+// =============================================================================
+// WaitForTasksTool
+// =============================================================================
+
+/// Tool that blocks until specified background tasks complete.
+pub struct WaitForTasksTool {
+    store: Arc<TaskStore>,
+}
+
+impl WaitForTasksTool {
+    pub fn new(store: Arc<TaskStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(Deserialize)]
+struct WaitForTasksArgs {
+    task_ids: Vec<String>,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+}
+
+fn default_timeout_secs() -> u64 {
+    600
+}
+
+#[async_trait]
+impl Tool for WaitForTasksTool {
+    fn name(&self) -> &str {
+        "wait_for_tasks"
+    }
+
+    fn description(&self) -> &str {
+        "Wait until one or more background agent tasks complete. Blocks until at least one of the specified tasks reaches 'done' or 'blocked' status, then returns the completed task IDs."
+    }
+
+    fn tool_description(&self) -> &str {
+        "Block until background agent tasks complete."
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(self.name(), self.description()).with_parameters(
+            ToolParameters::new()
+                .add_property(
+                    "task_ids",
+                    PropertySchema::array(
+                        "IDs of tasks to wait for",
+                        PropertySchema::string("Task ID"),
+                    ),
+                    true,
+                )
+                .add_property(
+                    "timeout_secs",
+                    PropertySchema::number(
+                        "Maximum seconds to wait (default: 600). Returns empty on timeout.",
+                    ),
+                    false,
+                ),
+        )
+    }
+
+    fn is_blocking(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
+        let args: WaitForTasksArgs = serde_json::from_value(arguments)
+            .map_err(|e| Error::tool("wait_for_tasks", format!("Invalid arguments: {}", e)))?;
+
+        if args.task_ids.is_empty() {
+            return Ok(ToolOutput::error(
+                "At least one task_id must be provided".to_string(),
+            ));
+        }
+
+        let timeout = Duration::from_secs(args.timeout_secs);
+        let completed = self
+            .store
+            .wait_for_completion(&args.task_ids, timeout)
+            .await;
+
+        if completed.is_empty() {
+            return Ok(ToolOutput::success(format!(
+                "Timeout after {}s: no tasks completed. Watched task IDs: {}",
+                args.timeout_secs,
+                args.task_ids.join(", ")
+            )));
+        }
+
+        // Build summary of completed tasks
+        let inner = self.store.inner.lock().unwrap();
+        let mut lines = vec![format!("{} task(s) completed:", completed.len())];
+        for id in &completed {
+            if let Some(task) = inner.tasks.get(id.as_str()) {
+                lines.push(format!("  #{} [{}]: {}", id, task.status, task.title));
+            }
+        }
+        lines.push(String::new());
+        lines.push("Use get_task_result to retrieve each task's full output.".to_string());
+
+        Ok(ToolOutput::success(lines.join("\n")))
     }
 }
 
@@ -750,7 +1030,9 @@ pub fn create_task_tools(store: Arc<TaskStore>) -> Vec<Box<dyn Tool>> {
         Box::new(UpdateTaskTool::new(store.clone())),
         Box::new(ListTasksTool::new(store.clone())),
         Box::new(DeleteTaskTool::new(store.clone())),
-        Box::new(UpdateMyTaskTool::new(store)),
+        Box::new(UpdateMyTaskTool::new(store.clone())),
+        Box::new(GetTaskResultTool::new(store.clone())),
+        Box::new(WaitForTasksTool::new(store)),
     ]
 }
 
@@ -761,7 +1043,9 @@ pub fn create_task_tools_arc(store: Arc<TaskStore>) -> Vec<Arc<dyn Tool>> {
         Arc::new(UpdateTaskTool::new(store.clone())),
         Arc::new(ListTasksTool::new(store.clone())),
         Arc::new(DeleteTaskTool::new(store.clone())),
-        Arc::new(UpdateMyTaskTool::new(store)),
+        Arc::new(UpdateMyTaskTool::new(store.clone())),
+        Arc::new(GetTaskResultTool::new(store.clone())),
+        Arc::new(WaitForTasksTool::new(store)),
     ]
 }
 
@@ -965,17 +1249,19 @@ mod tests {
         let store = new_store();
 
         let boxed = create_task_tools(store.clone());
-        assert_eq!(boxed.len(), 5);
+        assert_eq!(boxed.len(), 7);
         assert_eq!(boxed[0].name(), "create_task");
         assert_eq!(boxed[1].name(), "update_task");
         assert_eq!(boxed[2].name(), "list_tasks");
         assert_eq!(boxed[3].name(), "delete_task");
         assert_eq!(boxed[4].name(), "update_my_task");
+        assert_eq!(boxed[5].name(), "get_task_result");
+        assert_eq!(boxed[6].name(), "wait_for_tasks");
 
         let arced = create_task_tools_arc(store);
-        assert_eq!(arced.len(), 5);
+        assert_eq!(arced.len(), 7);
         assert_eq!(arced[0].name(), "create_task");
-        assert_eq!(arced[4].name(), "update_my_task");
+        assert_eq!(arced[6].name(), "wait_for_tasks");
     }
 
     // --- Dependency tests ---
@@ -1281,5 +1567,307 @@ mod tests {
             .await
             .unwrap();
         assert!(result.text_content().contains("\"id\": \"1\""));
+    }
+
+    // --- Background task result tests ---
+
+    #[test]
+    fn test_has_task() {
+        let store = TaskStore::new();
+        assert!(!store.has_task("1"));
+
+        {
+            let mut inner = store.inner.lock().unwrap();
+            inner.tasks.insert(
+                "1".to_string(),
+                Task {
+                    id: "1".to_string(),
+                    title: "Test".to_string(),
+                    status: TaskStatus::Todo,
+                    assignee: None,
+                    description: None,
+                    blocked_by: vec![],
+                    notes: vec![],
+                    result: None,
+                },
+            );
+        }
+        assert!(store.has_task("1"));
+        assert!(!store.has_task("2"));
+    }
+
+    #[test]
+    fn test_set_result() {
+        let store = TaskStore::new();
+        {
+            let mut inner = store.inner.lock().unwrap();
+            inner.tasks.insert(
+                "1".to_string(),
+                Task {
+                    id: "1".to_string(),
+                    title: "Test".to_string(),
+                    status: TaskStatus::InProgress,
+                    assignee: None,
+                    description: None,
+                    blocked_by: vec![],
+                    notes: vec![],
+                    result: None,
+                },
+            );
+        }
+
+        store.set_result("1", "Agent output here".to_string(), TaskStatus::Done);
+
+        let inner = store.inner.lock().unwrap();
+        let task = inner.tasks.get("1").unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+        assert_eq!(task.result.as_deref(), Some("Agent output here"));
+    }
+
+    #[test]
+    fn test_set_result_nonexistent_task() {
+        let store = TaskStore::new();
+        // Should not panic
+        store.set_result("999", "output".to_string(), TaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn test_get_task_result_tool() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let get_result = GetTaskResultTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Background task"}))
+            .await
+            .unwrap();
+
+        // No result yet
+        let result = get_result
+            .execute(serde_json::json!({"id": "1"}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("no result yet"));
+
+        // Set result
+        store.set_result(
+            "1",
+            "Exploration complete: found 5 files".to_string(),
+            TaskStatus::Done,
+        );
+
+        // Now has result
+        let result = get_result
+            .execute(serde_json::json!({"id": "1"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.text_content(), "Exploration complete: found 5 files");
+    }
+
+    #[tokio::test]
+    async fn test_get_task_result_not_found() {
+        let store = new_store();
+        let get_result = GetTaskResultTool::new(store);
+
+        let result = get_result
+            .execute(serde_json::json!({"id": "999"}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_hides_full_result() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let list = ListTasksTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Background task"}))
+            .await
+            .unwrap();
+
+        store.set_result(
+            "1",
+            "Very long agent output...".to_string(),
+            TaskStatus::Done,
+        );
+
+        let result = list.execute(serde_json::json!({})).await.unwrap();
+        let text = result.text_content();
+        // Should show availability hint, not full result
+        assert!(text.contains("get_task_result"));
+        assert!(!text.contains("Very long agent output"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tasks_immediate_completion() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let wait = WaitForTasksTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task 1", "status": "done"}))
+            .await
+            .unwrap();
+
+        let result = wait
+            .execute(serde_json::json!({"task_ids": ["1"], "timeout_secs": 1}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.text_content().contains("#1"));
+        assert!(result.text_content().contains("completed"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tasks_blocks_then_completes() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let wait = WaitForTasksTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Background task"}))
+            .await
+            .unwrap();
+
+        // Spawn a task that completes the task after a short delay
+        let store_clone = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            store_clone.set_result("1", "Done!".to_string(), TaskStatus::Done);
+        });
+
+        let result = wait
+            .execute(serde_json::json!({"task_ids": ["1"], "timeout_secs": 5}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.text_content().contains("#1"));
+    }
+
+    /// Smoke test for concurrent `set_result` + `wait_for_completion` under a
+    /// multi-threaded runtime.
+    ///
+    /// Spawns a batch of waiters each watching a distinct task, plus setters
+    /// that complete those tasks with tiny jittered delays. The goal is to
+    /// exercise the lock + `Notify` protocol under real preemption and fail
+    /// loudly on any regression that reintroduces lost wakeups, deadlocks,
+    /// or cross-task state corruption. None of these failures show up under
+    /// the single-threaded test flavor, so we force `multi_thread` here.
+    ///
+    /// The test is not a deterministic reproducer for the
+    /// `notify_waiters` missed-wakeup race — the race window is narrow
+    /// enough that landing it in-process is probabilistic. The fix for
+    /// that race (`Notified::enable()` before the state check in
+    /// `wait_for_completion`) is a standard tokio pattern documented in
+    /// `tokio::sync::Notify`; this test is its belt-and-suspenders guard.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_wait_for_completion_stress() {
+        const BATCHES: usize = 20;
+        const TASKS_PER_BATCH: usize = 10;
+
+        for _batch in 0..BATCHES {
+            let store = new_store();
+            let create = CreateTaskTool::new(store.clone());
+
+            let mut ids = Vec::with_capacity(TASKS_PER_BATCH);
+            for i in 0..TASKS_PER_BATCH {
+                create
+                    .execute(serde_json::json!({"title": format!("task {}", i)}))
+                    .await
+                    .unwrap();
+                ids.push((i + 1).to_string());
+            }
+
+            // Kick off setters that complete each task with a tiny jittered delay.
+            let mut setters = Vec::with_capacity(TASKS_PER_BATCH);
+            for (i, id) in ids.iter().enumerate() {
+                let s = store.clone();
+                let id = id.clone();
+                let spin_count = (i as u64) * 50;
+                setters.push(tokio::spawn(async move {
+                    for _ in 0..spin_count {
+                        std::hint::spin_loop();
+                    }
+                    s.set_result(&id, format!("done {}", id), TaskStatus::Done);
+                }));
+            }
+
+            // Waiters — one per task, each watching one id.
+            let mut waiters = Vec::with_capacity(TASKS_PER_BATCH);
+            for id in &ids {
+                let s = store.clone();
+                let id = id.clone();
+                waiters.push(tokio::spawn(async move {
+                    s.wait_for_completion(&[id], Duration::from_secs(5)).await
+                }));
+            }
+
+            // Everyone must finish well under the per-waiter 5s budget; a hang
+            // here means a lost wakeup or deadlock.
+            let all = tokio::time::timeout(Duration::from_secs(10), async {
+                for w in waiters {
+                    let completed = w.await.unwrap();
+                    assert_eq!(completed.len(), 1, "waiter should see its task complete");
+                }
+                for s in setters {
+                    s.await.unwrap();
+                }
+            })
+            .await;
+            assert!(all.is_ok(), "stress batch deadlocked or timed out");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tasks_timeout() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+        let wait = WaitForTasksTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Never finishes"}))
+            .await
+            .unwrap();
+
+        let result = wait
+            .execute(serde_json::json!({"task_ids": ["1"], "timeout_secs": 1}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.text_content().contains("Timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_tasks_empty_ids() {
+        let store = new_store();
+        let wait = WaitForTasksTool::new(store);
+
+        let result = wait
+            .execute(serde_json::json!({"task_ids": []}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("At least one"));
+    }
+
+    #[tokio::test]
+    async fn test_format_board_shows_result_available() {
+        let store = new_store();
+        let create = CreateTaskTool::new(store.clone());
+
+        create
+            .execute(serde_json::json!({"title": "Task with result"}))
+            .await
+            .unwrap();
+
+        store.set_result("1", "output".to_string(), TaskStatus::Done);
+
+        let board = store.format_board().unwrap();
+        assert!(board.contains("result: [available"));
     }
 }
