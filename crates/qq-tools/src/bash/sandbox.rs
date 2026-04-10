@@ -54,12 +54,19 @@ pub struct SandboxPathPolicy {
 }
 
 /// Prefixes already covered by the standard system bind mounts.
-const SYSTEM_MOUNT_PREFIXES: &[&str] = &["/bin", "/usr", "/lib", "/lib64", "/lib32", "/etc", "/sbin"];
+const SYSTEM_MOUNT_PREFIXES: &[&str] =
+    &["/bin", "/usr", "/lib", "/lib64", "/lib32", "/etc", "/sbin"];
 
 /// Directory names under $HOME to hide behind empty tmpfs mounts.
 pub const SENSITIVE_DIR_NAMES: &[&str] = &[
-    ".ssh", ".gnupg", ".gpg", ".aws", ".kube",
-    ".docker", ".password-store", ".netrc",
+    ".ssh",
+    ".gnupg",
+    ".gpg",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".password-store",
+    ".netrc",
 ];
 
 impl SandboxPathPolicy {
@@ -234,7 +241,14 @@ impl SandboxExecutor {
                 let policy = path_policy.clone();
                 let stdin = stdin_data.map(|s| s.as_bytes().to_vec());
                 tokio::task::spawn_blocking(move || {
-                    execute_kernel(&cmd, &mounts, timeout_secs, &policy, stdin.as_deref(), read_only)
+                    execute_kernel(
+                        &cmd,
+                        &mounts,
+                        timeout_secs,
+                        &policy,
+                        stdin.as_deref(),
+                        read_only,
+                    )
                 })
                 .await
                 .map_err(|e| format!("Sandbox task failed: {}", e))?
@@ -280,10 +294,7 @@ fn probe_user_namespaces_uncached() -> bool {
         container.bindmount_ro("/lib64", "/lib64");
     }
 
-    let output = container
-        .command("/bin/true")
-        .wait_timeout(5)
-        .output();
+    let output = container.command("/bin/true").wait_timeout(5).output();
 
     match output {
         Ok(o) => o.status.success(),
@@ -348,13 +359,13 @@ pub fn execute_kernel(
     }
 
     // Virtual filesystems
-    container
-        .procfsmount("/proc")
-        .devfsmount("/dev");
+    container.procfsmount("/proc").devfsmount("/dev");
 
     // Bind-mount the per-instance /tmp directory (persists across commands)
     let tmp_path = mounts.tmp_dir();
-    let tmp_str = tmp_path.to_str().ok_or("Instance /tmp path is not valid UTF-8")?;
+    let tmp_str = tmp_path
+        .to_str()
+        .ok_or("Instance /tmp path is not valid UTF-8")?;
     container.bindmount_rw(tmp_str, "/tmp");
 
     // Project root: read-only for read-only agents, read-write otherwise
@@ -366,10 +377,8 @@ pub fn execute_kernel(
 
     // Extra user mounts: read-only
     let extra_mounts = mounts.list_extra();
-    let extra_mount_set: HashSet<&Path> = extra_mounts
-        .iter()
-        .map(|m| m.host_path.as_path())
-        .collect();
+    let extra_mount_set: HashSet<&Path> =
+        extra_mounts.iter().map(|m| m.host_path.as_path()).collect();
     for mount in &extra_mounts {
         if let Some(path_str) = mount.host_path.to_str() {
             container.bindmount_ro(path_str, path_str);
@@ -403,12 +412,8 @@ pub fn execute_kernel(
         .collect();
     env_vars.push(("PATH", &policy.path_value));
 
-    let mut cmd = container
-        .command("/bin/sh");
-    let cmd = cmd
-        .arg("-c")
-        .arg(command)
-        .current_dir(root_str);
+    let mut cmd = container.command("/bin/sh");
+    let cmd = cmd.arg("-c").arg(command).current_dir(root_str);
     for (key, value) in &env_vars {
         cmd.env(key, value);
     }
@@ -429,10 +434,7 @@ pub fn execute_kernel(
 
         // Re-build the command with the piped version
         let mut cmd2 = container.command("/bin/sh");
-        let cmd2 = cmd2
-            .arg("-c")
-            .arg(&effective_command)
-            .current_dir(root_str);
+        let cmd2 = cmd2.arg("-c").arg(&effective_command).current_dir(root_str);
         for (key, value) in &env_vars {
             cmd2.env(key, value);
         }
@@ -517,8 +519,7 @@ async fn execute_app_level(
     }
 
     // Tokenize the command
-    let tokens = parse::tokenize(command)
-        .map_err(|e| format!("Failed to parse command: {}", e))?;
+    let tokens = parse::tokenize(command).map_err(|e| format!("Failed to parse command: {}", e))?;
 
     if tokens.is_empty() {
         return Err("Empty command".to_string());
@@ -558,24 +559,18 @@ async fn execute_app_level(
     let start = Instant::now();
     let result = if let Some(data) = stdin_data {
         // Spawn, write to stdin, then wait
-        let child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {}", e))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn command: {}", e))?;
         let mut child = child;
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             let _ = stdin.write_all(data.as_bytes()).await;
             drop(stdin);
         }
-        tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            child.wait_with_output(),
-        )
-        .await
+        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await
     } else {
-        tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            cmd.output(),
-        )
-        .await
+        tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await
     };
     let duration = start.elapsed();
 
@@ -682,19 +677,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_app_level_simple() {
-        let mounts = Arc::new(SandboxMounts::new(
-            std::env::current_dir().unwrap(),
-        ).unwrap());
-        let result = execute_app_level("echo hello", &mounts, 10, None).await.unwrap();
+        let mounts = Arc::new(SandboxMounts::new(std::env::current_dir().unwrap()).unwrap());
+        let result = execute_app_level("echo hello", &mounts, 10, None)
+            .await
+            .unwrap();
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.exit_code, 0);
     }
 
     #[tokio::test]
     async fn test_app_level_rejects_pipes() {
-        let mounts = Arc::new(SandboxMounts::new(
-            std::env::current_dir().unwrap(),
-        ).unwrap());
+        let mounts = Arc::new(SandboxMounts::new(std::env::current_dir().unwrap()).unwrap());
         let result = execute_app_level("echo hello | cat", &mounts, 10, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
@@ -723,16 +716,16 @@ mod tests {
 
     #[test]
     fn test_remap_tmp_trailing_slash() {
-        assert_eq!(
-            remap_tmp_in_token("/tmp/", "/sess/tmp"),
-            "/sess/tmp/"
-        );
+        assert_eq!(remap_tmp_in_token("/tmp/", "/sess/tmp"), "/sess/tmp/");
     }
 
     #[test]
     fn test_remap_tmp_no_match() {
         assert_eq!(remap_tmp_in_token("hello", "/sess/tmp"), "hello");
-        assert_eq!(remap_tmp_in_token("/var/tmp/foo", "/sess/tmp"), "/var/tmp/foo");
+        assert_eq!(
+            remap_tmp_in_token("/var/tmp/foo", "/sess/tmp"),
+            "/var/tmp/foo"
+        );
         assert_eq!(remap_tmp_in_token("/tmpfoo", "/sess/tmp"), "/tmpfoo");
         assert_eq!(remap_tmp_in_token("-la", "/sess/tmp"), "-la");
     }
@@ -756,9 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_app_level_tmp_rewrite() {
-        let mounts = Arc::new(SandboxMounts::new(
-            std::env::current_dir().unwrap(),
-        ).unwrap());
+        let mounts = Arc::new(SandboxMounts::new(std::env::current_dir().unwrap()).unwrap());
 
         // Write a file directly into the session tmp dir
         let tmp_file = mounts.tmp_dir().join("remap_test.txt");
@@ -810,9 +801,15 @@ mod tests {
         let policy = SandboxPathPolicy::system_only();
         assert!(policy.ro_mounts.is_empty());
         assert!(policy.tmpfs_mounts.is_empty());
-        assert_eq!(policy.path_value, "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        assert_eq!(
+            policy.path_value,
+            "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
         // Should have HOME=/tmp in env_vars
-        assert!(policy.env_vars.iter().any(|(k, v)| k == "HOME" && v == "/tmp"));
+        assert!(policy
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "HOME" && v == "/tmp"));
     }
 
     #[test]
@@ -839,14 +836,20 @@ mod tests {
                 Err(_) => continue,
             };
             if let Some(s) = canonical.to_str() {
-                if is_under_system_prefix(s) { continue; }
+                if is_under_system_prefix(s) {
+                    continue;
+                }
             }
             if seen.insert(canonical.clone()) {
                 extra_dirs.push(canonical);
             }
         }
         // After dedup, should have at most 1 entry for the same tmpdir
-        assert!(extra_dirs.len() <= 1, "Expected deduplication, got {} entries", extra_dirs.len());
+        assert!(
+            extra_dirs.len() <= 1,
+            "Expected deduplication, got {} entries",
+            extra_dirs.len()
+        );
     }
 
     #[cfg(all(feature = "sandbox", target_os = "linux"))]
@@ -864,9 +867,9 @@ mod tests {
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello", &mounts, 10, &sys_policy(), None, false).unwrap();
-            assert_eq!(
-result.stdout.trim(), "hello");
+            let result =
+                execute_kernel("echo hello", &mounts, 10, &sys_policy(), None, false).unwrap();
+            assert_eq!(result.stdout.trim(), "hello");
             assert_eq!(result.exit_code, 0);
         }
 
@@ -877,9 +880,10 @@ result.stdout.trim(), "hello");
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo hello | cat", &mounts, 10, &sys_policy(), None, false).unwrap();
-            assert_eq!(
-result.stdout.trim(), "hello");
+            let result =
+                execute_kernel("echo hello | cat", &mounts, 10, &sys_policy(), None, false)
+                    .unwrap();
+            assert_eq!(result.stdout.trim(), "hello");
         }
 
         #[test]
@@ -910,11 +914,84 @@ result.stdout.trim(), "hello");
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
             let policy = sys_policy();
             // Write in first command
-            let r1 = execute_kernel("echo persist > /tmp/persist.txt", &mounts, 10, &policy, None, false).unwrap();
+            let r1 = execute_kernel(
+                "echo persist > /tmp/persist.txt",
+                &mounts,
+                10,
+                &policy,
+                None,
+                false,
+            )
+            .unwrap();
             assert_eq!(r1.exit_code, 0);
             // Read in second, separate command
-            let r2 = execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy, None, false).unwrap();
+            let r2 =
+                execute_kernel("cat /tmp/persist.txt", &mounts, 10, &policy, None, false).unwrap();
             assert_eq!(r2.stdout.trim(), "persist");
+        }
+
+        /// End-to-end: a command that overflows truncation should produce a
+        /// spill file the next `run` call can query from inside the sandbox.
+        #[test]
+        fn test_kernel_spill_file_cross_call() {
+            if !probe_user_namespaces() {
+                eprintln!("Skipping: user namespaces not available");
+                return;
+            }
+            let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
+            let policy = sys_policy();
+
+            // 1. Produce 500 lines of output — exceeds the 200-line truncation cap.
+            let r1 = execute_kernel(
+                "yes hello | head -n 500",
+                &mounts,
+                10,
+                &policy,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(r1.exit_code, 0);
+            assert_eq!(r1.stdout.lines().count(), 500);
+
+            // 2. format_output writes the spill file as a side-effect.
+            let out1 = crate::bash::format_output(r1, &mounts);
+            let text = out1.text_content();
+            assert!(
+                text.contains("/tmp/qq-spill-1.txt"),
+                "footer should reference spill path: {}",
+                text
+            );
+
+            // 3. A second, separate kernel command must be able to read it.
+            let r2 = execute_kernel(
+                "wc -l /tmp/qq-spill-1.txt",
+                &mounts,
+                10,
+                &policy,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(r2.exit_code, 0);
+            assert!(
+                r2.stdout.trim_start().starts_with("500 "),
+                "wc -l should report 500 lines, got: {:?}",
+                r2.stdout
+            );
+
+            // 4. Spot-check that sed into the middle works too.
+            let r3 = execute_kernel(
+                "sed -n '250p' /tmp/qq-spill-1.txt",
+                &mounts,
+                10,
+                &policy,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(r3.exit_code, 0);
+            assert_eq!(r3.stdout.trim(), "hello");
         }
 
         #[test]
@@ -924,7 +1001,15 @@ result.stdout.trim(), "hello");
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("ls *.toml 2>/dev/null || echo no-match", &mounts, 10, &sys_policy(), None, false).unwrap();
+            let result = execute_kernel(
+                "ls *.toml 2>/dev/null || echo no-match",
+                &mounts,
+                10,
+                &sys_policy(),
+                None,
+                false,
+            )
+            .unwrap();
             // Should either list toml files or say no-match
             assert!(!result.stdout.is_empty());
         }
@@ -936,9 +1021,9 @@ result.stdout.trim(), "hello");
                 return;
             }
             let mounts = SandboxMounts::new(std::env::current_dir().unwrap()).unwrap();
-            let result = execute_kernel("echo $PATH", &mounts, 10, &sys_policy(), None, false).unwrap();
+            let result =
+                execute_kernel("echo $PATH", &mounts, 10, &sys_policy(), None, false).unwrap();
             assert_eq!(
-
                 result.stdout.trim(),
                 "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             );

@@ -308,9 +308,7 @@ fn split_pipeline(input: &str) -> Vec<String> {
                             current.push('-');
                             after += 1;
                         }
-                        if let Some((delim, consumed)) =
-                            parse_heredoc_delimiter(&chars, after)
-                        {
+                        if let Some((delim, consumed)) = parse_heredoc_delimiter(&chars, after) {
                             // Push the delimiter text into current segment
                             for &c in &chars[after..after + consumed] {
                                 current.push(c);
@@ -468,10 +466,7 @@ mod tests {
 
     #[test]
     fn test_pipe_inside_quotes() {
-        assert_eq!(
-            extract_commands("grep 'a|b' file").unwrap(),
-            vec!["grep"]
-        );
+        assert_eq!(extract_commands("grep 'a|b' file").unwrap(), vec!["grep"]);
     }
 
     #[test]
@@ -537,10 +532,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_simple() {
-        assert_eq!(
-            tokenize("ls -la /tmp").unwrap(),
-            vec!["ls", "-la", "/tmp"]
-        );
+        assert_eq!(tokenize("ls -la /tmp").unwrap(), vec!["ls", "-la", "/tmp"]);
     }
 
     #[test]
@@ -610,10 +602,7 @@ mod tests {
             vec!["cargo-run"]
         );
         // Flag-only: no subcommand extracted
-        assert_eq!(
-            extract_commands("cargo --version").unwrap(),
-            vec!["cargo"]
-        );
+        assert_eq!(extract_commands("cargo --version").unwrap(), vec!["cargo"]);
     }
 
     #[test]
@@ -622,14 +611,8 @@ mod tests {
             extract_commands("npm install express").unwrap(),
             vec!["npm-install"]
         );
-        assert_eq!(
-            extract_commands("npm test").unwrap(),
-            vec!["npm-test"]
-        );
-        assert_eq!(
-            extract_commands("npm run build").unwrap(),
-            vec!["npm-run"]
-        );
+        assert_eq!(extract_commands("npm test").unwrap(), vec!["npm-test"]);
+        assert_eq!(extract_commands("npm run build").unwrap(), vec!["npm-run"]);
     }
 
     #[test]
@@ -642,10 +625,7 @@ mod tests {
             extract_commands("pip3 list --outdated").unwrap(),
             vec!["pip3-list"]
         );
-        assert_eq!(
-            extract_commands("pip freeze").unwrap(),
-            vec!["pip-freeze"]
-        );
+        assert_eq!(extract_commands("pip freeze").unwrap(), vec!["pip-freeze"]);
     }
 
     #[test]
@@ -667,18 +647,12 @@ mod tests {
     #[test]
     fn test_non_subcommand_tools_unchanged() {
         // Tools NOT in SUBCOMMAND_TOOLS should stay as-is
-        assert_eq!(
-            extract_commands("make clean").unwrap(),
-            vec!["make"]
-        );
+        assert_eq!(extract_commands("make clean").unwrap(), vec!["make"]);
         assert_eq!(
             extract_commands("python script.py").unwrap(),
             vec!["python"]
         );
-        assert_eq!(
-            extract_commands("cmake --build .").unwrap(),
-            vec!["cmake"]
-        );
+        assert_eq!(extract_commands("cmake --build .").unwrap(), vec!["cmake"]);
     }
 
     #[test]
@@ -749,10 +723,7 @@ mod tests {
 
     #[test]
     fn test_heredoc_empty_body() {
-        assert_eq!(
-            extract_commands("cat << EOF\nEOF").unwrap(),
-            vec!["cat"]
-        );
+        assert_eq!(extract_commands("cat << EOF\nEOF").unwrap(), vec!["cat"]);
     }
 
     #[test]

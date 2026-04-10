@@ -61,10 +61,12 @@ impl Tool for RequestNetworkAccessTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
-        let args: RequestNetworkAccessArgs = serde_json::from_value(arguments)
-            .map_err(|e| {
-                Error::tool("request_network_access", format!("Invalid arguments: {}", e))
-            })?;
+        let args: RequestNetworkAccessArgs = serde_json::from_value(arguments).map_err(|e| {
+            Error::tool(
+                "request_network_access",
+                format!("Invalid arguments: {}", e),
+            )
+        })?;
 
         // Return early if already approved this session
         if let Ok(approved) = self.approved.read() {
@@ -161,7 +163,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Should succeed: {}", result.text_content());
+        assert!(
+            !result.is_error,
+            "Should succeed: {}",
+            result.text_content()
+        );
         assert!(*tool.approved.read().unwrap(), "Should be marked approved");
     }
 
@@ -181,7 +187,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Should succeed: {}", result.text_content());
+        assert!(
+            !result.is_error,
+            "Should succeed: {}",
+            result.text_content()
+        );
         assert!(*tool.approved.read().unwrap(), "Should be marked approved");
     }
 }

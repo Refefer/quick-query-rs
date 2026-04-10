@@ -23,7 +23,11 @@ pub struct WebSearchConfig {
 }
 
 impl WebSearchConfig {
-    pub fn new(host: impl Into<String>, chat_model: impl Into<String>, embed_model: impl Into<String>) -> Self {
+    pub fn new(
+        host: impl Into<String>,
+        chat_model: impl Into<String>,
+        embed_model: impl Into<String>,
+    ) -> Self {
         Self {
             host: host.into(),
             chat_model: chat_model.into(),
@@ -105,12 +109,12 @@ impl Tool for FetchWebpageTool {
             .map_err(|e| Error::tool("fetch_webpage", format!("Invalid arguments: {}", e)))?;
 
         // Fetch the page (I/O-bound, stays async)
-        let response = self
-            .client
-            .get(&args.url)
-            .send()
-            .await
-            .map_err(|e| Error::tool("fetch_webpage", format!("Failed to fetch '{}': {}", args.url, e)))?;
+        let response = self.client.get(&args.url).send().await.map_err(|e| {
+            Error::tool(
+                "fetch_webpage",
+                format!("Failed to fetch '{}': {}", args.url, e),
+            )
+        })?;
 
         if !response.status().is_success() {
             return Err(Error::tool(
@@ -126,10 +130,9 @@ impl Tool for FetchWebpageTool {
 
         // Move CPU-intensive HTML parsing to blocking threadpool
         let selector_str = args.selector.clone();
-        let cleaned = qq_core::run_blocking(move || {
-            parse_and_extract_text(&html, selector_str.as_deref())
-        })
-        .await?;
+        let cleaned =
+            qq_core::run_blocking(move || parse_and_extract_text(&html, selector_str.as_deref()))
+                .await?;
 
         if cleaned.is_empty() {
             Ok(ToolOutput::success("(No text content found on page)"))
@@ -168,7 +171,8 @@ fn parse_and_extract_text(html: &str, selector: Option<&str>) -> String {
         }
     } else {
         // Default: try to get main content, fall back to body
-        let main_selector = Selector::parse("main, article, .content, #content, .post, .entry").ok();
+        let main_selector =
+            Selector::parse("main, article, .content, #content, .post, .entry").ok();
         let body_selector = Selector::parse("body").ok();
 
         if let Some(sel) = main_selector {
@@ -204,7 +208,10 @@ fn extract_text(element: &scraper::ElementRef) -> String {
         if let Some(el) = node.value().as_element() {
             // Skip script, style, nav, footer, header elements
             let tag = el.name();
-            if matches!(tag, "script" | "style" | "nav" | "footer" | "header" | "aside" | "noscript") {
+            if matches!(
+                tag,
+                "script" | "style" | "nav" | "footer" | "header" | "aside" | "noscript"
+            ) {
                 continue;
             }
         }
@@ -277,16 +284,25 @@ impl WebSearchTool {
     /// Get provider IDs for the configured chat and embedding models.
     /// Returns optional providers - if models aren't found, returns None for that provider
     /// and lets the search API handle validation (matching Python behavior).
-    async fn get_provider_ids(&self) -> Result<(Option<ModelProvider>, Option<ModelProvider>), Error> {
+    async fn get_provider_ids(
+        &self,
+    ) -> Result<(Option<ModelProvider>, Option<ModelProvider>), Error> {
         let url = format!("{}/api/providers", self.config.host);
-        let response = self.client.get(&url).send().await
-            .map_err(|e| Error::tool("web_search", format!("Failed to get providers: {}", e)))?;
+        let response =
+            self.client.get(&url).send().await.map_err(|e| {
+                Error::tool("web_search", format!("Failed to get providers: {}", e))
+            })?;
 
         if !response.status().is_success() {
-            return Err(Error::tool("web_search", format!("Provider API error: {}", response.status())));
+            return Err(Error::tool(
+                "web_search",
+                format!("Provider API error: {}", response.status()),
+            ));
         }
 
-        let data: ProvidersResponse = response.json().await
+        let data: ProvidersResponse = response
+            .json()
+            .await
             .map_err(|e| Error::tool("web_search", format!("Failed to parse providers: {}", e)))?;
 
         let mut chat_provider: Option<ModelProvider> = None;
@@ -295,7 +311,11 @@ impl WebSearchTool {
         for provider in &data.providers {
             // Find chat model
             if chat_provider.is_none() {
-                if let Some(model) = provider.chat_models.iter().find(|m| m.name == self.config.chat_model) {
+                if let Some(model) = provider
+                    .chat_models
+                    .iter()
+                    .find(|m| m.name == self.config.chat_model)
+                {
                     chat_provider = Some(ModelProvider {
                         provider_id: provider.id.clone(),
                         key: model.key.clone(),
@@ -305,7 +325,11 @@ impl WebSearchTool {
 
             // Find embedding model
             if embed_provider.is_none() {
-                if let Some(model) = provider.embedding_models.iter().find(|m| m.name == self.config.embed_model) {
+                if let Some(model) = provider
+                    .embedding_models
+                    .iter()
+                    .find(|m| m.name == self.config.embed_model)
+                {
                     embed_provider = Some(ModelProvider {
                         provider_id: provider.id.clone(),
                         key: model.key.clone(),
@@ -343,7 +367,6 @@ struct ModelProvider {
     provider_id: String,
     key: String,
 }
-
 
 #[derive(Serialize)]
 struct SearchRequest {
@@ -439,8 +462,11 @@ impl Tool for WebSearchTool {
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.tool_description()).with_parameters(
-            ToolParameters::new()
-                .add_property("query", PropertySchema::string("The search query string (can be natural language)"), true),
+            ToolParameters::new().add_property(
+                "query",
+                PropertySchema::string("The search query string (can be natural language)"),
+                true,
+            ),
         )
     }
 
@@ -466,7 +492,10 @@ impl Tool for WebSearchTool {
             query: args.query.clone(),
             history: vec![
                 ("human".to_string(), "Hi, how are you?".to_string()),
-                ("assistant".to_string(), "I am doing well, how can I help you today?".to_string()),
+                (
+                    "assistant".to_string(),
+                    "I am doing well, how can I help you today?".to_string(),
+                ),
             ],
             system_instructions: "Provide high level details.".to_string(),
             stream: false,
@@ -474,7 +503,8 @@ impl Tool for WebSearchTool {
 
         // Perform search
         let url = format!("{}/api/search", self.config.host);
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()
@@ -484,11 +514,18 @@ impl Tool for WebSearchTool {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(Error::tool("web_search", format!("Search API error {}: {}", status, body)));
+            return Err(Error::tool(
+                "web_search",
+                format!("Search API error {}: {}", status, body),
+            ));
         }
 
-        let result: SearchResponse = response.json().await
-            .map_err(|e| Error::tool("web_search", format!("Failed to parse search response: {}", e)))?;
+        let result: SearchResponse = response.json().await.map_err(|e| {
+            Error::tool(
+                "web_search",
+                format!("Failed to parse search response: {}", e),
+            )
+        })?;
 
         // Format output
         let mut output = result.message;
@@ -496,7 +533,10 @@ impl Tool for WebSearchTool {
         if !result.sources.is_empty() {
             output.push_str("\n\n## Sources\n");
             for source in result.sources {
-                output.push_str(&format!("- [{}]({})\n", source.metadata.title, source.metadata.url));
+                output.push_str(&format!(
+                    "- [{}]({})\n",
+                    source.metadata.title, source.metadata.url
+                ));
             }
         }
 
@@ -548,7 +588,9 @@ mod tests {
 
     #[test]
     fn test_extract_text() {
-        let html = Html::parse_document("<html><body><p>Hello</p><script>evil()</script><p>World</p></body></html>");
+        let html = Html::parse_document(
+            "<html><body><p>Hello</p><script>evil()</script><p>World</p></body></html>",
+        );
         let text = extract_text(&html.root_element());
         assert!(text.contains("Hello"));
         assert!(text.contains("World"));

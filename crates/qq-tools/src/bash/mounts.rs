@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
 
@@ -24,6 +25,7 @@ pub struct SandboxMounts {
     project_root: PathBuf,
     extra: RwLock<Vec<MountPoint>>,
     tmp_dir: TempDir,
+    spill_counter: AtomicUsize,
 }
 
 impl SandboxMounts {
@@ -33,6 +35,7 @@ impl SandboxMounts {
             project_root,
             extra: RwLock::new(Vec::new()),
             tmp_dir,
+            spill_counter: AtomicUsize::new(0),
         })
     }
 
@@ -43,6 +46,17 @@ impl SandboxMounts {
     /// Per-instance scratch directory that persists across bash commands.
     pub fn tmp_dir(&self) -> &Path {
         self.tmp_dir.path()
+    }
+
+    /// Reserve the next session-unique host path for a spill file.
+    ///
+    /// Returns a host-side path inside `tmp_dir()` like
+    /// `.../qq-NNN/qq-spill-<id>.txt`. Inside the sandbox this appears as
+    /// `/tmp/qq-spill-<id>.txt` because both kernel and app-level modes
+    /// remap this directory onto `/tmp`.
+    pub fn next_spill_path(&self) -> PathBuf {
+        let id = self.spill_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        self.tmp_dir.path().join(format!("qq-spill-{}.txt", id))
     }
 
     pub fn add_mount(&self, mount: MountPoint) {
@@ -61,10 +75,7 @@ impl SandboxMounts {
     }
 
     pub fn list_extra(&self) -> Vec<MountPoint> {
-        self.extra
-            .read()
-            .map(|e| e.clone())
-            .unwrap_or_default()
+        self.extra.read().map(|e| e.clone()).unwrap_or_default()
     }
 
     /// Format mounts for display.
@@ -185,15 +196,16 @@ impl Tool for MountExternalTool {
         }
 
         // Canonicalize to resolve symlinks
-        let canonical = path.canonicalize().map_err(|e| {
-            Error::tool(
-                "mount_external",
-                format!("Failed to resolve path: {}", e),
-            )
-        })?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| Error::tool("mount_external", format!("Failed to resolve path: {}", e)))?;
 
         // Check if already mounted
-        let already_mounted = self.mounts.list_extra().iter().any(|m| m.host_path == canonical)
+        let already_mounted = self
+            .mounts
+            .list_extra()
+            .iter()
+            .any(|m| m.host_path == canonical)
             || self.mounts.project_root() == &canonical;
         if already_mounted {
             return Ok(ToolOutput::success(format!(

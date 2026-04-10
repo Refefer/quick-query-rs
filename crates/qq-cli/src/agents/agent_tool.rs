@@ -478,7 +478,6 @@ fn spawn_background_agent(
     let return_task_id = task_id.clone();
 
     tokio::spawn(async move {
-        let spawn_agent_name = config.agent_name.clone();
         let result = execute_agent(
             config,
             task,
@@ -501,36 +500,34 @@ fn spawn_background_agent(
         )
         .await;
 
-        if let Some(ref store) = task_store {
-            match result {
-                Ok(output) if !output.is_error => {
-                    store.set_result(
-                        &task_id,
-                        output.text_content(),
-                        qq_tools::tasks::TaskStatus::Done,
-                    );
-                }
-                Ok(output) => {
-                    store.set_result(
-                        &task_id,
-                        output.text_content(),
-                        qq_tools::tasks::TaskStatus::Blocked,
-                    );
-                }
-                Err(e) => {
-                    store.set_result(
-                        &task_id,
-                        format!("Agent error: {}", e),
-                        qq_tools::tasks::TaskStatus::Blocked,
-                    );
-                }
+        // `mark_task_dispatched` has already validated that task_store is
+        // `Some` before we spawned — the background dispatch path is
+        // unreachable without a task store.
+        let store = task_store
+            .as_ref()
+            .expect("task_store must be Some for background dispatch");
+        match result {
+            Ok(output) if !output.is_error => {
+                store.set_result(
+                    &task_id,
+                    output.text_content(),
+                    qq_tools::tasks::TaskStatus::Done,
+                );
             }
-        } else {
-            tracing::warn!(
-                agent = %spawn_agent_name,
-                task_id = %task_id,
-                "Background agent completed but no task store to write result to"
-            );
+            Ok(output) => {
+                store.set_result(
+                    &task_id,
+                    output.text_content(),
+                    qq_tools::tasks::TaskStatus::Blocked,
+                );
+            }
+            Err(e) => {
+                store.set_result(
+                    &task_id,
+                    format!("Agent error: {}", e),
+                    qq_tools::tasks::TaskStatus::Blocked,
+                );
+            }
         }
     });
 

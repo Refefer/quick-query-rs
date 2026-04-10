@@ -3,8 +3,8 @@
 //! Provides kernel-level process isolation via hakoniwa (Linux) with
 //! graceful fallback to app-level sandboxing on other platforms.
 
-pub mod network_access;
 pub mod mounts;
+pub mod network_access;
 pub mod parse;
 pub mod permissions;
 pub mod sandbox;
@@ -16,11 +16,11 @@ use std::sync::{Arc, RwLock};
 
 use qq_core::{Error, PropertySchema, Tool, ToolDefinition, ToolOutput, ToolParameters};
 
-pub use network_access::RequestNetworkAccessTool;
 pub use mounts::{MountExternalTool, MountPoint, SandboxMounts};
+pub use network_access::RequestNetworkAccessTool;
 pub use permissions::{
-    create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse,
-    PermissionStore, Tier,
+    create_approval_channel, ApprovalChannel, ApprovalRequest, ApprovalResponse, PermissionStore,
+    Tier,
 };
 pub use sandbox::{SandboxExecutor, SandboxPathPolicy};
 pub use sensitive_access::RequestSensitiveAccessTool;
@@ -33,6 +33,11 @@ const MAX_OUTPUT_LINES: usize = 200;
 
 /// Maximum output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64KB
+
+/// Maximum spill file size. Caps disk usage if a command dumps a huge blob
+/// (e.g. `dd if=/dev/urandom`, `find /`). Beyond this we head/tail-cap the
+/// spill file itself, mirroring the inline head+tail strategy.
+const MAX_SPILL_BYTES: usize = 16 * 1024 * 1024; // 16 MB
 
 /// Sandboxed run tool for executing shell commands.
 pub struct RunTool {
@@ -264,20 +269,24 @@ impl Tool for RunTool {
             Ok(p) => p.clone(),
             Err(_) => return Ok(ToolOutput::error("Path policy lock poisoned.")),
         };
-        let result = match self.executor.execute(
-            command,
-            &self.mounts,
-            timeout,
-            &path_policy,
-            args.stdin.as_deref(),
-            self.read_only,
-        ).await {
+        let result = match self
+            .executor
+            .execute(
+                command,
+                &self.mounts,
+                timeout,
+                &path_policy,
+                args.stdin.as_deref(),
+                self.read_only,
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) => return Ok(ToolOutput::error(format!("Execution failed: {}", e))),
         };
 
         // 5. Format output
-        Ok(format_output(result))
+        Ok(format_output(result, &self.mounts))
     }
 }
 
@@ -309,16 +318,31 @@ fn is_binary_output(data: &str) -> bool {
 
     // Check magic numbers
     if bytes.len() >= 4 {
-        if bytes.starts_with(b"\x7fELF") { return true; }    // ELF
-        if bytes.starts_with(b"\x89PNG") { return true; }    // PNG
-        if bytes.starts_with(b"%PDF") { return true; }       // PDF
-        if bytes.starts_with(b"PK\x03\x04") { return true; } // ZIP
+        if bytes.starts_with(b"\x7fELF") {
+            return true;
+        } // ELF
+        if bytes.starts_with(b"\x89PNG") {
+            return true;
+        } // PNG
+        if bytes.starts_with(b"%PDF") {
+            return true;
+        } // PDF
+        if bytes.starts_with(b"PK\x03\x04") {
+            return true;
+        } // ZIP
     }
-    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF { return true; } // JPEG
-    if bytes.len() >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B { return true; } // gzip
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return true;
+    } // JPEG
+    if bytes.len() >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B {
+        return true;
+    } // gzip
 
     // Check control character ratio
-    let control_count = sample.iter().filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t').count();
+    let control_count = sample
+        .iter()
+        .filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+        .count();
     let ratio = control_count as f64 / check_len as f64;
     ratio > 0.30
 }
@@ -383,6 +407,84 @@ fn truncate_output(output: &str, max_lines: usize, max_bytes: usize) -> Truncati
 }
 
 // =============================================================================
+// Spill files
+// =============================================================================
+
+/// Metadata about a spill file written to the sandbox's /tmp directory.
+///
+/// A spill file preserves the full untruncated stdout of a command whose
+/// inline output was head/tail-truncated. The LLM can inspect the omitted
+/// middle with `sed -n 'X,Yp'`, `grep`, or `head`/`tail` in a follow-up
+/// `run` call, rather than re-running the original command or escalating
+/// to sub-agents.
+struct SpillInfo {
+    /// Path as the sandbox sees it, e.g. `/tmp/qq-spill-3.txt`.
+    sandbox_path: String,
+    /// True if the spill file itself was head/tail-capped at `MAX_SPILL_BYTES`.
+    hard_capped: bool,
+}
+
+/// Write the full untruncated stdout to a session-scoped spill file.
+///
+/// Returns `None` if the write fails (disk full, permission, EIO). A spill
+/// failure is deliberately non-fatal: the caller still returns the inline
+/// truncated output, just without a spill footer.
+fn write_spill_file(mounts: &SandboxMounts, stdout: &str) -> Option<SpillInfo> {
+    let host_path = mounts.next_spill_path();
+    let file_name = host_path.file_name()?.to_string_lossy().into_owned();
+
+    let write_result = if stdout.len() <= MAX_SPILL_BYTES {
+        std::fs::write(&host_path, stdout.as_bytes())
+    } else {
+        // Hard-cap: head 8 MB + marker + tail 8 MB, on char boundaries.
+        let half = MAX_SPILL_BYTES / 2;
+        let head_end = floor_char_boundary(stdout, half);
+        let tail_start = ceil_char_boundary(stdout, stdout.len() - half);
+        let mut capped = String::with_capacity(MAX_SPILL_BYTES + 128);
+        capped.push_str(&stdout[..head_end]);
+        capped.push_str("\n\n[... spill file hard-capped, middle omitted ...]\n\n");
+        capped.push_str(&stdout[tail_start..]);
+        std::fs::write(&host_path, capped.as_bytes())
+    };
+
+    match write_result {
+        Ok(()) => Some(SpillInfo {
+            sandbox_path: format!("/tmp/{}", file_name),
+            hard_capped: stdout.len() > MAX_SPILL_BYTES,
+        }),
+        Err(e) => {
+            tracing::warn!(
+                host_path = %host_path.display(),
+                error = %e,
+                "Failed to write spill file",
+            );
+            None
+        }
+    }
+}
+
+/// Largest valid char-boundary index `<= index`.
+///
+/// `str::floor_char_boundary` is nightly-only, so we hand-roll it to keep the
+/// workspace on stable Rust.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    let mut i = index.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest valid char-boundary index `>= index`.
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    let mut i = index.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+// =============================================================================
 // Exit code registry
 // =============================================================================
 
@@ -417,7 +519,10 @@ fn format_bytes(bytes: usize) -> String {
 // =============================================================================
 
 /// Format a CommandResult into a ToolOutput.
-fn format_output(result: sandbox::CommandResult) -> ToolOutput {
+pub(crate) fn format_output(
+    result: sandbox::CommandResult,
+    mounts: &SandboxMounts,
+) -> ToolOutput {
     let is_error = result.exit_code != 0 || result.timed_out || result.sandbox_error.is_some();
     let stdout = result.stdout.trim();
     let stderr = result.stderr.trim();
@@ -437,7 +542,11 @@ fn format_output(result: sandbox::CommandResult) -> ToolOutput {
             format_bytes(result.stdout.len()),
             footer,
         );
-        return if is_error { ToolOutput::error(msg) } else { ToolOutput::success(msg) };
+        return if is_error {
+            ToolOutput::error(msg)
+        } else {
+            ToolOutput::success(msg)
+        };
     }
 
     let mut output = String::new();
@@ -469,6 +578,15 @@ fn format_output(result: sandbox::CommandResult) -> ToolOutput {
             }
         }
 
+        // Spill the full untruncated stdout to /tmp so the LLM can grep/sed
+        // the omitted middle in a follow-up run call instead of re-running
+        // the original command or escalating to sub-agents.
+        let spill_info = if tr.truncated {
+            write_spill_file(mounts, &result.stdout)
+        } else {
+            None
+        };
+
         // Metadata footer
         let lines_display = if tr.truncated {
             format!("{} ({} shown)", tr.original_lines, MAX_OUTPUT_LINES)
@@ -483,6 +601,27 @@ fn format_output(result: sandbox::CommandResult) -> ToolOutput {
             lines_display,
             format_bytes(tr.original_bytes),
         ));
+
+        if let Some(info) = spill_info {
+            let mid = tr.original_lines / 2;
+            let sample_start = mid.saturating_sub(50).max(1);
+            let sample_end = sample_start + 100;
+            output.push_str(&format!(
+                "\nFull output saved to {p} — inspect with:\n  \
+                 sed -n '{s},{e}p' {p}\n  \
+                 grep -n PATTERN {p}\n  \
+                 wc -l {p}",
+                p = info.sandbox_path,
+                s = sample_start,
+                e = sample_end,
+            ));
+            if info.hard_capped {
+                output.push_str(&format!(
+                    "\n  (note: spill file itself was hard-capped at {})",
+                    format_bytes(MAX_SPILL_BYTES),
+                ));
+            }
+        }
     } else if !stderr.is_empty() {
         // No stdout, but has stderr
         if is_error {
@@ -550,7 +689,12 @@ fn is_snap_binary(cmd_name: &str) -> bool {
 }
 
 /// Build the dynamic tool description based on current mounts and sandbox mode.
-fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, has_network: bool, read_only: bool) -> String {
+fn build_tool_description(
+    mounts: &SandboxMounts,
+    executor: &SandboxExecutor,
+    has_network: bool,
+    read_only: bool,
+) -> String {
     let mode = executor.mode_name();
     let supports_shell = executor.supports_shell();
     let root = mounts.project_root().display();
@@ -573,15 +717,18 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, ha
         }
 
         if supports_shell {
-            desc.push_str("\nCapabilities:\n\
+            desc.push_str(
+                "\nCapabilities:\n\
                 - Pipes: grep pattern file | sort | uniq -c\n\
                 - Globs: ls *.rs\n\
                 - Environment variables: echo $PWD\n\
                 - Subshells: echo $(git rev-parse HEAD)\n\
-                - Stdin: pass data via the 'stdin' parameter to pipe into the command\n");
+                - Stdin: pass data via the 'stdin' parameter to pipe into the command\n",
+            );
         }
 
-        desc.push_str("\nAllowed operations (read-only):\n\
+        desc.push_str(
+            "\nAllowed operations (read-only):\n\
             - Read: cat file.txt, head -n 50 file.txt, tail -n 20 file.txt\n\
             - Search: grep -rn 'pattern' src/, find . -name '*.rs'\n\
             - Build/test: cargo build, cargo test, cargo clippy, npm test\n\
@@ -593,6 +740,13 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, ha
             - Git mutations: git commit, git push, git checkout\n\n\
             Scratch space (/tmp):\n\
             Use /tmp for intermediate results — it is the only writable location.\n\n\
+            Spill files:\n\
+            When a command produces more than 200 lines or 64 KB of stdout, the full \
+            untruncated output is automatically saved to /tmp/qq-spill-<N>.txt. The \
+            inline response shows head+tail plus the spill file path. Inspect the \
+            omitted middle with `sed -n 'X,Yp'`, `grep`, or `head`/`tail` on the spill \
+            file — do NOT re-run the original command, and do NOT delegate to a \
+            sub-agent to work around the truncation.\n\n\
             Commands execute with a 30-second default timeout.\n\n\
             Examples:\n\
             - List files: ls -la src/\n\
@@ -600,7 +754,8 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, ha
             - Search code: grep -rn 'TODO' src/ | sort\n\
             - Git history: git log --oneline -10\n\
             - Build project: cargo build\n\
-            - Run tests: cargo test && cargo clippy");
+            - Run tests: cargo test && cargo clippy",
+        );
 
         return desc;
     }
@@ -622,18 +777,22 @@ fn build_tool_description(mounts: &SandboxMounts, executor: &SandboxExecutor, ha
     }
 
     if supports_shell {
-        desc.push_str("\nCapabilities:\n\
+        desc.push_str(
+            "\nCapabilities:\n\
             - Pipes: grep pattern file | sort | uniq -c\n\
             - Redirects: cargo build 2>&1 | head -50\n\
             - Globs: ls *.rs\n\
             - Environment variables: echo $PWD\n\
             - Subshells: echo $(git rev-parse HEAD)\n\
-            - Stdin: pass data via the 'stdin' parameter to pipe into the command\n");
+            - Stdin: pass data via the 'stdin' parameter to pipe into the command\n",
+        );
     } else {
-        desc.push_str("\nLimitations (app-level sandbox):\n\
+        desc.push_str(
+            "\nLimitations (app-level sandbox):\n\
             - No pipes, redirects, or shell operators\n\
             - Only read-only commands available\n\
-            - Simple commands only (e.g., 'ls -la', 'grep pattern file')\n");
+            - Simple commands only (e.g., 'ls -la', 'grep pattern file')\n",
+        );
     }
 
     let network_text = if has_network {
@@ -652,6 +811,13 @@ If you have trouble connecting, check that you have requested network access fir
         Scratch space (/tmp):\n\
         Use /tmp for scripts, intermediate results, and working notes — it persists across commands.\n\
         Prefer writing scripts to /tmp over inlining them: echo 'script' > /tmp/check.sh && sh /tmp/check.sh\n\n\
+        Spill files:\n\
+        When a command produces more than 200 lines or 64 KB of stdout, the full \
+        untruncated output is automatically saved to /tmp/qq-spill-<N>.txt. The inline \
+        response shows head+tail plus the spill file path. Inspect the omitted middle \
+        with `sed -n 'X,Yp'`, `grep`, or `head`/`tail` on the spill file — do NOT \
+        re-run the original command, and do NOT delegate to a sub-agent to work around \
+        the truncation.\n\n\
         Permission tiers:\n\
         - Session (run immediately): ls, cat, grep, find, git log, git diff, cargo build, cargo test, npm test, etc.\n\
         - Per-call (requires user approval): cargo run, npm install, git commit, rm, mv, python, etc.\n\
@@ -699,15 +865,21 @@ pub fn create_run_tools(
         Arc::clone(&path_policy),
         !ask_network,
     ));
-    let read_only_run: Arc<dyn Tool> = Arc::new(RunTool::with_network_mode(
-        Arc::clone(&mounts),
-        Arc::clone(&permissions),
-        approval.clone(),
-        Arc::clone(&path_policy),
-        !ask_network,
-    ).with_read_only(true));
+    let read_only_run: Arc<dyn Tool> = Arc::new(
+        RunTool::with_network_mode(
+            Arc::clone(&mounts),
+            Arc::clone(&permissions),
+            approval.clone(),
+            Arc::clone(&path_policy),
+            !ask_network,
+        )
+        .with_read_only(true),
+    );
     let mount_ext = Arc::new(MountExternalTool::new(mounts, approval.clone()));
-    let sensitive = Arc::new(RequestSensitiveAccessTool::new(path_policy, approval.clone()));
+    let sensitive = Arc::new(RequestSensitiveAccessTool::new(
+        path_policy,
+        approval.clone(),
+    ));
     let mut tools: Vec<Arc<dyn Tool>> = vec![run, mount_ext, sensitive];
     if ask_network {
         tools.push(Arc::new(RequestNetworkAccessTool::new(approval)));
@@ -731,10 +903,20 @@ mod tests {
         }
     }
 
+    /// Fresh `SandboxMounts` rooted at a per-test `TempDir` so spill files
+    /// from one test never leak into another and tests don't race on the
+    /// shared `spill_counter`.
+    fn test_mounts() -> (SandboxMounts, tempfile::TempDir) {
+        let root = tempfile::TempDir::new().unwrap();
+        let mounts = SandboxMounts::new(root.path().to_path_buf()).unwrap();
+        (mounts, root)
+    }
+
     #[test]
     fn test_format_output_success() {
         let result = make_result("hello world\n", "", 0);
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(!output.is_error);
         assert!(output.text_content().contains("hello world"));
         assert!(output.text_content().contains("Exit code: 0 (success)"));
@@ -744,7 +926,8 @@ mod tests {
     #[test]
     fn test_format_output_with_stderr() {
         let result = make_result("output\n", "warning: something\n", 0);
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(output.text_content().contains("output"));
         assert!(output.text_content().contains("STDERR (warnings):"));
         assert!(output.text_content().contains("  warning: something"));
@@ -753,9 +936,12 @@ mod tests {
     #[test]
     fn test_format_output_error() {
         let result = make_result("", "error: not found\n", 1);
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(output.is_error);
-        assert!(output.text_content().contains("Exit code: 1 (general error)"));
+        assert!(output
+            .text_content()
+            .contains("Exit code: 1 (general error)"));
     }
 
     #[test]
@@ -768,7 +954,8 @@ mod tests {
             sandbox_error: None,
             duration: Duration::from_secs(30),
         };
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(output.is_error);
         assert!(output.text_content().contains("timed out"));
     }
@@ -783,7 +970,8 @@ mod tests {
             sandbox_error: Some("mount: /etc: permission denied".to_string()),
             duration: Duration::from_millis(50),
         };
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(output.is_error);
         assert!(output.text_content().contains("Sandbox error"));
         assert!(output.text_content().contains("permission denied"));
@@ -792,7 +980,8 @@ mod tests {
     #[test]
     fn test_format_output_empty() {
         let result = make_result("", "", 0);
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(output.text_content().contains("(no output)"));
         assert!(output.text_content().contains("Exit code: 0 (success)"));
     }
@@ -848,9 +1037,194 @@ mod tests {
             sandbox_error: None,
             duration: Duration::from_millis(10),
         };
-        let output = format_output(result);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
         assert!(output.text_content().contains("Binary output detected"));
         assert!(!output.is_error);
+    }
+
+    // =========================================================================
+    // Spill file tests
+    // =========================================================================
+
+    fn big_stdout(lines: usize) -> String {
+        (1..=lines)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_spill_not_created_when_not_truncated() {
+        let result = make_result("short output\n", "", 0);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
+        assert!(!output.text_content().contains("qq-spill"));
+        assert!(!output.text_content().contains("Full output saved"));
+
+        // No spill file should exist in the tmp dir.
+        let entries: Vec<_> = std::fs::read_dir(mounts.tmp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("qq-spill-"))
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "expected no spill files, found {}",
+            entries.len()
+        );
+    }
+
+    #[test]
+    fn test_spill_created_on_truncation() {
+        let input = big_stdout(500);
+        let result = make_result(&input, "", 0);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
+        let text = output.text_content();
+
+        assert!(
+            text.contains("/tmp/qq-spill-1.txt"),
+            "footer missing spill path: {}",
+            text
+        );
+        assert!(
+            text.contains("Full output saved"),
+            "footer missing spill header"
+        );
+        assert!(text.contains("sed -n"), "footer missing sed sample");
+        assert!(
+            text.contains("grep -n PATTERN"),
+            "footer missing grep sample"
+        );
+        assert!(text.contains("wc -l"), "footer missing wc sample");
+        assert!(
+            !text.contains("hard-capped"),
+            "unexpected hard-cap note on small spill"
+        );
+
+        // The spill file on disk must contain the FULL untruncated stdout.
+        let host_path = mounts.tmp_dir().join("qq-spill-1.txt");
+        let contents = std::fs::read_to_string(&host_path).unwrap();
+        assert_eq!(
+            contents, input,
+            "spill file contents must match original stdout"
+        );
+        assert!(contents.contains("line 1\n"));
+        assert!(contents.contains("line 250\n"));
+        assert!(contents.ends_with("line 500"));
+    }
+
+    #[test]
+    fn test_spill_counter_increments_across_calls() {
+        let input = big_stdout(500);
+        let (mounts, _root) = test_mounts();
+
+        let out1 = format_output(make_result(&input, "", 0), &mounts);
+        let out2 = format_output(make_result(&input, "", 0), &mounts);
+
+        assert!(out1.text_content().contains("/tmp/qq-spill-1.txt"));
+        assert!(out2.text_content().contains("/tmp/qq-spill-2.txt"));
+        assert!(mounts.tmp_dir().join("qq-spill-1.txt").exists());
+        assert!(mounts.tmp_dir().join("qq-spill-2.txt").exists());
+    }
+
+    #[test]
+    fn test_spill_hard_cap_branch() {
+        // A ~20 MB stdout forces the hard-cap path. Keep it ASCII so the
+        // char-boundary slice is trivial.
+        let blob = "a".repeat(20 * 1024 * 1024);
+        let result = make_result(&blob, "", 0);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
+        let text = output.text_content();
+
+        assert!(text.contains("/tmp/qq-spill-1.txt"));
+        assert!(
+            text.contains("hard-capped"),
+            "footer must mention hard-cap: {}",
+            text
+        );
+
+        let spill_bytes = std::fs::read(mounts.tmp_dir().join("qq-spill-1.txt")).unwrap();
+        // Head 8 MB + marker (< 128 B) + tail 8 MB < 20 MB.
+        assert!(
+            spill_bytes.len() < 20 * 1024 * 1024,
+            "spill file should be smaller than original"
+        );
+        assert!(
+            spill_bytes.len() <= MAX_SPILL_BYTES + 128,
+            "spill file should fit in MAX_SPILL_BYTES + small marker"
+        );
+        let spill_text = String::from_utf8(spill_bytes).unwrap();
+        assert!(spill_text.contains("spill file hard-capped"));
+    }
+
+    #[test]
+    fn test_spill_not_created_for_binary_output() {
+        let result = sandbox::CommandResult {
+            // A binary blob large enough that, if it were text, it would
+            // trigger truncation. But binary detection must short-circuit
+            // before any spill consideration.
+            stdout: {
+                let mut v = vec![0u8; 80 * 1024];
+                v[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+                String::from_utf8_lossy(&v).into_owned()
+            },
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+            sandbox_error: None,
+            duration: Duration::from_millis(10),
+        };
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
+        let text = output.text_content();
+
+        assert!(text.contains("Binary output detected"));
+        assert!(
+            !text.contains("qq-spill"),
+            "binary output must not spill: {}",
+            text
+        );
+
+        let entries: Vec<_> = std::fs::read_dir(mounts.tmp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("qq-spill-"))
+            .collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_spill_footer_line_number_sample_reflects_original_size() {
+        // 2000-line input → midpoint ≈ 1000 → sample window 950,1050.
+        let input = big_stdout(2000);
+        let result = make_result(&input, "", 0);
+        let (mounts, _root) = test_mounts();
+        let output = format_output(result, &mounts);
+        let text = output.text_content();
+
+        assert!(
+            text.contains("'950,1050p'"),
+            "sample window should be near midpoint: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_char_boundary_helpers_on_multibyte() {
+        // 4-byte char at the boundary.
+        let s = "aaa🦀bbb";
+        let crab_start = 3; // byte index of 🦀
+        let crab_end = 7;
+
+        // floor_char_boundary rounds down into the middle of the 4-byte seq.
+        assert_eq!(floor_char_boundary(s, crab_start + 2), crab_start);
+        assert_eq!(floor_char_boundary(s, crab_end), crab_end);
+        // ceil_char_boundary rounds up.
+        assert_eq!(ceil_char_boundary(s, crab_start + 2), crab_end);
+        assert_eq!(ceil_char_boundary(s, crab_start), crab_start);
     }
 
     // =========================================================================
@@ -862,8 +1236,7 @@ mod tests {
         let permissions = Arc::new(PermissionStore::new(std::collections::HashMap::new()));
         let (approval, _rx) = create_approval_channel();
         let path_policy = Arc::new(RwLock::new(SandboxPathPolicy::system_only()));
-        RunTool::new(mounts, permissions, approval, path_policy)
-            .with_read_only(true)
+        RunTool::new(mounts, permissions, approval, path_policy).with_read_only(true)
     }
 
     #[tokio::test]
@@ -871,23 +1244,32 @@ mod tests {
         let tool = make_read_only_run_tool();
 
         // sed -i is a per-call command → should be blocked by read-only gate
-        let result = tool.execute(serde_json::json!({
-            "command": "sed -i 's/a/b/' somefile.txt"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "sed -i 's/a/b/' somefile.txt"
+            }))
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.text_content().contains("Read-only agent"));
 
         // rm is also per-call → blocked
-        let result = tool.execute(serde_json::json!({
-            "command": "rm somefile.txt"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "rm somefile.txt"
+            }))
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.text_content().contains("Read-only agent"));
 
         // python is per-call → blocked
-        let result = tool.execute(serde_json::json!({
-            "command": "python -c 'print(1)'"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "python -c 'print(1)'"
+            }))
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.text_content().contains("Read-only agent"));
     }
@@ -897,23 +1279,32 @@ mod tests {
         let tool = make_read_only_run_tool();
 
         // grep is a session command → should be allowed
-        let result = tool.execute(serde_json::json!({
-            "command": "grep -rn 'fn main' Cargo.toml"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "grep -rn 'fn main' Cargo.toml"
+            }))
+            .await
+            .unwrap();
         // May or may not find matches, but should not be blocked
         assert!(!result.text_content().contains("Read-only agent"));
 
         // cat is a session command → should be allowed
-        let result = tool.execute(serde_json::json!({
-            "command": "cat Cargo.toml"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "cat Cargo.toml"
+            }))
+            .await
+            .unwrap();
         assert!(!result.text_content().contains("Read-only agent"));
         assert!(!result.is_error);
 
         // find is a session command → should be allowed
-        let result = tool.execute(serde_json::json!({
-            "command": "find . -name 'Cargo.toml' -maxdepth 1"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "find . -name 'Cargo.toml' -maxdepth 1"
+            }))
+            .await
+            .unwrap();
         assert!(!result.text_content().contains("Read-only agent"));
     }
 
@@ -921,8 +1312,17 @@ mod tests {
     fn test_read_only_tool_description() {
         let tool = make_read_only_run_tool();
         let desc = tool.tool_description();
-        assert!(desc.contains("read-only"), "Description should mention read-only");
-        assert!(desc.contains("Blocked operations"), "Description should list blocked operations");
-        assert!(!desc.contains("Permission tiers"), "Description should not show permission tiers");
+        assert!(
+            desc.contains("read-only"),
+            "Description should mention read-only"
+        );
+        assert!(
+            desc.contains("Blocked operations"),
+            "Description should list blocked operations"
+        );
+        assert!(
+            !desc.contains("Permission tiers"),
+            "Description should not show permission tiers"
+        );
     }
 }

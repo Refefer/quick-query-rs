@@ -23,7 +23,10 @@ struct RequestSensitiveAccessArgs {
 
 impl RequestSensitiveAccessTool {
     pub fn new(path_policy: Arc<RwLock<SandboxPathPolicy>>, approval: ApprovalChannel) -> Self {
-        Self { path_policy, approval }
+        Self {
+            path_policy,
+            approval,
+        }
     }
 }
 
@@ -73,10 +76,12 @@ impl Tool for RequestSensitiveAccessTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput, Error> {
-        let args: RequestSensitiveAccessArgs = serde_json::from_value(arguments)
-            .map_err(|e| {
-                Error::tool("request_sensitive_access", format!("Invalid arguments: {}", e))
-            })?;
+        let args: RequestSensitiveAccessArgs = serde_json::from_value(arguments).map_err(|e| {
+            Error::tool(
+                "request_sensitive_access",
+                format!("Invalid arguments: {}", e),
+            )
+        })?;
 
         // Strip any leading slash/dot-slash — accept ".ssh" or "ssh" or "/.ssh"
         let dir_name = args.directory.trim_start_matches('/');
@@ -279,7 +284,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Should succeed: {}", result.text_content());
+        assert!(
+            !result.is_error,
+            "Should succeed: {}",
+            result.text_content()
+        );
         assert!(
             result.text_content().contains("already available"),
             "Expected 'already available', got: {}",
@@ -324,7 +333,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Should succeed: {}", result.text_content());
+        assert!(
+            !result.is_error,
+            "Should succeed: {}",
+            result.text_content()
+        );
         assert!(
             result.text_content().contains("approved"),
             "Expected 'approved', got: {}",
