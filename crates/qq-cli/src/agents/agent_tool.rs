@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use qq_core::{AgentConfig, AgentMemory, CompletionRequest, Error, Message, PropertySchema, Provider, Role, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
+use qq_core::{AgentConfig, AgentMemory, CompletionRequest, DelegationPermissions, Error, Message, PropertySchema, Provider, Role, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
 use qq_agents::{AgentDefinition, AgentMemoryStrategy, AgentsConfig, InternalAgent, InternalAgentType, DEFAULT_COMPACT_PROMPT};
 use qq_core::observation::ContextCompactor;
@@ -111,7 +111,16 @@ async fn execute_agent(
     compactor: &Option<Arc<dyn ContextCompactor>>,
     context_window: Option<u32>,
     ask_network: bool,
+    inherited_permissions: DelegationPermissions,
 ) -> Result<ToolOutput, Error> {
+    // Effective permissions = min(inherited, declared). A delegated agent can
+    // never be more permissive than its caller — the only axis today is
+    // `read_only`, but the combinator is future-proof.
+    let declared_permissions = DelegationPermissions {
+        read_only: config.is_read_only,
+    };
+    let effective_permissions = inherited_permissions.restrict_with(declared_permissions);
+
     let child_scope = match &instance_id {
         Some(id) if !id.is_empty() => format!("{}/{}:{}", scope, config.agent_name, id),
         _ => format!("{}/{}", scope, config.agent_name),
@@ -145,14 +154,17 @@ async fn execute_agent(
     let resolved_names = base_tools.resolve_tool_refs(&config.tool_names);
     let mut agent_tools = base_tools.subset(&resolved_names);
 
-    // Enforce read-only at the sandbox level for read-only agents
-    if config.is_read_only {
+    // Enforce read-only at the sandbox level, using the *effective* permissions
+    // so callers (e.g. a read-only researcher) can restrict read/write callees.
+    if effective_permissions.read_only {
         if let Some(ro_run) = base_tools.get_arc("__run_ro") {
             agent_tools.register_with_key("run", ro_run);
         }
     }
 
-    // If not at max depth, add agent tools so this agent can call other agents
+    // If not at max depth, add agent tools so this agent can call other agents.
+    // Nested agent tools carry `effective_permissions` as their inherited
+    // envelope — that's what enforces the "permissions never widen" invariant.
     let next_depth = current_depth + 1;
     if next_depth < max_depth {
         let nested_agent_tools = create_agent_tools(
@@ -170,6 +182,7 @@ async fn execute_agent(
             compactor.clone(),
             context_window,
             ask_network,
+            effective_permissions,
         );
         // Exclude all ancestors in the call chain to prevent mutual recursion.
         // The scope tracks the full chain (e.g. "pm/researcher/doc-researcher"),
@@ -215,7 +228,7 @@ async fn execute_agent(
         has_preferences,
         has_bash: has_run,
         has_network: !ask_network,
-        is_read_only: config.is_read_only,
+        is_read_only: effective_permissions.read_only,
     }, &agent_ctx);
     let full_prompt = format!("{}\n\n---\n\n{}", preamble, config.system_prompt);
 
@@ -473,6 +486,7 @@ fn spawn_background_agent(
     compactor: Option<Arc<dyn ContextCompactor>>,
     context_window: Option<u32>,
     ask_network: bool,
+    inherited_permissions: DelegationPermissions,
 ) -> ToolOutput {
     let return_agent_name = config.agent_name.clone();
     let return_task_id = task_id.clone();
@@ -497,6 +511,7 @@ fn spawn_background_agent(
             &compactor,
             context_window,
             ask_network,
+            inherited_permissions,
         )
         .await;
 
@@ -575,6 +590,9 @@ pub struct InternalAgentTool {
     context_window: Option<u32>,
     /// Whether network access requires approval (--ask-network)
     ask_network: bool,
+    /// Permissions inherited from the calling agent. Combined with this
+    /// agent's own declared permissions to get the effective envelope.
+    inherited_permissions: DelegationPermissions,
 }
 
 impl InternalAgentTool {
@@ -595,6 +613,7 @@ impl InternalAgentTool {
         compactor: Option<Arc<dyn ContextCompactor>>,
         context_window: Option<u32>,
         ask_network: bool,
+        inherited_permissions: DelegationPermissions,
     ) -> Self {
         let tool_name = format!("Agent[{}]", agent.name());
 
@@ -615,6 +634,7 @@ impl InternalAgentTool {
             compactor,
             context_window,
             ask_network,
+            inherited_permissions,
         }
     }
 }
@@ -747,6 +767,7 @@ impl Tool for InternalAgentTool {
                 self.compactor.clone(),
                 self.context_window,
                 self.ask_network,
+                self.inherited_permissions,
             ));
         }
 
@@ -774,6 +795,7 @@ impl Tool for InternalAgentTool {
             &self.compactor,
             self.context_window,
             self.ask_network,
+            self.inherited_permissions,
         )
         .await;
 
@@ -826,6 +848,9 @@ pub struct ExternalAgentTool {
     context_window: Option<u32>,
     /// Whether network access requires approval (--ask-network)
     ask_network: bool,
+    /// Permissions inherited from the calling agent. Combined with this
+    /// agent's own declared permissions to get the effective envelope.
+    inherited_permissions: DelegationPermissions,
 }
 
 impl ExternalAgentTool {
@@ -847,6 +872,7 @@ impl ExternalAgentTool {
         compactor: Option<Arc<dyn ContextCompactor>>,
         context_window: Option<u32>,
         ask_network: bool,
+        inherited_permissions: DelegationPermissions,
     ) -> Self {
         let tool_name = format!("Agent[{}]", name);
 
@@ -868,6 +894,7 @@ impl ExternalAgentTool {
             compactor,
             context_window,
             ask_network,
+            inherited_permissions,
         }
     }
 }
@@ -984,6 +1011,7 @@ impl Tool for ExternalAgentTool {
                 self.compactor.clone(),
                 self.context_window,
                 self.ask_network,
+                self.inherited_permissions,
             ));
         }
 
@@ -1011,6 +1039,7 @@ impl Tool for ExternalAgentTool {
             &self.compactor,
             self.context_window,
             self.ask_network,
+            self.inherited_permissions,
         )
         .await;
 
@@ -1060,6 +1089,7 @@ pub fn create_agent_tools(
     compactor: Option<Arc<dyn ContextCompactor>>,
     context_window: Option<u32>,
     ask_network: bool,
+    inherited_permissions: DelegationPermissions,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
@@ -1092,6 +1122,7 @@ pub fn create_agent_tools(
                 compactor.clone(),
                 context_window,
                 ask_network,
+                inherited_permissions,
             )));
         }
     }
@@ -1116,6 +1147,7 @@ pub fn create_agent_tools(
                 compactor.clone(),
                 context_window,
                 ask_network,
+                inherited_permissions,
             )));
         }
     }
@@ -1293,6 +1325,21 @@ mod tests {
             _ => format!("{}/{}", scope, agent_name),
         };
         assert_eq!(child_scope, "pm/coder");
+    }
+
+    #[test]
+    fn effective_permissions_are_strictest_of_inherited_and_declared() {
+        // Mirrors the combinator execute_agent applies to compute the
+        // runtime RO flag used for the __run_ro swap and the preamble.
+        let ro = DelegationPermissions { read_only: true };
+        let rw = DelegationPermissions { read_only: false };
+
+        // Read-only caller → read/write declared child ⇒ effective RO.
+        assert!(ro.restrict_with(rw).read_only);
+        // Read/write caller → read-only declared child ⇒ effective RO.
+        assert!(rw.restrict_with(ro).read_only);
+        // Read/write throughout stays read/write.
+        assert!(!rw.restrict_with(rw).read_only);
     }
 
     #[test]

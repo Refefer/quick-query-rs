@@ -577,6 +577,27 @@ impl AgentRegistry {
     }
 }
 
+/// Permission envelope inherited across agent delegation boundaries.
+///
+/// Invariant: a delegated agent's effective permissions are the *minimum*
+/// (strictest) of the caller's inherited permissions and the callee's own
+/// declared permissions. Permissions never widen as the call chain deepens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DelegationPermissions {
+    /// When true, this agent and everything it delegates to must be read-only.
+    pub read_only: bool,
+}
+
+impl DelegationPermissions {
+    /// Combine inherited permissions with a child's declared permissions,
+    /// taking the stricter of the two on every axis.
+    pub fn restrict_with(self, declared: DelegationPermissions) -> Self {
+        Self {
+            read_only: self.read_only || declared.read_only,
+        }
+    }
+}
+
 /// Configuration for an agent.
 #[derive(Clone)]
 pub struct AgentConfig {
@@ -1666,6 +1687,22 @@ async fn execute_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegation_permissions_restrict_with_truth_table() {
+        let ro = DelegationPermissions { read_only: true };
+        let rw = DelegationPermissions { read_only: false };
+
+        assert_eq!(ro.restrict_with(rw), ro, "inherited RO ∘ declared RW -> RO");
+        assert_eq!(rw.restrict_with(ro), ro, "inherited RW ∘ declared RO -> RO");
+        assert_eq!(ro.restrict_with(ro), ro, "RO ∘ RO -> RO");
+        assert_eq!(rw.restrict_with(rw), rw, "RW ∘ RW -> RW");
+    }
+
+    #[test]
+    fn delegation_permissions_default_is_permissive() {
+        assert_eq!(DelegationPermissions::default().read_only, false);
+    }
 
     #[test]
     fn test_agent_id() {
