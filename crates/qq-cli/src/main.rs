@@ -755,6 +755,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             compactor.clone(),
             context_window,
             cli.ask_network,
+            qq_core::DelegationPermissions::default(),
         )
     };
 

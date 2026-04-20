@@ -19,7 +19,7 @@ pub mod testing;
 pub use agent::{
     Agent, AgentChannel, AgentConfig, AgentId, AgentInstanceMetadata, AgentInstanceState,
     AgentMemory, AgentMessage, AgentProgressEvent, AgentProgressHandler, AgentRegistry,
-    AgentRunResult, AgentSender, DEFAULT_MAX_INSTANCE_BYTES,
+    AgentRunResult, AgentSender, DelegationPermissions, DEFAULT_MAX_INSTANCE_BYTES,
 };
 pub use error::Error;
 pub use message::{Content, ContentPart, ImageData, IntoContent, Message, Role, StreamChunk, ToolCall, ToolResult, TypedContent, Usage, strip_thinking_tags, strip_reasoning_from_history};
