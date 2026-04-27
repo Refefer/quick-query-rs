@@ -1217,13 +1217,9 @@ pub async fn run_tui(
                                     Some(ProfilesPickerStage::PickProfile { target, profiles, cursor, .. }) => {
                                         if let Some(chosen) = profiles.get(cursor).cloned() {
                                             let mut reg = profile_registry.write().await;
-                                            // The "Default" row binds to the primary agent's
-                                            // override, not the registry-wide fallback. Mutating
-                                            // the fallback would cascade to every subagent that
-                                            // lacks its own override.
                                             let result = match &target {
                                                 ProfilesTarget::Default => {
-                                                    reg.set_agent_profile(&app.primary_agent, &chosen)
+                                                    reg.set_default_profile(&chosen)
                                                 }
                                                 ProfilesTarget::Agent(name) => {
                                                     reg.set_agent_profile(name, &chosen)
@@ -1234,14 +1230,23 @@ pub async fn run_tui(
                                                 Ok(()) => {
                                                     let label = match &target {
                                                         ProfilesTarget::Default => {
-                                                            format!("{} (default chat)", app.primary_agent)
+                                                            "default profile".to_string()
                                                         }
                                                         ProfilesTarget::Agent(name) => name.clone(),
                                                     };
-                                                    // Update footer to reflect new chat profile
-                                                    if matches!(target, ProfilesTarget::Default) {
-                                                        app.profile = chosen.clone();
-                                                    }
+                                                    // Re-resolve the primary agent's profile and
+                                                    // update the footer to whatever the chat will use
+                                                    // on the next turn. This is correct whether the
+                                                    // change touched the primary's override directly
+                                                    // or the fallback that the primary resolves
+                                                    // through.
+                                                    let chat_profile = profile_registry
+                                                        .read()
+                                                        .await
+                                                        .for_agent(&app.primary_agent)
+                                                        .profile_name
+                                                        .clone();
+                                                    app.profile = chat_profile;
                                                     app.status_message =
                                                         Some(format!("{} → {}", label, chosen));
                                                 }
@@ -1404,39 +1409,37 @@ pub async fn run_tui(
                                                 app.content_dirty = true;
                                             }
                                             TuiCommand::Profiles => {
-                                                // Build target list from registry + agent executor.
-                                                // The "default chat" slot is the primary agent (PM by
-                                                // default) running the top-level streaming loop; we
-                                                // resolve and mutate its profile via `for_agent` /
-                                                // `set_agent_profile`, *not* via the registry-wide
-                                                // fallback. Otherwise changing the primary cascades to
-                                                // every subagent that lacks an explicit override.
+                                                // The picker has two distinct kinds of targets:
+                                                //   - `Default`: the registry-wide fallback profile.
+                                                //     Changing it affects only agents that resolve
+                                                //     through the fallback (no per-agent override).
+                                                //   - `Agent(name)`: a specific per-agent override,
+                                                //     including the primary agent (PM) — its row is
+                                                //     listed alongside every other agent.
+                                                // The chat session is just the primary agent running
+                                                // its own profile, so to change "what model the chat
+                                                // uses" the user picks the primary agent's row.
                                                 let registry_guard = profile_registry.read().await;
                                                 let mut items: Vec<ProfilesTargetItem> = Vec::new();
                                                 items.push(ProfilesTargetItem {
                                                     target: ProfilesTarget::Default,
                                                     current_profile: registry_guard
-                                                        .for_agent(&app.primary_agent)
-                                                        .profile_name
-                                                        .clone(),
-                                                    primary_agent: Some(app.primary_agent.clone()),
+                                                        .default_profile()
+                                                        .to_string(),
+                                                    primary_agent: None,
                                                 });
                                                 if let Some(ref exec) = agent_executor {
                                                     let exec = exec.read().await;
                                                     for info in exec.list_agents() {
-                                                        // Skip the primary agent here — its "default
-                                                        // chat" row above already targets the same
-                                                        // override slot, so listing it twice would let
-                                                        // the user change the same setting from two
-                                                        // rows that look distinct.
-                                                        if info.name == app.primary_agent {
-                                                            continue;
-                                                        }
                                                         let p = registry_guard.for_agent(&info.name).profile_name.clone();
                                                         items.push(ProfilesTargetItem {
                                                             target: ProfilesTarget::Agent(info.name.clone()),
                                                             current_profile: p,
-                                                            primary_agent: None,
+                                                            primary_agent: if info.name == app.primary_agent {
+                                                                Some(info.name.clone())
+                                                            } else {
+                                                                None
+                                                            },
                                                         });
                                                     }
                                                 }

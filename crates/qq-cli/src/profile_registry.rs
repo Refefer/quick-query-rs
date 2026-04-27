@@ -111,6 +111,23 @@ impl ProfileRegistry {
         Arc::new(RwLock::new(self))
     }
 
+    /// Name of the registry-wide fallback profile. Agents without their own
+    /// override resolve to this.
+    pub fn default_profile(&self) -> &str {
+        &self.default_profile
+    }
+
+    /// Switch the registry-wide fallback profile. Agents that have their own
+    /// override are unaffected; only those that resolve through the fallback
+    /// move to the new profile.
+    pub fn set_default_profile(&mut self, name: &str) -> Result<()> {
+        if !self.profiles.contains_key(name) {
+            return Err(anyhow!("Unknown profile: {}", name));
+        }
+        self.default_profile = name.to_string();
+        Ok(())
+    }
+
     /// Profile used by `agent_name` (override if set, default otherwise).
     pub fn for_agent(&self, agent_name: &str) -> Arc<ResolvedProfileRuntime> {
         let profile = self
@@ -296,22 +313,47 @@ mod tests {
         assert!(ProfileRegistry::new(map, "missing".to_string(), HashMap::new()).is_err());
     }
 
-    /// Regression: changing the primary agent's profile via the picker must
-    /// not cascade to subagents that lack an explicit override. Before the fix,
-    /// the picker called `set_default_profile` which mutated the registry-wide
-    /// fallback and silently moved every unconfigured subagent.
+    /// Setting the primary agent's per-agent override moves only that agent.
+    /// Other agents that resolve through the fallback are unaffected.
     #[test]
-    fn setting_primary_profile_does_not_move_other_agents_at_default() {
+    fn setting_primary_agent_override_does_not_move_other_agents() {
         let mut r = registry_with(&["fast", "default"], "default", &[]);
-        // Subagent has no override — resolves to "default".
         assert_eq!(r.for_agent("explore").profile_name, "default");
 
-        // Picker user changes the primary agent's profile to "fast".
         r.set_agent_profile("pm", "fast").unwrap();
 
-        // Primary moves; subagent stays.
         assert_eq!(r.for_agent("pm").profile_name, "fast");
         assert_eq!(r.for_agent("explore").profile_name, "default");
+    }
+
+    /// Setting the registry-wide fallback moves every agent that resolves
+    /// through it, but agents with their own override are pinned in place.
+    #[test]
+    fn setting_default_profile_moves_only_unoverridden_agents() {
+        let mut r = registry_with(
+            &["fast", "default"],
+            "default",
+            &[("pm", "fast")],
+        );
+        assert_eq!(r.for_agent("pm").profile_name, "fast");
+        assert_eq!(r.for_agent("explore").profile_name, "default");
+
+        r.set_default_profile("fast").unwrap();
+
+        assert_eq!(r.for_agent("pm").profile_name, "fast");
+        assert_eq!(r.for_agent("explore").profile_name, "fast");
+    }
+
+    #[test]
+    fn set_default_profile_rejects_unknown() {
+        let mut r = registry_with(&["fast", "default"], "default", &[]);
+        assert!(r.set_default_profile("nope").is_err());
+    }
+
+    #[test]
+    fn default_profile_returns_current_default() {
+        let r = registry_with(&["fast", "default"], "fast", &[]);
+        assert_eq!(r.default_profile(), "fast");
     }
 
     #[test]

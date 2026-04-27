@@ -392,11 +392,13 @@ fn build_profiles_rows(stage: &ProfilesPickerStage) -> (String, Vec<String>, usi
                 .iter()
                 .map(|item| {
                     let name = match &item.target {
-                        ProfilesTarget::Default => match &item.primary_agent {
-                            Some(p) => format!("{} (default chat)", p),
-                            None => "(default chat)".to_string(),
+                        ProfilesTarget::Default => "(default profile)".to_string(),
+                        ProfilesTarget::Agent(n) => match &item.primary_agent {
+                            // Mark the primary agent so the user knows which
+                            // agent's row drives the active chat session.
+                            Some(_) => format!("{} (chat)", n),
+                            None => n.clone(),
                         },
-                        ProfilesTarget::Agent(n) => n.clone(),
                     };
                     format!("{:<24} → {}", name, item.current_profile)
                 })
@@ -410,7 +412,7 @@ fn build_profiles_rows(stage: &ProfilesPickerStage) -> (String, Vec<String>, usi
             cursor,
         } => {
             let target_label = match target {
-                ProfilesTarget::Default => "default chat".to_string(),
+                ProfilesTarget::Default => "default profile".to_string(),
                 ProfilesTarget::Agent(n) => n.clone(),
             };
             let title = format!("Profile for {}", target_label);
