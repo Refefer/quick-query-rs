@@ -1413,12 +1413,12 @@ pub async fn run_tui(
                                                 //   - `Default`: the registry-wide fallback profile.
                                                 //     Changing it affects only agents that resolve
                                                 //     through the fallback (no per-agent override).
-                                                //   - `Agent(name)`: a specific per-agent override,
-                                                //     including the primary agent (PM) — its row is
-                                                //     listed alongside every other agent.
-                                                // The chat session is just the primary agent running
-                                                // its own profile, so to change "what model the chat
-                                                // uses" the user picks the primary agent's row.
+                                                //   - `Agent(name)`: a specific per-agent override.
+                                                // The primary agent (PM) is listed explicitly: the
+                                                // executor's `list_agents()` deliberately excludes
+                                                // it (sub-agents can't dispatch to themselves), but
+                                                // it still has a per-agent override slot in the
+                                                // registry that the user needs to be able to set.
                                                 let registry_guard = profile_registry.read().await;
                                                 let mut items: Vec<ProfilesTargetItem> = Vec::new();
                                                 items.push(ProfilesTargetItem {
@@ -1428,18 +1428,28 @@ pub async fn run_tui(
                                                         .to_string(),
                                                     primary_agent: None,
                                                 });
+                                                items.push(ProfilesTargetItem {
+                                                    target: ProfilesTarget::Agent(app.primary_agent.clone()),
+                                                    current_profile: registry_guard
+                                                        .for_agent(&app.primary_agent)
+                                                        .profile_name
+                                                        .clone(),
+                                                    primary_agent: Some(app.primary_agent.clone()),
+                                                });
                                                 if let Some(ref exec) = agent_executor {
                                                     let exec = exec.read().await;
                                                     for info in exec.list_agents() {
+                                                        // Defensive: in case a future change makes
+                                                        // list_agents() include the primary, don't
+                                                        // duplicate the row added above.
+                                                        if info.name == app.primary_agent {
+                                                            continue;
+                                                        }
                                                         let p = registry_guard.for_agent(&info.name).profile_name.clone();
                                                         items.push(ProfilesTargetItem {
                                                             target: ProfilesTarget::Agent(info.name.clone()),
                                                             current_profile: p,
-                                                            primary_agent: if info.name == app.primary_agent {
-                                                                Some(info.name.clone())
-                                                            } else {
-                                                                None
-                                                            },
+                                                            primary_agent: None,
                                                         });
                                                     }
                                                 }
