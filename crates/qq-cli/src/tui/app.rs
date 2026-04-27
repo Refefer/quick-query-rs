@@ -1217,8 +1217,14 @@ pub async fn run_tui(
                                     Some(ProfilesPickerStage::PickProfile { target, profiles, cursor, .. }) => {
                                         if let Some(chosen) = profiles.get(cursor).cloned() {
                                             let mut reg = profile_registry.write().await;
+                                            // The "Default" row binds to the primary agent's
+                                            // override, not the registry-wide fallback. Mutating
+                                            // the fallback would cascade to every subagent that
+                                            // lacks its own override.
                                             let result = match &target {
-                                                ProfilesTarget::Default => reg.set_default_profile(&chosen),
+                                                ProfilesTarget::Default => {
+                                                    reg.set_agent_profile(&app.primary_agent, &chosen)
+                                                }
                                                 ProfilesTarget::Agent(name) => {
                                                     reg.set_agent_profile(name, &chosen)
                                                 }
@@ -1232,7 +1238,7 @@ pub async fn run_tui(
                                                         }
                                                         ProfilesTarget::Agent(name) => name.clone(),
                                                     };
-                                                    // Update footer to reflect new default if applicable
+                                                    // Update footer to reflect new chat profile
                                                     if matches!(target, ProfilesTarget::Default) {
                                                         app.profile = chosen.clone();
                                                     }
@@ -1399,23 +1405,33 @@ pub async fn run_tui(
                                             }
                                             TuiCommand::Profiles => {
                                                 // Build target list from registry + agent executor.
-                                                // The "default chat" slot drives whichever agent runs the
-                                                // top-level streaming loop (PM by default). Surface that
-                                                // primary agent name so users know what they're changing.
+                                                // The "default chat" slot is the primary agent (PM by
+                                                // default) running the top-level streaming loop; we
+                                                // resolve and mutate its profile via `for_agent` /
+                                                // `set_agent_profile`, *not* via the registry-wide
+                                                // fallback. Otherwise changing the primary cascades to
+                                                // every subagent that lacks an explicit override.
                                                 let registry_guard = profile_registry.read().await;
                                                 let mut items: Vec<ProfilesTargetItem> = Vec::new();
                                                 items.push(ProfilesTargetItem {
                                                     target: ProfilesTarget::Default,
-                                                    current_profile: registry_guard.default_profile().to_string(),
+                                                    current_profile: registry_guard
+                                                        .for_agent(&app.primary_agent)
+                                                        .profile_name
+                                                        .clone(),
                                                     primary_agent: Some(app.primary_agent.clone()),
                                                 });
                                                 if let Some(ref exec) = agent_executor {
                                                     let exec = exec.read().await;
                                                     for info in exec.list_agents() {
-                                                        // Both entries can coexist for an agent that's
-                                                        // also the primary: the "default chat" row drives
-                                                        // the streaming loop, while this row drives
-                                                        // Agent[name] sub-invocations from other agents.
+                                                        // Skip the primary agent here — its "default
+                                                        // chat" row above already targets the same
+                                                        // override slot, so listing it twice would let
+                                                        // the user change the same setting from two
+                                                        // rows that look distinct.
+                                                        if info.name == app.primary_agent {
+                                                            continue;
+                                                        }
                                                         let p = registry_guard.for_agent(&info.name).profile_name.clone();
                                                         items.push(ProfilesTargetItem {
                                                             target: ProfilesTarget::Agent(info.name.clone()),
@@ -1557,10 +1573,17 @@ pub async fn run_tui(
 
                                         app.start_response(&input, &attachment_display);
 
-                                        // Resolve the active default profile fresh on each turn so
+                                        // Resolve the primary agent's profile fresh on each turn so
                                         // a `/profiles` swap takes effect on the next user message
                                         // (already-running streams keep their captured provider).
-                                        let runtime = profile_registry.read().await.for_default();
+                                        // Note: we look the profile up by primary-agent name, not via
+                                        // `for_default()` — otherwise changing the primary's profile
+                                        // would mutate the registry-wide fallback and silently move
+                                        // every subagent that hasn't been individually configured.
+                                        let runtime = profile_registry
+                                            .read()
+                                            .await
+                                            .for_agent(&app.primary_agent);
                                         let provider = Arc::clone(&runtime.provider);
                                         let tools = tools_registry.clone();
                                         let params = runtime.parameters.clone();

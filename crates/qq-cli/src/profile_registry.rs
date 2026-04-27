@@ -111,15 +111,6 @@ impl ProfileRegistry {
         Arc::new(RwLock::new(self))
     }
 
-    /// Profile used by the main chat session.
-    pub fn for_default(&self) -> Arc<ResolvedProfileRuntime> {
-        Arc::clone(
-            self.profiles
-                .get(&self.default_profile)
-                .expect("default_profile is validated on construction and on each setter"),
-        )
-    }
-
     /// Profile used by `agent_name` (override if set, default otherwise).
     pub fn for_agent(&self, agent_name: &str) -> Arc<ResolvedProfileRuntime> {
         let profile = self
@@ -151,19 +142,6 @@ impl ProfileRegistry {
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         entries
-    }
-
-    pub fn default_profile(&self) -> &str {
-        &self.default_profile
-    }
-
-    /// Switch the main chat session to use `name`. Errors out if no such profile.
-    pub fn set_default_profile(&mut self, name: &str) -> Result<()> {
-        if !self.profiles.contains_key(name) {
-            return Err(anyhow!("Unknown profile: {}", name));
-        }
-        self.default_profile = name.to_string();
-        Ok(())
     }
 
     /// Assign `profile` to `agent`. Errors out if no such profile.
@@ -275,12 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn for_default_returns_default_profile() {
-        let r = registry_with(&["fast", "default"], "default", &[]);
-        assert_eq!(r.for_default().profile_name, "default");
-    }
-
-    #[test]
     fn for_agent_returns_override_when_present() {
         let r = registry_with(&["fast", "default"], "default", &[("explore", "fast")]);
         assert_eq!(r.for_agent("explore").profile_name, "fast");
@@ -290,19 +262,6 @@ mod tests {
     fn for_agent_falls_back_to_default() {
         let r = registry_with(&["fast", "default"], "default", &[("explore", "fast")]);
         assert_eq!(r.for_agent("planner").profile_name, "default");
-    }
-
-    #[test]
-    fn set_default_profile_changes_default() {
-        let mut r = registry_with(&["fast", "default"], "default", &[]);
-        r.set_default_profile("fast").unwrap();
-        assert_eq!(r.for_default().profile_name, "fast");
-    }
-
-    #[test]
-    fn set_default_profile_rejects_unknown() {
-        let mut r = registry_with(&["fast", "default"], "default", &[]);
-        assert!(r.set_default_profile("nope").is_err());
     }
 
     #[test]
@@ -335,6 +294,24 @@ mod tests {
     fn new_rejects_default_not_in_map() {
         let map: HashMap<String, Arc<ResolvedProfileRuntime>> = HashMap::new();
         assert!(ProfileRegistry::new(map, "missing".to_string(), HashMap::new()).is_err());
+    }
+
+    /// Regression: changing the primary agent's profile via the picker must
+    /// not cascade to subagents that lack an explicit override. Before the fix,
+    /// the picker called `set_default_profile` which mutated the registry-wide
+    /// fallback and silently moved every unconfigured subagent.
+    #[test]
+    fn setting_primary_profile_does_not_move_other_agents_at_default() {
+        let mut r = registry_with(&["fast", "default"], "default", &[]);
+        // Subagent has no override — resolves to "default".
+        assert_eq!(r.for_agent("explore").profile_name, "default");
+
+        // Picker user changes the primary agent's profile to "fast".
+        r.set_agent_profile("pm", "fast").unwrap();
+
+        // Primary moves; subagent stays.
+        assert_eq!(r.for_agent("pm").profile_name, "fast");
+        assert_eq!(r.for_agent("explore").profile_name, "default");
     }
 
     #[test]
