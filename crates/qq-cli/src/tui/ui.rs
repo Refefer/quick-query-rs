@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::TuiApp;
+use super::app::{ProfilesPickerStage, ProfilesTarget, TuiApp};
 use super::layout::PaneId;
 use super::widgets::{ContentArea, InputArea, StatusBar, ThinkingPanel};
 
@@ -119,6 +119,11 @@ pub fn render(app: &TuiApp, frame: &mut Frame, layout: &HashMap<PaneId, Rect>) {
     if let Some(ref request) = app.pending_approval {
         render_approval_overlay(frame, request, app.denial_reason_input.as_deref());
     }
+
+    // Show /profiles picker overlay if open (always on top)
+    if let Some(ref stage) = app.profiles_picker {
+        render_profiles_overlay(frame, stage);
+    }
 }
 
 /// Calculate the number of wrapped lines for input text.
@@ -180,6 +185,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  /attach <p>  Attach an image file"),
         Line::from("  /attachments List pending attachments"),
         Line::from("  /clear-attachments  Remove all attachments"),
+        Line::from("  /profiles    Switch profile for chat or any agent"),
         Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Cyan))),
         Line::from("  Shift+drag   Select text (works in most terminals)"),
@@ -316,4 +322,124 @@ fn render_approval_overlay(
         .style(Style::default().bg(Color::Black));
 
     frame.render_widget(paragraph, overlay_area);
+}
+
+/// Render the `/profiles` picker overlay.
+fn render_profiles_overlay(frame: &mut Frame, stage: &ProfilesPickerStage) {
+    let area = frame.area();
+
+    let (title, rows, cursor) = build_profiles_rows(stage);
+
+    // Reserve room for: title (1) + blank (1) + rows + blank (1) + hint (1) + 2 borders.
+    let max_inner_height = area.height.saturating_sub(4) as usize;
+    let desired_inner = rows.len() + 4;
+    let inner_height = desired_inner.min(max_inner_height.max(5));
+
+    let overlay_width = 60u16
+        .max(title.len() as u16 + 6)
+        .min(area.width.saturating_sub(4));
+    let overlay_height = (inner_height as u16 + 2).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(overlay_width)) / 2;
+    let y = (area.height.saturating_sub(overlay_height)) / 2;
+    let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
+
+    frame.render_widget(Clear, overlay_area);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 4);
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(""));
+
+    // Render rows with the cursor row highlighted. Truncate the visible rows
+    // to the overlay height so we don't draw past the box.
+    let visible_rows = inner_height.saturating_sub(4);
+    let (start, end) = visible_window(cursor, rows.len(), visible_rows);
+    for (i, row) in rows.iter().enumerate().take(end).skip(start) {
+        let style = if i == cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(row.clone(), style)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Up/Down to move, Enter to select, Esc to cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Profiles ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .style(Style::default().bg(Color::Black));
+
+    frame.render_widget(paragraph, overlay_area);
+}
+
+/// Build (title, row-strings, cursor) for the picker stage.
+fn build_profiles_rows(stage: &ProfilesPickerStage) -> (String, Vec<String>, usize) {
+    match stage {
+        ProfilesPickerStage::PickTarget { items, cursor } => {
+            let title = "Choose target".to_string();
+            let rows: Vec<String> = items
+                .iter()
+                .map(|item| {
+                    let name = match &item.target {
+                        ProfilesTarget::Default => match &item.primary_agent {
+                            Some(p) => format!("{} (default chat)", p),
+                            None => "(default chat)".to_string(),
+                        },
+                        ProfilesTarget::Agent(n) => n.clone(),
+                    };
+                    format!("{:<24} → {}", name, item.current_profile)
+                })
+                .collect();
+            (title, rows, *cursor)
+        }
+        ProfilesPickerStage::PickProfile {
+            target,
+            profiles,
+            current_profile,
+            cursor,
+        } => {
+            let target_label = match target {
+                ProfilesTarget::Default => "default chat".to_string(),
+                ProfilesTarget::Agent(n) => n.clone(),
+            };
+            let title = format!("Profile for {}", target_label);
+            let rows: Vec<String> = profiles
+                .iter()
+                .map(|p| {
+                    if p == current_profile {
+                        format!("* {}", p)
+                    } else {
+                        format!("  {}", p)
+                    }
+                })
+                .collect();
+            (title, rows, *cursor)
+        }
+    }
+}
+
+/// Compute a (start, end) row window centered on the cursor.
+fn visible_window(cursor: usize, total: usize, visible: usize) -> (usize, usize) {
+    if visible == 0 || total == 0 {
+        return (0, 0);
+    }
+    if total <= visible {
+        return (0, total);
+    }
+    let half = visible / 2;
+    let start = cursor.saturating_sub(half);
+    let end = (start + visible).min(total);
+    let start = end.saturating_sub(visible);
+    (start, end)
 }

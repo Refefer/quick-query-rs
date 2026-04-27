@@ -518,6 +518,7 @@ pub async fn run_chat(
     cli: &Cli,
     _config: &AppConfig,
     provider: Arc<dyn Provider>,
+    _profile_registry: crate::profile_registry::SharedProfileRegistry,
     system_prompt: Option<String>,
     tools_registry: ToolRegistry,
     extra_params: std::collections::HashMap<String, serde_json::Value>,

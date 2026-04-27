@@ -64,6 +64,14 @@ pub struct BuiltinAgentOverride {
     #[serde(default)]
     pub no_bash: Option<bool>,
 
+    /// Profile override for this agent. When set, the agent uses the named
+    /// profile's provider/model/parameters/include_tool_reasoning instead of
+    /// the session default. The profile's prompt, agents list, and primary
+    /// agent fields are ignored — the agent keeps its own system prompt and
+    /// tools. Can also be changed at runtime via the TUI `/profiles` command.
+    #[serde(default)]
+    pub profile: Option<String>,
+
     /// Observation config overrides (obs-memory only).
     #[serde(default)]
     pub preserve_recent: Option<usize>,
@@ -89,13 +97,24 @@ pub struct AgentDefinition {
     /// System prompt for the agent
     pub system_prompt: String,
 
-    /// Optional provider override (uses profile default if not set)
+    /// Optional provider override (uses profile default if not set).
+    /// Deprecated: prefer the `profile` field below, which selects a complete
+    /// profile from `[profiles.*]` in the main config.
     #[serde(default)]
     pub provider: Option<String>,
 
-    /// Optional model override (uses profile default if not set)
+    /// Optional model override (uses profile default if not set).
+    /// Deprecated: prefer the `profile` field below.
     #[serde(default)]
     pub model: Option<String>,
+
+    /// Profile override for this agent. When set, the agent uses the named
+    /// profile's provider/model/parameters/include_tool_reasoning instead of
+    /// the session default. The profile's prompt, agents list, and primary
+    /// agent fields are ignored — the agent keeps its own system prompt and
+    /// tools. Can also be changed at runtime via the TUI `/profiles` command.
+    #[serde(default)]
+    pub profile: Option<String>,
 
     /// Tool names this agent can use (from the tool registry)
     #[serde(default)]
@@ -242,6 +261,25 @@ impl AgentsConfig {
         self.builtin
             .get(name)
             .and_then(|o| o.max_observations)
+    }
+
+    /// Get the configured profile name for an agent (built-in or external).
+    ///
+    /// Looks up `[builtin.<name>].profile` first, then `[agents.<name>].profile`.
+    /// Returns `None` when no override is configured — the caller should fall
+    /// back to the session default profile.
+    pub fn get_agent_profile(&self, name: &str) -> Option<&str> {
+        if let Some(o) = self.builtin.get(name) {
+            if let Some(p) = o.profile.as_deref() {
+                return Some(p);
+            }
+        }
+        if let Some(def) = self.agents.get(name) {
+            if let Some(p) = def.profile.as_deref() {
+                return Some(p);
+            }
+        }
+        None
     }
 
     /// Get observation config overrides for a built-in agent.
@@ -609,6 +647,60 @@ extra_tools = ["mcp:ws/web_search"]
         let config: AgentsConfig = toml::from_str(toml_content).unwrap();
         let tools = config.get_builtin_tools("researcher");
         assert_eq!(tools, &["mcp:ws/web_search"]);
+    }
+
+    #[test]
+    fn test_builtin_profile_field() {
+        let toml_content = r#"
+[builtin.explore]
+profile = "fast"
+
+[builtin.planner]
+# no profile set
+max_turns = 50
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert_eq!(config.get_agent_profile("explore"), Some("fast"));
+        assert_eq!(config.get_agent_profile("planner"), None);
+        assert_eq!(config.get_agent_profile("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_external_agent_profile_field() {
+        let toml_content = r#"
+[agents.doc-researcher]
+description = "Doc researcher"
+system_prompt = "You research"
+profile = "reasoning"
+
+[agents.simple]
+description = "Simple"
+system_prompt = "Simple"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert_eq!(config.get_agent_profile("doc-researcher"), Some("reasoning"));
+        assert_eq!(config.get_agent_profile("simple"), None);
+    }
+
+    #[test]
+    fn test_get_agent_profile_builtin_wins_over_external() {
+        // Both maps could (in principle) name the same agent. Builtin override
+        // takes precedence so users can override built-ins without editing
+        // both tables.
+        let toml_content = r#"
+[builtin.coder]
+profile = "fast"
+
+[agents.coder]
+description = "Coder"
+system_prompt = "Code"
+profile = "reasoning"
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+
+        assert_eq!(config.get_agent_profile("coder"), Some("fast"));
     }
 
     #[test]
