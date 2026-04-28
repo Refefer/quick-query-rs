@@ -2,7 +2,7 @@
 //!
 //! Defines stream events and keyboard input processing.
 
-use qq_core::Usage;
+use qq_core::{FinishReason, Usage};
 
 use qq_core::Message;
 
@@ -21,7 +21,13 @@ pub enum StreamEvent {
     /// Arguments fragment for current tool call
     ToolCallDelta { arguments: String },
     /// Stream is complete with final content to add to session
-    Done { usage: Option<Usage>, content: String },
+    Done {
+        usage: Option<Usage>,
+        content: String,
+        /// Why the model stopped. `Length` means the response was cut off by max-tokens
+        /// — surface a truncation notice and do NOT auto-retry.
+        finish_reason: Option<FinishReason>,
+    },
     /// An error occurred
     Error { message: String },
     /// Tool execution started

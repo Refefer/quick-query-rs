@@ -1120,7 +1120,7 @@ async fn run_completion(
                         args.push_str(&arguments);
                     }
                 }
-                StreamChunk::Done { usage } => {
+                StreamChunk::Done { usage, finish_reason: _ } => {
                     // Finish any pending tool call
                     if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
                         let args: serde_json::Value =

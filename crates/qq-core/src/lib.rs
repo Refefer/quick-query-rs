@@ -22,9 +22,9 @@ pub use agent::{
     AgentRunResult, AgentSender, DelegationPermissions, DEFAULT_MAX_INSTANCE_BYTES,
 };
 pub use error::Error;
-pub use message::{Content, ContentPart, ImageData, IntoContent, Message, Role, StreamChunk, ToolCall, ToolResult, TypedContent, Usage, strip_thinking_tags, strip_reasoning_from_history};
+pub use message::{Content, ContentPart, FinishReason, ImageData, IntoContent, Message, Role, StreamChunk, ToolCall, ToolResult, TypedContent, Usage, strip_thinking_tags, strip_reasoning_from_history};
 pub use provider::{
-    CompletionRequest, CompletionResponse, FinishReason, Provider, StreamResult,
+    CompletionRequest, CompletionResponse, Provider, StreamResult,
 };
 pub use task::{
     complete_parallel, execute_tools_parallel, execute_tools_parallel_with_chunker,

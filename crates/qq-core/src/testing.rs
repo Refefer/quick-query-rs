@@ -5,38 +5,56 @@ use async_trait::async_trait;
 use std::sync::Mutex;
 
 use crate::error::Error;
-use crate::message::{Message, Usage};
+use crate::message::{FinishReason, Message, StreamChunk, Usage};
 use crate::observation::ContextCompactor;
-use crate::provider::{CompletionRequest, CompletionResponse, FinishReason, Provider, StreamResult};
+use crate::provider::{CompletionRequest, CompletionResponse, Provider, StreamResult};
 
 /// A mock provider that returns pre-configured responses.
 pub struct MockProvider {
     responses: Mutex<Vec<CompletionResponse>>,
+    /// Each entry is the chunk sequence to replay for one stream() call. FIFO.
+    stream_chunks: Mutex<Vec<Vec<StreamChunk>>>,
     /// Captured requests (for assertion).
     pub captured_requests: Mutex<Vec<CompletionRequest>>,
     pub name: String,
     pub default_model: Option<String>,
+    pub context_window: Option<u32>,
 }
 
 impl MockProvider {
     pub fn new() -> Self {
         Self {
             responses: Mutex::new(Vec::new()),
+            stream_chunks: Mutex::new(Vec::new()),
             captured_requests: Mutex::new(Vec::new()),
             name: "mock".to_string(),
             default_model: None,
+            context_window: None,
         }
+    }
+
+    /// Set the context window so tests can exercise the
+    /// "context window full vs max_tokens cap" branch in the agent loop.
+    pub fn with_context_window(mut self, tokens: u32) -> Self {
+        self.context_window = Some(tokens);
+        self
     }
 
     /// Queue a response to be returned by the next complete() call.
     /// Responses are returned in FIFO order (first queued = first returned).
     pub fn queue_response(&self, content: &str) {
+        self.queue_response_with_finish(content, FinishReason::Stop);
+    }
+
+    /// Queue a response with an explicit finish_reason. Useful for testing
+    /// truncation handling (`FinishReason::Length`).
+    pub fn queue_response_with_finish(&self, content: &str, finish_reason: FinishReason) {
         let response = CompletionResponse {
             message: Message::assistant(content),
             thinking: None,
             usage: Usage::new(0, 0),
             model: "mock-model".to_string(),
-            finish_reason: FinishReason::Stop,
+            finish_reason,
         };
         self.responses.lock().unwrap().insert(0, response);
     }
@@ -44,6 +62,12 @@ impl MockProvider {
     /// Queue a raw CompletionResponse.
     pub fn queue_raw_response(&self, response: CompletionResponse) {
         self.responses.lock().unwrap().insert(0, response);
+    }
+
+    /// Queue a stream — the next `stream()` call replays these chunks in order.
+    /// FIFO across calls.
+    pub fn queue_stream(&self, chunks: Vec<StreamChunk>) {
+        self.stream_chunks.lock().unwrap().insert(0, chunks);
     }
 
     /// Get the number of captured requests.
@@ -73,6 +97,10 @@ impl Provider for MockProvider {
         self.default_model.as_deref()
     }
 
+    fn context_window(&self) -> Option<u32> {
+        self.context_window
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, Error> {
         self.captured_requests.lock().unwrap().push(request);
         match self.responses.lock().unwrap().pop() {
@@ -81,10 +109,17 @@ impl Provider for MockProvider {
         }
     }
 
-    async fn stream(&self, _request: CompletionRequest) -> Result<StreamResult, Error> {
-        Err(Error::Unknown(
-            "MockProvider does not support streaming".to_string(),
-        ))
+    async fn stream(&self, request: CompletionRequest) -> Result<StreamResult, Error> {
+        self.captured_requests.lock().unwrap().push(request);
+        let chunks = self.stream_chunks.lock().unwrap().pop().unwrap_or_else(|| {
+            // No queued stream — emit a minimal "Stop" stream so callers don't hang.
+            vec![StreamChunk::Done {
+                usage: None,
+                finish_reason: Some(FinishReason::Stop),
+            }]
+        });
+        let stream = futures::stream::iter(chunks.into_iter().map(Ok));
+        Ok(Box::pin(stream))
     }
 }
 

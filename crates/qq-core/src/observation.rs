@@ -230,11 +230,34 @@ impl ObservationalMemory {
     }
 
     /// Run the full compaction pipeline: observe then reflect if needed.
-    /// This is the main entry point called from ChatSession.
+    /// This is the main entry point called from ChatSession — threshold-driven.
     pub async fn compact(
         &mut self,
         messages: &mut Vec<Message>,
         compactor: &dyn ContextCompactor,
+    ) -> Result<(), Error> {
+        self.compact_internal(messages, compactor, false).await
+    }
+
+    /// Force a compaction pass even when the unobserved-bytes threshold has not
+    /// been met. Used as an emergency-recovery path when the agent loop hits the
+    /// model's context window — at that point we want to free *whatever* we can.
+    /// The safe-split-point machinery still applies, so tool-call sequences are
+    /// not broken; if the safe range is empty, this is a no-op (and the caller
+    /// should surface the truncation as a hard error).
+    pub async fn compact_force(
+        &mut self,
+        messages: &mut Vec<Message>,
+        compactor: &dyn ContextCompactor,
+    ) -> Result<(), Error> {
+        self.compact_internal(messages, compactor, true).await
+    }
+
+    async fn compact_internal(
+        &mut self,
+        messages: &mut Vec<Message>,
+        compactor: &dyn ContextCompactor,
+        force: bool,
     ) -> Result<(), Error> {
         // 1. Check if observation is needed
         let preserve = self.config.calculate_effective_preserve(messages, self.observation_log.len())
@@ -258,7 +281,7 @@ impl ObservationalMemory {
             let msg_threshold =
                 (self.config.message_threshold_bytes as f64 * self.config.hysteresis) as usize;
 
-            if unobserved_bytes > msg_threshold {
+            if force || unobserved_bytes > msg_threshold {
                 // Find safe split point (don't break tool call sequences)
                 let safe_end = find_safe_split_point(messages, unobserved_end);
                 if safe_end > self.observed_up_to {
@@ -273,7 +296,9 @@ impl ObservationalMemory {
                         .map(|m| m.observable_byte_count())
                         .sum();
 
-                    if safe_bytes <= msg_threshold {
+                    // In force mode, observe whatever's in the safe range — even
+                    // a small drain helps when we're already at the context wall.
+                    if !force && safe_bytes <= msg_threshold {
                         tracing::info!(
                             safe_bytes = safe_bytes,
                             threshold = msg_threshold,

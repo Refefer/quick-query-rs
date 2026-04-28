@@ -246,6 +246,13 @@ pub async fn execute_with_continuation(
                     "Agent stuck in repetitive loop".into(),
                 ))
             }
+            Ok(AgentRunResult::TruncatedByLength { partial_content, .. }) => {
+                AgentExecutionResult::Error(qq_core::Error::Unknown(format!(
+                    "Agent response truncated by max-tokens limit. \
+                     Partial: {}",
+                    partial_content
+                )))
+            }
             Err(e) => AgentExecutionResult::Error(e),
         };
     }
@@ -277,6 +284,17 @@ pub async fn execute_with_continuation(
                 return AgentExecutionResult::Error(qq_core::Error::Unknown(
                     "Agent stuck in repetitive loop".into(),
                 ));
+            }
+            Ok(AgentRunResult::TruncatedByLength { partial_content, .. }) => {
+                // The model was cut off by the provider's max-tokens limit. Don't
+                // retry the same prompt — it'll truncate the same way. Surface as
+                // an error so the caller can decide (typically: do the work
+                // themselves, or split into smaller subtasks).
+                return AgentExecutionResult::Error(qq_core::Error::Unknown(format!(
+                    "Agent response truncated by max-tokens limit. \
+                     Partial: {}",
+                    partial_content
+                )));
             }
             Ok(AgentRunResult::MaxIterationsExceeded { messages: agent_messages, .. }) => {
 

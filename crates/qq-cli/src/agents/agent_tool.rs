@@ -24,6 +24,49 @@ use crate::ExecutionContext;
 /// At depth 0, agents can call other agents. At max_depth, they only get base tools.
 pub const DEFAULT_MAX_AGENT_DEPTH: u32 = 5;
 
+/// Build the error tool_result body returned to a parent agent when its dispatched
+/// sub-agent was cut off by the provider's max-tokens limit. The wording is the
+/// signal that breaks the silent-success → reattempt loop: it tells the parent
+/// the task did NOT complete and gives concrete next-step options.
+///
+/// `was_context_full` distinguishes the two cases the parent can act on:
+/// - context window exhausted: emergency compaction was already attempted and
+///   couldn't free enough space; splitting the task is the only path forward
+/// - per-request `max_tokens` cap: bumping the cap or shortening the expected
+///   output is the right fix
+fn truncation_message(
+    agent_name: &str,
+    partial_content: &str,
+    was_context_full: bool,
+) -> String {
+    let cause = if was_context_full {
+        "exhausted the model's context window (compaction was attempted but couldn't \
+         free enough space)"
+    } else {
+        "hit the request's max_tokens cap"
+    };
+    let advice = if was_context_full {
+        "Split the task into smaller subtasks that each fit within the context window, \
+         or do this work yourself."
+    } else {
+        "Either raise the max_tokens limit, ask the sub-agent to be more concise, \
+         or do this work yourself."
+    };
+    if partial_content.is_empty() {
+        format!(
+            "Sub-agent `{}` was cut off — {} — before producing any output. \
+             The task did not complete. {}",
+            agent_name, cause, advice
+        )
+    } else {
+        format!(
+            "Sub-agent `{}` was cut off — {}. Partial output:\n\n{}\n\n\
+             The task did not complete. {}",
+            agent_name, cause, partial_content, advice
+        )
+    }
+}
+
 // =============================================================================
 // Shared agent tool helpers
 // =============================================================================
@@ -302,12 +345,14 @@ async fn execute_agent(
                 Ok(qq_core::AgentRunResult::Success { messages, observation_log, .. })
                 | Ok(qq_core::AgentRunResult::ObservationLimitReached { messages, observation_log, .. })
                 | Ok(qq_core::AgentRunResult::MaxIterationsExceeded { messages, observation_log })
-                | Ok(qq_core::AgentRunResult::RepetitionDetected { messages, observation_log }) => {
+                | Ok(qq_core::AgentRunResult::RepetitionDetected { messages, observation_log })
+                | Ok(qq_core::AgentRunResult::TruncatedByLength { messages, observation_log, .. }) => {
                     let variant = match &result {
                         Ok(qq_core::AgentRunResult::Success { .. }) => "success",
                         Ok(qq_core::AgentRunResult::ObservationLimitReached { .. }) => "obs_limit_reached",
                         Ok(qq_core::AgentRunResult::MaxIterationsExceeded { .. }) => "max_iterations",
                         Ok(qq_core::AgentRunResult::RepetitionDetected { .. }) => "repetition_detected",
+                        Ok(qq_core::AgentRunResult::TruncatedByLength { .. }) => "truncated_by_length",
                         _ => unreachable!(),
                     };
                     tracing::info!(
@@ -349,6 +394,17 @@ async fn execute_agent(
                 }
                 Ok(qq_core::AgentRunResult::RepetitionDetected { .. }) => {
                     Ok(ToolOutput::error("Agent stuck in repetitive loop".to_string()))
+                }
+                Ok(qq_core::AgentRunResult::TruncatedByLength {
+                    partial_content,
+                    was_context_full,
+                    ..
+                }) => {
+                    Ok(ToolOutput::error(truncation_message(
+                        &config.agent_name,
+                        &partial_content,
+                        was_context_full,
+                    )))
                 }
                 Err(e) => Ok(ToolOutput::error(format!("Agent error: {}", e))),
             }

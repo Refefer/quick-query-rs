@@ -15,7 +15,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::error::Error;
-use crate::message::{Message, Role, StreamChunk, Usage};
+use crate::message::{FinishReason, Message, Role, StreamChunk, Usage};
 use crate::observation::{ContextCompactor, ObservationConfig, ObservationalMemory};
 use crate::provider::{CompletionRequest, Provider};
 use crate::tool::ToolRegistry;
@@ -49,6 +49,23 @@ pub enum AgentRunResult {
     RepetitionDetected {
         messages: Vec<Message>,
         observation_log: String,
+    },
+    /// The model's response was cut off by the provider's max-tokens limit before
+    /// completion. The partial content (if any) is preserved for the caller, but
+    /// this MUST NOT be treated as success — the agent did not finish its task.
+    /// Surfacing this distinctly lets parent agents stop dispatching new sub-agents
+    /// for the same purpose, which would otherwise loop indefinitely.
+    ///
+    /// `was_context_full` distinguishes "ran out of context window" (recoverable
+    /// by splitting the task into smaller subtasks) from "hit the request's
+    /// per-call max_tokens cap" (recoverable by raising the cap or shortening
+    /// the expected output). When true, the loop already attempted at least
+    /// one emergency compaction pass and it didn't free enough space.
+    TruncatedByLength {
+        partial_content: String,
+        messages: Vec<Message>,
+        observation_log: String,
+        was_context_full: bool,
     },
 }
 
@@ -858,6 +875,13 @@ impl Agent {
             AgentRunResult::RepetitionDetected { .. } => {
                 Err(Error::Unknown("Agent stuck in repetitive loop".into()))
             }
+            AgentRunResult::TruncatedByLength { partial_content, .. } => {
+                Err(Error::Unknown(format!(
+                    "Agent response truncated by provider's max-tokens limit. \
+                     Partial output: {}",
+                    partial_content
+                )))
+            }
         }
     }
 
@@ -921,6 +945,12 @@ impl Agent {
         // Track tool call counts for enforcing limits
         let mut tool_call_counts: HashMap<String, usize> = HashMap::new();
 
+        // Consecutive emergency-compaction-then-retry attempts. Reset whenever we
+        // get a non-truncated response. Capped to prevent infinite loops when
+        // compaction can't actually free meaningful space (e.g., long
+        // user-recent messages already protected by `preserve_recent`).
+        let mut consecutive_emergency_compactions: u32 = 0;
+
         // Repetition detector: catches agents stuck calling the same tool with same args
         let mut repetition_detector = RepetitionDetector::new();
 
@@ -975,7 +1005,7 @@ impl Agent {
 
             // Use streaming if we have a progress handler, otherwise use complete()
             // Wrap with retry logic for transient transport/stream errors
-            let (content, tool_calls, usage, thinking) = {
+            let (content, tool_calls, usage, thinking, finish_reason) = {
                 let mut last_error = None;
                 let mut result = None;
                 for attempt in 0..=MAX_STREAM_RETRIES {
@@ -1073,10 +1103,108 @@ impl Agent {
                 handler
                     .on_progress(AgentProgressEvent::UsageUpdate {
                         agent_name: agent_name.clone(),
-                        usage,
+                        usage: usage.clone(),
                     })
                     .await;
             }
+
+            // Detect truncation: the provider cut the response off at max-tokens.
+            // Distinct from "model has nothing more to say" — never treat as success.
+            // If truncated AND there are tool_calls, those calls were mid-stream
+            // when the model was cut off, so their JSON args are likely malformed
+            // (e.g. `{"command":"sed -n '958,970p` with no closing quote). Don't
+            // execute them.
+            //
+            // If the cause was the model's context window (not a per-request
+            // max_tokens cap), we have a real recovery path: run an emergency
+            // compaction pass and retry the same iteration with smaller context.
+            // Capped at MAX_CONSECUTIVE_EMERGENCY_COMPACTIONS to prevent infinite
+            // loops if compaction can't free meaningful space.
+            if matches!(finish_reason, Some(FinishReason::Length)) {
+                let total_tokens = (usage.prompt_tokens as u64) + (usage.completion_tokens as u64);
+                let context_full = match provider.context_window() {
+                    Some(window) => {
+                        total_tokens >= (window as u64).saturating_sub(CONTEXT_WINDOW_BUFFER as u64)
+                    }
+                    None => false,
+                };
+
+                tracing::warn!(
+                    agent = %config.id,
+                    iterations = iteration + 1,
+                    response_len = content.len(),
+                    pending_tool_calls = tool_calls.len(),
+                    total_tokens = total_tokens,
+                    context_window = ?provider.context_window(),
+                    context_full = context_full,
+                    consecutive_emergency_compactions = consecutive_emergency_compactions,
+                    "Agent response truncated by max-tokens limit"
+                );
+
+                // Try emergency compaction if: context window was the cause,
+                // we have a compactor, and we haven't exhausted retries.
+                if context_full
+                    && consecutive_emergency_compactions < MAX_CONSECUTIVE_EMERGENCY_COMPACTIONS
+                {
+                    if let (Some(ref mut om), Some(ref compactor)) =
+                        (&mut obs_memory, &config.compactor)
+                    {
+                        let bytes_before: usize =
+                            messages.iter().map(|m| m.byte_count()).sum();
+                        match om.compact_force(&mut messages, compactor.as_ref()).await {
+                            Ok(()) => {
+                                let bytes_after: usize =
+                                    messages.iter().map(|m| m.byte_count()).sum();
+                                if bytes_after < bytes_before {
+                                    tracing::info!(
+                                        agent = %config.id,
+                                        bytes_before = bytes_before,
+                                        bytes_after = bytes_after,
+                                        bytes_freed = bytes_before - bytes_after,
+                                        "Emergency compaction freed space — retrying iteration"
+                                    );
+                                    consecutive_emergency_compactions += 1;
+                                    if let Some(ref handler) = progress {
+                                        handler
+                                            .on_progress(AgentProgressEvent::ObservationComplete {
+                                                agent_name: agent_name.clone(),
+                                                observation_count: om.observation_count(),
+                                                log_bytes: om.observation_log().len(),
+                                            })
+                                            .await;
+                                    }
+                                    continue;
+                                }
+                                tracing::warn!(
+                                    agent = %config.id,
+                                    "Emergency compaction freed no space — surfacing as truncation"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    agent = %config.id,
+                                    error = %e,
+                                    "Emergency compaction failed — surfacing as truncation"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let obs_log = obs_memory
+                    .map(|om| om.into_parts().0)
+                    .unwrap_or_default();
+                return Ok(AgentRunResult::TruncatedByLength {
+                    partial_content: content,
+                    messages,
+                    observation_log: obs_log,
+                    was_context_full: context_full,
+                });
+            }
+
+            // Non-truncated response — reset the emergency-compaction counter so
+            // future truncations later in the same run get a fresh budget.
+            consecutive_emergency_compactions = 0;
 
             // Check for tool calls
             if !tool_calls.is_empty() {
@@ -1487,14 +1615,24 @@ const MAX_STREAM_RETRIES: u32 = 3;
 /// Initial retry delay (doubles each attempt: 1s, 2s, 4s).
 const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Tokens reserved when comparing usage against `Provider::context_window()`.
+/// Providers often stop a few hundred tokens shy of the hard ceiling, and a
+/// strict equality check would miss obvious context-window-full cases.
+const CONTEXT_WINDOW_BUFFER: u32 = 1024;
+
+/// Maximum consecutive emergency-compaction retries within a single agent run.
+/// If we hit truncation twice in a row even after compacting, compaction can't
+/// free enough space — surface a hard error rather than burn through max_turns.
+const MAX_CONSECUTIVE_EMERGENCY_COMPACTIONS: u32 = 2;
+
 /// Run a single iteration using streaming (for progress reporting).
-/// Returns (content, tool_calls, usage, thinking).
+/// Returns (content, tool_calls, usage, thinking, finish_reason).
 async fn run_streaming_iteration(
     provider: &Arc<dyn Provider>,
     agent_name: &str,
     request: CompletionRequest,
     progress: Option<&Arc<dyn AgentProgressHandler>>,
-) -> Result<(String, Vec<crate::message::ToolCall>, Usage, Option<String>), Error> {
+) -> Result<(String, Vec<crate::message::ToolCall>, Usage, Option<String>, Option<FinishReason>), Error> {
     use tracing::debug;
 
     let mut stream = provider.stream(request).await?;
@@ -1504,6 +1642,7 @@ async fn run_streaming_iteration(
     let mut tool_calls: Vec<crate::message::ToolCall> = Vec::new();
     let mut current_tool_call: Option<(String, String, String)> = None;
     let mut usage = Usage::default();
+    let mut finish_reason: Option<FinishReason> = None;
 
     loop {
         match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
@@ -1542,7 +1681,7 @@ async fn run_streaming_iteration(
                             args.push_str(&arguments);
                         }
                     }
-                    Ok(StreamChunk::Done { usage: u }) => {
+                    Ok(StreamChunk::Done { usage: u, finish_reason: fr }) => {
                         // Finish pending tool call
                         if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
                             let args: serde_json::Value =
@@ -1551,6 +1690,9 @@ async fn run_streaming_iteration(
                         }
                         if let Some(u) = u {
                             usage = u;
+                        }
+                        if fr.is_some() {
+                            finish_reason = fr;
                         }
                     }
                     Ok(StreamChunk::Error { message }) => {
@@ -1582,16 +1724,16 @@ async fn run_streaming_iteration(
     } else {
         Some(thinking_content)
     };
-    Ok((content, tool_calls, usage, thinking))
+    Ok((content, tool_calls, usage, thinking, finish_reason))
 }
 
 /// Run a single iteration using non-streaming complete() (when no progress handler).
-/// Returns (content, tool_calls, usage, thinking).
+/// Returns (content, tool_calls, usage, thinking, finish_reason).
 async fn run_complete_iteration(
     provider: &Arc<dyn Provider>,
     config: &AgentConfig,
     mut request: CompletionRequest,
-) -> Result<(String, Vec<crate::message::ToolCall>, Usage, Option<String>), Error> {
+) -> Result<(String, Vec<crate::message::ToolCall>, Usage, Option<String>, Option<FinishReason>), Error> {
     use tracing::debug;
 
     request.stream = false;
@@ -1611,8 +1753,9 @@ async fn run_complete_iteration(
     let tool_calls = response.message.tool_calls;
     let usage = response.usage;
     let thinking = response.thinking;
+    let finish_reason = Some(response.finish_reason);
 
-    Ok((content, tool_calls, usage, thinking))
+    Ok((content, tool_calls, usage, thinking, finish_reason))
 }
 
 /// Maximum bytes for a tool result in agent context.
@@ -1906,5 +2049,351 @@ mod tests {
             RepetitionDetector::canonical_hash("tool", &args1),
             RepetitionDetector::canonical_hash("tool", &args2),
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Truncation handling tests
+    //
+    // Regression tests for the bug where qwen (or any provider) ending a
+    // stream with finish_reason=length silently produced AgentRunResult::
+    // Success { content: "" }. Parent agents had no signal, dispatched
+    // another sub-agent, looped indefinitely.
+    // -------------------------------------------------------------------
+
+    use crate::testing::MockProvider;
+    use crate::tool::ToolRegistry;
+
+    fn empty_tools() -> Arc<ToolRegistry> {
+        Arc::new(ToolRegistry::new())
+    }
+
+    #[tokio::test]
+    async fn truncation_with_empty_response_returns_truncated_by_length() {
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_response_with_finish("", FinishReason::Length);
+        let provider: Arc<dyn Provider> = provider;
+
+        let config = AgentConfig::new("test-agent");
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            vec![Message::user("do a thing")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::TruncatedByLength { partial_content, .. } => {
+                assert_eq!(partial_content, "");
+            }
+            other => panic!("expected TruncatedByLength, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn truncation_with_partial_response_preserves_partial_content() {
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_response_with_finish(
+            "I was about to fix the bug when I got cut off",
+            FinishReason::Length,
+        );
+        let provider: Arc<dyn Provider> = provider;
+
+        let config = AgentConfig::new("test-agent");
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            vec![Message::user("fix the bug")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::TruncatedByLength { partial_content, .. } => {
+                assert!(
+                    partial_content.contains("cut off"),
+                    "partial_content should preserve what the model managed to say"
+                );
+            }
+            other => panic!("expected TruncatedByLength, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_finish_reason_yields_normal_success() {
+        // Sanity check: the truncation path must not fire on normal completion.
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_response_with_finish("done", FinishReason::Stop);
+        let provider: Arc<dyn Provider> = provider;
+
+        let config = AgentConfig::new("test-agent");
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            vec![Message::user("do a thing")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::Success { content, .. } => assert_eq!(content, "done"),
+            other => panic!("expected Success, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn truncation_via_streaming_path_returns_truncated_by_length() {
+        // Verify the streaming code path (run_streaming_iteration) propagates
+        // finish_reason from StreamChunk::Done — distinct from the
+        // non-streaming path which reads CompletionResponse.finish_reason.
+        use crate::message::StreamChunk;
+
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_stream(vec![
+            StreamChunk::Start { model: "mock".into() },
+            StreamChunk::Delta { content: "Let me try the urlparse approach... actually wait,".into() },
+            StreamChunk::Done {
+                usage: None,
+                finish_reason: Some(FinishReason::Length),
+            },
+        ]);
+        let provider: Arc<dyn Provider> = provider;
+
+        // Streaming path requires a progress handler. Use a no-op handler.
+        struct NoopHandler;
+        #[async_trait]
+        impl AgentProgressHandler for NoopHandler {
+            async fn on_progress(&self, _event: AgentProgressEvent) {}
+        }
+        let progress: Arc<dyn AgentProgressHandler> = Arc::new(NoopHandler);
+
+        let config = AgentConfig::new("test-agent");
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            vec![Message::user("fix the bug")],
+            Some(progress),
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::TruncatedByLength { partial_content, .. } => {
+                assert!(partial_content.contains("urlparse"));
+            }
+            other => panic!("expected TruncatedByLength, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Context-window-full recovery: emergency compaction + retry
+    // -------------------------------------------------------------------
+
+    use crate::observation::ObservationConfig;
+    use crate::provider::CompletionResponse;
+    use crate::testing::MockCompactor;
+
+    /// Build a CompletionResponse with the given content, finish_reason, and
+    /// usage so tests can simulate "context window full" responses.
+    fn truncated_response(
+        content: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> CompletionResponse {
+        CompletionResponse {
+            message: Message::assistant(content),
+            thinking: None,
+            usage: Usage::new(prompt_tokens, completion_tokens),
+            model: "mock".to_string(),
+            finish_reason: FinishReason::Length,
+        }
+    }
+
+    fn ok_response(content: &str) -> CompletionResponse {
+        CompletionResponse {
+            message: Message::assistant(content),
+            thinking: None,
+            usage: Usage::new(0, 0),
+            model: "mock".to_string(),
+            finish_reason: FinishReason::Stop,
+        }
+    }
+
+    fn long_messages(count: usize) -> Vec<Message> {
+        // Each message is large enough to exceed the message_threshold so the
+        // emergency compactor has something to drain.
+        (0..count)
+            .map(|i| Message::user(&format!("message {} {}", i, "x".repeat(2_000))))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn context_full_with_compactor_runs_emergency_compaction_and_retries() {
+        // Provider returns: 1) truncated response with usage at context window,
+        // 2) successful response. Agent should detect context-full, force-compact,
+        // retry, and return Success.
+        let provider = Arc::new(
+            crate::testing::MockProvider::new().with_context_window(4_000),
+        );
+        // FIFO queueing: queue_raw_response inserts at index 0, so the most
+        // recently queued response is popped first. Order matters — we want
+        // the truncated response to come out FIRST.
+        provider.queue_raw_response(ok_response("done after compaction"));
+        provider.queue_raw_response(truncated_response("partial...", 3_500, 500));
+        let provider: Arc<dyn Provider> = provider;
+
+        let compactor = Arc::new(MockCompactor::new());
+        compactor.queue_observe(Ok("- saw a thing".to_string()));
+        let compactor: Arc<dyn ContextCompactor> = compactor;
+
+        let config = AgentConfig::new("test-agent")
+            .with_compactor(Arc::clone(&compactor))
+            .with_observation_config(ObservationConfig {
+                message_threshold_bytes: 1_000,
+                observation_threshold_bytes: 1_000_000,
+                preserve_recent: 2,
+                hysteresis: 1.0,
+                context_budget_bytes: None,
+            });
+
+        // Pre-load enough messages that compact_force has something meaningful
+        // to drain (preserve_recent=2 keeps the last two; everything before is
+        // observable).
+        let context = long_messages(10);
+
+        let result = Agent::run_once(provider, empty_tools(), config, context)
+            .await
+            .expect("agent run should not error");
+
+        assert_eq!(result, "done after compaction");
+    }
+
+    #[tokio::test]
+    async fn context_full_without_compactor_surfaces_truncation() {
+        // No compactor configured — agent should surface TruncatedByLength
+        // immediately with `was_context_full=true` so the parent knows the
+        // task hit the context wall (not a per-request max_tokens cap).
+        let provider = Arc::new(
+            crate::testing::MockProvider::new().with_context_window(4_000),
+        );
+        provider.queue_raw_response(truncated_response("", 3_500, 500));
+        let provider: Arc<dyn Provider> = provider;
+
+        let config = AgentConfig::new("test-agent");
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            vec![Message::user("do a thing")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::TruncatedByLength { was_context_full, .. } => {
+                assert!(
+                    was_context_full,
+                    "should detect context window exhaustion via usage vs context_window()"
+                );
+            }
+            other => panic!("expected TruncatedByLength, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn max_tokens_cap_hit_does_not_trigger_compaction() {
+        // total_tokens (1000) is well below context_window (128_000), so this
+        // is a per-request max_tokens cap, not context-window exhaustion.
+        // Compaction should NOT run and the variant must report
+        // `was_context_full=false` so the parent gets the right advice.
+        let provider = Arc::new(
+            crate::testing::MockProvider::new().with_context_window(128_000),
+        );
+        provider.queue_raw_response(truncated_response("partial", 500, 500));
+        let provider: Arc<dyn Provider> = provider;
+
+        // Even with a compactor available, a non-context-full truncation must
+        // not invoke it.
+        let compactor = Arc::new(MockCompactor::new());
+        let compactor: Arc<dyn ContextCompactor> = compactor.clone();
+        let config = AgentConfig::new("test-agent").with_compactor(Arc::clone(&compactor));
+
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            vec![Message::user("be brief")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::TruncatedByLength { was_context_full, .. } => {
+                assert!(
+                    !was_context_full,
+                    "max_tokens cap should report was_context_full=false"
+                );
+            }
+            other => panic!("expected TruncatedByLength, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn consecutive_emergency_compactions_capped() {
+        // Every response truncates with context-window-full usage. After
+        // MAX_CONSECUTIVE_EMERGENCY_COMPACTIONS retries, the loop must give up
+        // and surface TruncatedByLength rather than burn through max_turns.
+        let provider = Arc::new(
+            crate::testing::MockProvider::new().with_context_window(4_000),
+        );
+        // Queue many — agent will pop until cap, then surface error.
+        for _ in 0..5 {
+            provider.queue_raw_response(truncated_response("...", 3_500, 500));
+        }
+        let provider: Arc<dyn Provider> = provider;
+
+        let compactor = Arc::new(MockCompactor::new());
+        // Each compaction returns a non-empty observation so compact_force
+        // actually drains and bytes_after < bytes_before.
+        for _ in 0..5 {
+            compactor.queue_observe(Ok("- drain".to_string()));
+        }
+        let compactor: Arc<dyn ContextCompactor> = compactor;
+
+        let config = AgentConfig::new("test-agent")
+            .with_compactor(Arc::clone(&compactor))
+            .with_observation_config(ObservationConfig {
+                message_threshold_bytes: 1_000,
+                observation_threshold_bytes: 1_000_000,
+                preserve_recent: 2,
+                hysteresis: 1.0,
+                context_budget_bytes: None,
+            });
+
+        let result = Agent::run_once_with_progress(
+            provider,
+            empty_tools(),
+            config,
+            long_messages(20),
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        match result {
+            AgentRunResult::TruncatedByLength { was_context_full, .. } => {
+                assert!(was_context_full);
+            }
+            other => panic!("expected TruncatedByLength after cap, got {:?}", other),
+        }
     }
 }

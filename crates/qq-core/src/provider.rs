@@ -5,7 +5,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::message::{Message, StreamChunk, Usage};
+use crate::message::{FinishReason, Message, StreamChunk, Usage};
 use crate::tool::ToolDefinition;
 
 pub type StreamResult = Pin<Box<dyn Stream<Item = Result<StreamChunk, Error>> + Send>>;
@@ -118,16 +118,6 @@ pub struct CompletionResponse {
     pub usage: Usage,
     pub model: String,
     pub finish_reason: FinishReason,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FinishReason {
-    Stop,
-    Length,
-    ToolCalls,
-    ContentFilter,
-    Error,
 }
 
 #[async_trait]

@@ -506,6 +506,19 @@ impl Usage {
     }
 }
 
+/// Why the model stopped generating. Mirrors the OpenAI / Anthropic / Gemini
+/// `finish_reason` semantics so the agent loop can distinguish "model is done"
+/// from "model was cut off mid-response by max-tokens".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+    Error,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     Start {
@@ -526,6 +539,8 @@ pub enum StreamChunk {
     },
     Done {
         usage: Option<Usage>,
+        /// Why the model stopped. `None` if the provider didn't surface a reason.
+        finish_reason: Option<FinishReason>,
     },
     Error {
         message: String,

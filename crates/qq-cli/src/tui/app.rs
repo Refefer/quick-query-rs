@@ -426,14 +426,25 @@ impl TuiApp {
             StreamEvent::ToolCallDelta { arguments: _ } => {
                 // We don't update args preview in real-time to avoid noise
             }
-            StreamEvent::Done { usage, content: _ } => {
+            StreamEvent::Done { usage, content: _, finish_reason } => {
                 self.is_streaming = false;
                 self.streaming_state = StreamingState::Idle;
                 if let Some(u) = usage {
                     self.prompt_tokens = u.prompt_tokens;
                     self.completion_tokens = u.completion_tokens;
                 }
-                self.status_message = None;
+                // Tell the user when the model was cut off by max-tokens.
+                // Surfaced as a status message rather than auto-retrying — budget
+                // exhaustion is not transient.
+                self.status_message = if matches!(finish_reason, Some(qq_core::FinishReason::Length)) {
+                    Some(
+                        "Response truncated: model hit max output tokens. \
+                         The assistant may not have finished — re-prompt or split the task."
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
             }
             StreamEvent::SessionUpdate { messages: _ } => {
                 // Session updates are handled in the main loop
@@ -1015,7 +1026,7 @@ pub async fn run_tui(
         // Check for stream events first (non-blocking)
         while let Ok(event) = stream_rx.try_recv() {
             match &event {
-                StreamEvent::Done { usage: _, content } => {
+                StreamEvent::Done { usage: _, content, finish_reason: _ } => {
                     // Strip reasoning from all prior messages before adding final answer
                     qq_core::message::strip_reasoning_from_history(&mut session.messages);
                     // Add assistant response to session
@@ -2305,6 +2316,7 @@ async fn run_streaming_completion(
                 .send(StreamEvent::Done {
                     usage: Some(response.usage),
                     content: content.clone(),
+                    finish_reason: Some(response.finish_reason),
                 })
                 .await;
             return;
@@ -2395,7 +2407,7 @@ async fn run_streaming_completion(
                                 }
                                 let _ = tx.send(StreamEvent::ToolCallDelta { arguments }).await;
                             }
-                            Ok(Some(Ok(StreamChunk::Done { usage }))) => {
+                            Ok(Some(Ok(StreamChunk::Done { usage, finish_reason }))) => {
                                 // Finish pending tool call
                                 if let Some((tc_id, tc_name, tc_args)) = current_tool_call.take() {
                                     let args: serde_json::Value =
@@ -2423,6 +2435,7 @@ async fn run_streaming_completion(
                                         .send(StreamEvent::Done {
                                             usage,
                                             content: content.clone(),
+                                            finish_reason,
                                         })
                                         .await;
                                     return;
@@ -2653,6 +2666,7 @@ async fn run_streaming_completion(
             .send(StreamEvent::Done {
                 usage: None,
                 content: content.clone(),
+                finish_reason: None,
             })
             .await;
         return;
@@ -2776,6 +2790,7 @@ mod tests {
         app.handle_stream_event(StreamEvent::Done {
             usage: None,
             content: "Right — actually let me try Y".into(),
+            finish_reason: None,
         });
         assert!(app.content.ends_with("Right — actually let me try Y"));
         assert!(!app.content.contains("Right — let me try X"));

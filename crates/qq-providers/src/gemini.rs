@@ -16,6 +16,17 @@ use qq_core::{
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
+/// Parse Gemini's `finishReason` string into the cross-provider enum.
+/// Returns `None` for unknown values so callers can decide on a default.
+fn parse_finish_reason(reason: Option<&str>) -> Option<FinishReason> {
+    match reason {
+        Some("STOP") => Some(FinishReason::Stop),
+        Some("MAX_TOKENS") => Some(FinishReason::Length),
+        Some("SAFETY") | Some("RECITATION") => Some(FinishReason::ContentFilter),
+        _ => None,
+    }
+}
+
 pub struct GeminiProvider {
     client: Client,
     api_key: String,
@@ -303,13 +314,8 @@ impl GeminiProvider {
             Message::assistant_with_tool_calls(content_text, tool_calls)
         };
 
-        let finish_reason = match candidate.finish_reason.as_deref() {
-            Some("STOP") => FinishReason::Stop,
-            Some("MAX_TOKENS") => FinishReason::Length,
-            Some("SAFETY") => FinishReason::ContentFilter,
-            Some("RECITATION") => FinishReason::ContentFilter,
-            _ => FinishReason::Stop,
-        };
+        let finish_reason = parse_finish_reason(candidate.finish_reason.as_deref())
+            .unwrap_or(FinishReason::Stop);
 
         let usage = response
             .usage_metadata
@@ -564,8 +570,9 @@ impl Provider for GeminiProvider {
                                         // Check for finish reason
                                         if let Some(ref reason) = candidate.finish_reason {
                                             debug!(finish_reason = %reason, "Gemini stream complete");
+                                            let finish_reason = parse_finish_reason(Some(reason));
                                             let _ = tx
-                                                .send(Ok(StreamChunk::Done { usage: usage.clone() }))
+                                                .send(Ok(StreamChunk::Done { usage: usage.clone(), finish_reason }))
                                                 .await;
                                         }
                                     }
@@ -1001,5 +1008,20 @@ mod tests {
         let request = CompletionRequest::new(vec![Message::user("Hello")])
             .with_model("gemini-2.0-flash");
         assert_eq!(provider.resolve_model(&request), "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn parse_finish_reason_maps_known_values() {
+        assert_eq!(parse_finish_reason(Some("STOP")), Some(FinishReason::Stop));
+        assert_eq!(parse_finish_reason(Some("MAX_TOKENS")), Some(FinishReason::Length));
+        assert_eq!(parse_finish_reason(Some("SAFETY")), Some(FinishReason::ContentFilter));
+        assert_eq!(parse_finish_reason(Some("RECITATION")), Some(FinishReason::ContentFilter));
+    }
+
+    #[test]
+    fn parse_finish_reason_returns_none_for_unknown() {
+        assert_eq!(parse_finish_reason(None), None);
+        assert_eq!(parse_finish_reason(Some("")), None);
+        assert_eq!(parse_finish_reason(Some("OTHER")), None);
     }
 }

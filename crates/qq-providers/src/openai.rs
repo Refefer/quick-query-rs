@@ -16,6 +16,18 @@ use qq_core::{
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
+/// Parse OpenAI's `finish_reason` string into the cross-provider enum.
+/// Returns `None` for unknown values so callers can decide on a default.
+fn parse_finish_reason(reason: Option<&str>) -> Option<FinishReason> {
+    match reason {
+        Some("stop") => Some(FinishReason::Stop),
+        Some("length") => Some(FinishReason::Length),
+        Some("tool_calls") => Some(FinishReason::ToolCalls),
+        Some("content_filter") => Some(FinishReason::ContentFilter),
+        _ => None,
+    }
+}
+
 pub struct OpenAIProvider {
     client: Client,
     api_key: String,
@@ -269,13 +281,8 @@ impl OpenAIProvider {
             Message::assistant_with_tool_calls(content, tool_calls)
         };
 
-        let finish_reason = match choice.finish_reason.as_deref() {
-            Some("stop") => FinishReason::Stop,
-            Some("length") => FinishReason::Length,
-            Some("tool_calls") => FinishReason::ToolCalls,
-            Some("content_filter") => FinishReason::ContentFilter,
-            _ => FinishReason::Stop,
-        };
+        let finish_reason = parse_finish_reason(choice.finish_reason.as_deref())
+            .unwrap_or(FinishReason::Stop);
 
         let usage = response.usage.map(|u| Usage::new(u.prompt_tokens, u.completion_tokens));
 
@@ -402,7 +409,7 @@ impl Provider for OpenAIProvider {
                     Ok(Event::Message(msg)) => {
                         if msg.data == "[DONE]" {
                             debug!("SSE stream complete");
-                            let _ = tx.send(Ok(StreamChunk::Done { usage: None })).await;
+                            let _ = tx.send(Ok(StreamChunk::Done { usage: None, finish_reason: None })).await;
                             break;
                         }
 
@@ -474,6 +481,7 @@ impl Provider for OpenAIProvider {
                                         let usage = response.usage.as_ref().map(|u| {
                                             Usage::new(u.prompt_tokens, u.completion_tokens)
                                         });
+                                        let finish_reason = parse_finish_reason(Some(reason));
                                         debug!(
                                             finish_reason = %reason,
                                             prompt_tokens = ?usage.as_ref().map(|u| u.prompt_tokens),
@@ -481,7 +489,7 @@ impl Provider for OpenAIProvider {
                                             "LLM stream response complete"
                                         );
                                         // Final send - don't need to check error since we're done anyway
-                                        let _ = tx.send(Ok(StreamChunk::Done { usage })).await;
+                                        let _ = tx.send(Ok(StreamChunk::Done { usage, finish_reason })).await;
                                     }
                                 }
                             }
@@ -927,5 +935,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parse_finish_reason_maps_known_values() {
+        assert_eq!(parse_finish_reason(Some("stop")), Some(FinishReason::Stop));
+        assert_eq!(parse_finish_reason(Some("length")), Some(FinishReason::Length));
+        assert_eq!(parse_finish_reason(Some("tool_calls")), Some(FinishReason::ToolCalls));
+        assert_eq!(parse_finish_reason(Some("content_filter")), Some(FinishReason::ContentFilter));
+    }
+
+    #[test]
+    fn parse_finish_reason_returns_none_for_unknown() {
+        assert_eq!(parse_finish_reason(None), None);
+        assert_eq!(parse_finish_reason(Some("")), None);
+        assert_eq!(parse_finish_reason(Some("function_call")), None);
     }
 }

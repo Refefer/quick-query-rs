@@ -18,6 +18,17 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
+/// Parse Anthropic's `stop_reason` string into the cross-provider enum.
+/// Returns `None` for unknown values so callers can decide on a default.
+fn parse_stop_reason(reason: Option<&str>) -> Option<FinishReason> {
+    match reason {
+        Some("end_turn") | Some("stop") => Some(FinishReason::Stop),
+        Some("max_tokens") => Some(FinishReason::Length),
+        Some("tool_use") => Some(FinishReason::ToolCalls),
+        _ => None,
+    }
+}
+
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
@@ -321,12 +332,8 @@ impl AnthropicProvider {
             Message::assistant_with_tool_calls(content_text, tool_calls)
         };
 
-        let finish_reason = match response.stop_reason.as_deref() {
-            Some("end_turn") | Some("stop") => FinishReason::Stop,
-            Some("max_tokens") => FinishReason::Length,
-            Some("tool_use") => FinishReason::ToolCalls,
-            _ => FinishReason::Stop,
-        };
+        let finish_reason = parse_stop_reason(response.stop_reason.as_deref())
+            .unwrap_or(FinishReason::Stop);
 
         let usage = Usage::new(
             response.usage.input_tokens,
@@ -562,10 +569,11 @@ impl Provider for AnthropicProvider {
                                         u.input_tokens.unwrap_or(0),
                                         u.output_tokens.unwrap_or(0),
                                     ));
+                                    let finish_reason = parse_stop_reason(event.delta.stop_reason.as_deref());
                                     if let Some(ref reason) = event.delta.stop_reason {
                                         debug!(stop_reason = %reason, "Anthropic stream message_delta");
                                     }
-                                    let _ = tx.send(Ok(StreamChunk::Done { usage })).await;
+                                    let _ = tx.send(Ok(StreamChunk::Done { usage, finish_reason })).await;
                                 }
                             }
                             "message_stop" => {
@@ -986,5 +994,20 @@ mod tests {
         let models = provider.available_models();
         assert!(models.contains(&"claude-sonnet-4-20250514"));
         assert!(models.contains(&"claude-opus-4-20250514"));
+    }
+
+    #[test]
+    fn parse_stop_reason_maps_known_values() {
+        assert_eq!(parse_stop_reason(Some("end_turn")), Some(FinishReason::Stop));
+        assert_eq!(parse_stop_reason(Some("stop")), Some(FinishReason::Stop));
+        assert_eq!(parse_stop_reason(Some("max_tokens")), Some(FinishReason::Length));
+        assert_eq!(parse_stop_reason(Some("tool_use")), Some(FinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn parse_stop_reason_returns_none_for_unknown() {
+        assert_eq!(parse_stop_reason(None), None);
+        assert_eq!(parse_stop_reason(Some("")), None);
+        assert_eq!(parse_stop_reason(Some("pause_turn")), None);
     }
 }
