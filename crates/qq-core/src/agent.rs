@@ -72,36 +72,64 @@ pub enum AgentRunResult {
 /// Default repetition threshold: block after this many identical calls.
 const REPETITION_THRESHOLD: usize = 3;
 
-/// Detects when an agent is stuck calling the same tool with the same arguments.
+/// Default tool fatigue threshold: warn after this many calls to the same tool.
+const TOOL_FATIGUE_THRESHOLD: usize = 5;
+
+/// Detects when an agent is stuck calling the same tool with similar arguments.
 ///
-/// Tracks total invocations per `(tool_name, canonical_args)` hash. When any
-/// call exceeds the threshold, it is soft-blocked (error returned to LLM).
-/// When ALL calls in an iteration are blocked, the agent is hard-terminated.
+/// Two detection modes:
+/// 1. **Exact match** — blocks repeated `(tool_name, canonical_args)` hashes.
+/// 2. **Tool fatigue** — warns (then blocks) when a single tool has been called
+///    N+ times across iterations, even with different arguments.
 struct RepetitionDetector {
     /// hash(tool_name, canonical_args) -> total call count
     call_counts: HashMap<u64, usize>,
+    /// tool_name -> total calls across all iterations
+    tool_call_counts: HashMap<String, usize>,
     threshold: usize,
+    fatigue_threshold: usize,
 }
 
 impl RepetitionDetector {
     fn new() -> Self {
         Self {
             call_counts: HashMap::new(),
+            tool_call_counts: HashMap::new(),
             threshold: REPETITION_THRESHOLD,
+            fatigue_threshold: TOOL_FATIGUE_THRESHOLD,
         }
     }
 
-    /// Check whether this tool call is a repetition. Increments the counter.
-    /// Returns `Some(count)` if blocked (count >= threshold), `None` if allowed.
-    fn check(&mut self, tool_name: &str, arguments: &serde_json::Value) -> Option<usize> {
+    /// Check whether this tool call is a repetition or shows tool fatigue.
+    /// Returns `Some(result)` if blocked/warned, `None` if allowed.
+    fn check(&mut self, tool_name: &str, arguments: &serde_json::Value) -> Option<String> {
+        // Track total calls per tool name (cross-iteration)
+        let total_for_tool = self.tool_call_counts.entry(tool_name.to_string()).or_insert(0);
+        *total_for_tool += 1;
+
+        // Exact match detection
         let hash = Self::canonical_hash(tool_name, arguments);
         let count = self.call_counts.entry(hash).or_insert(0);
         *count += 1;
         if *count >= self.threshold {
-            Some(*count)
-        } else {
-            None
+            return Some(format!(
+                "Error: You have called '{}' with identical arguments {} times. \n\
+                 The result will not change. Try a different approach or provide your final response.",
+                tool_name, *count
+            ));
         }
+
+        // Tool fatigue detection: same tool called many times with different args
+        if *total_for_tool >= self.fatigue_threshold {
+            return Some(format!(
+                "Warning: You have called '{}' {} times across your investigation. \n\
+                 If these calls are not producing new information, consider a different strategy \n\
+                 or synthesize what you've already found.",
+                tool_name, *total_for_tool
+            ));
+        }
+
+        None
     }
 
     /// Compute a deterministic hash of (tool_name, arguments) with sorted JSON keys.
@@ -990,7 +1018,10 @@ impl Agent {
                         system_content.push_str("\n\n");
                     }
                     system_content.push_str(&format!(
-                        "## Observation Log (prior context)\n\n{}",
+                        "## Investigation Summary\n\n\
+                     The following are findings from investigation steps that have already been completed.\n\
+                     Do NOT re-investigate these topics or call tools with similar arguments.\n\
+                     Build on these findings instead of repeating them.\n\n{}",
                         obs_log
                     ));
                 }
@@ -1286,12 +1317,12 @@ impl Agent {
                         continue;
                     }
 
-                    // Check repetition detector
-                    if let Some(rep_count) = repetition_detector.check(&tool_call.name, &tool_call.arguments) {
+                    // Check repetition detector (exact match + tool fatigue)
+                    if let Some(rep_message) = repetition_detector.check(&tool_call.name, &tool_call.arguments) {
                         debug!(
                             agent = %config.id,
                             tool = %tool_call.name,
-                            count = rep_count,
+                            message = %rep_message,
                             "Repetitive tool call detected"
                         );
 
@@ -1305,11 +1336,7 @@ impl Agent {
                                 .await;
                         }
 
-                        let result = format!(
-                            "Error: You have called '{}' with identical arguments {} times. \
-                            The result will not change. Try a different approach or provide your final response.",
-                            tool_call.name, rep_count
-                        );
+                        let result = truncate_tool_result(rep_message, MAX_AGENT_TOOL_RESULT_BYTES);
 
                         if let Some(ref handler) = progress {
                             handler
@@ -1995,7 +2022,9 @@ mod tests {
         detector.check("web_search", &args); // 1
         detector.check("web_search", &args); // 2
         let result = detector.check("web_search", &args); // 3
-        assert_eq!(result, Some(3));
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("identical arguments 3 times"));
     }
 
     #[test]
@@ -2019,6 +2048,36 @@ mod tests {
         detector.check("write_file", &args);
         // read_file at 2, write_file at 1 — neither at threshold
         assert!(detector.check("write_file", &args).is_none());
+    }
+
+    #[test]
+    fn test_repetition_detector_tool_fatigue() {
+        let mut detector = RepetitionDetector::new();
+        // Call the same tool 5 times with different arguments — should trigger fatigue warning
+        for i in 0..4 {
+            let args = serde_json::json!({"query": format!("search variant {}", i)});
+            assert!(detector.check("web_search", &args).is_none(), "iteration {}", i);
+        }
+        // 5th call triggers fatigue warning
+        let args = serde_json::json!({"query": "search variant 4"});
+        let result = detector.check("web_search", &args);
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("web_search"));
+        assert!(msg.contains("5 times"));
+    }
+
+    #[test]
+    fn test_repetition_detector_fatigue_per_tool() {
+        let mut detector = RepetitionDetector::new();
+        // web_search called 5 times, read_file called 2 times — only web_search fatigued
+        for i in 0..5 {
+            let args = serde_json::json!({"query": format!("q{}", i)});
+            detector.check("web_search", &args);
+        }
+        // read_file should still be fine
+        let args = serde_json::json!({"path": "foo.rs"});
+        assert!(detector.check("read_file", &args).is_none());
     }
 
     #[test]

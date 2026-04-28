@@ -43,6 +43,14 @@ Produce a dated, prioritized observation log using this exact format:
 - Medium: Implementation details, tool results, intermediate findings, code patterns identified, dependencies noted
 - Low: Exploratory actions, routine file reads, minor clarifications, navigation steps, standard boilerplate
 
+## Deduplication (when Prior Observations are provided)
+
+If you receive "Prior Observations" before the new messages:
+1. Review every prior observation BEFORE writing new ones.
+2. Do NOT emit a new observation if its finding is already captured in prior observations.
+3. If a new message contains updated information about an existing topic, note the update rather than repeating the original finding.
+4. Only output NEW findings — the goal is to grow the log with unique information, not repeat what's already there.
+
 ## Rules
 
 1. Each observation captures ONE specific event, decision, or finding
@@ -105,11 +113,26 @@ impl LlmCompactor {
 #[async_trait]
 impl ContextCompactor for LlmCompactor {
     async fn observe(&self, messages: &[Message]) -> Result<String, Error> {
+        self.observe_with_prior(messages, None).await
+    }
+
+    async fn observe_with_prior(
+        &self,
+        messages: &[Message],
+        prior_observations: Option<&str>,
+    ) -> Result<String, Error> {
         let date = self.current_date();
         let system = OBSERVER_PROMPT.replace("{current_date}", &date);
 
         // Format messages into a readable representation for the LLM
         let mut formatted = String::new();
+
+        if let Some(prior) = prior_observations {
+            formatted.push_str("## Prior Observations (review these first to avoid duplicates)\n\n");
+            formatted.push_str(prior);
+            formatted.push_str("\n\n---\n\n[NEW MESSAGES TO OBSERVE]\n\n");
+        }
+
         for msg in messages {
             let role = msg.role.to_string();
             let content = msg.content.to_string_lossy();
