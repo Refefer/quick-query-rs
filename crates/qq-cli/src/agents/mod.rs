@@ -22,7 +22,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use qq_core::{Agent, AgentConfig, Provider, ToolRegistry};
+use qq_core::{Agent, AgentConfig, ToolRegistry};
+
+use crate::profile_registry::SharedProfileRegistry;
 
 /// The agent executor manages both internal and external agents.
 pub struct AgentExecutor {
@@ -32,8 +34,8 @@ pub struct AgentExecutor {
     external_agents: AgentsConfig,
     /// Available tools registry
     tools: Arc<ToolRegistry>,
-    /// Provider for LLM calls
-    provider: Arc<dyn Provider>,
+    /// Profile registry (resolved per-agent at run time).
+    profile_registry: SharedProfileRegistry,
     /// Enabled agents filter (None = all enabled)
     enabled_agents: Option<Vec<String>>,
 }
@@ -41,7 +43,7 @@ pub struct AgentExecutor {
 impl AgentExecutor {
     /// Create a new agent executor.
     pub fn new(
-        provider: Arc<dyn Provider>,
+        profile_registry: SharedProfileRegistry,
         tools: ToolRegistry,
         external_config: AgentsConfig,
         enabled_agents: Option<Vec<String>>,
@@ -57,7 +59,7 @@ impl AgentExecutor {
             internal_agents,
             external_agents: external_config,
             tools: Arc::new(tools),
-            provider,
+            profile_registry,
             enabled_agents,
         }
     }
@@ -126,7 +128,7 @@ impl AgentExecutor {
 
         // Try external agent
         if let Some(external) = self.external_agents.get(agent_name) {
-            return self.run_external(external, task).await;
+            return self.run_external(agent_name, external, task).await;
         }
 
         anyhow::bail!("Unknown agent: {}", agent_name);
@@ -154,20 +156,24 @@ impl AgentExecutor {
         // Build context with the task
         let context = vec![qq_core::Message::user(task)];
 
+        // Resolve provider for this agent (override or default).
+        let provider = Arc::clone(
+            &self
+                .profile_registry
+                .read()
+                .await
+                .for_agent(agent.name())
+                .provider,
+        );
+
         // Run the agent
-        let result = Agent::run_once(
-            Arc::clone(&self.provider),
-            agent_tools,
-            config,
-            context,
-        )
-        .await?;
+        let result = Agent::run_once(provider, agent_tools, config, context).await?;
 
         Ok(result)
     }
 
     /// Run an external agent.
-    async fn run_external(&self, def: &AgentDefinition, task: &str) -> Result<String> {
+    async fn run_external(&self, name: &str, def: &AgentDefinition, task: &str) -> Result<String> {
         // Parse external agent tool entries as patterns, then resolve
         let patterns: Vec<qq_core::ToolPattern> = def.tools.iter()
             .map(|s| qq_core::ToolPattern::parse(s))
@@ -183,15 +189,18 @@ impl AgentExecutor {
         // Build context with the task
         let context = vec![qq_core::Message::user(task)];
 
+        // Resolve provider for this agent (override or default).
+        let provider = Arc::clone(
+            &self
+                .profile_registry
+                .read()
+                .await
+                .for_agent(name)
+                .provider,
+        );
+
         // Run the agent
-        // Note: In the future, we could support provider/model overrides per external agent
-        let result = Agent::run_once(
-            Arc::clone(&self.provider),
-            agent_tools,
-            config,
-            context,
-        )
-        .await?;
+        let result = Agent::run_once(provider, agent_tools, config, context).await?;
 
         Ok(result)
     }

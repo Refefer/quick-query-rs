@@ -126,6 +126,32 @@ impl ThinkingBuffer {
         result.push_str(&self.partial);
         result
     }
+
+    /// Capture the current size for later rollback via `restore_to`.
+    pub fn snapshot(&self) -> ThinkingSnapshot {
+        ThinkingSnapshot {
+            line_count: self.lines.len(),
+            partial: self.partial.clone(),
+        }
+    }
+
+    /// Truncate the buffer back to a previously taken snapshot.
+    ///
+    /// If MAX_LINES eviction has occurred since the snapshot, some original
+    /// lines may have been lost; the restore is best-effort in that case.
+    pub fn restore_to(&mut self, snap: &ThinkingSnapshot) {
+        while self.lines.len() > snap.line_count {
+            self.lines.pop_back();
+        }
+        self.partial = snap.partial.clone();
+    }
+}
+
+/// Position marker in a `ThinkingBuffer`, captured by `snapshot`.
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingSnapshot {
+    line_count: usize,
+    partial: String,
 }
 
 /// State of the LLM request/response cycle
@@ -144,6 +170,45 @@ pub enum StreamingState {
 
 /// Maximum size for the TUI content display string (2MB)
 const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
+/// What the user is reassigning in the `/profiles` picker.
+#[derive(Debug, Clone)]
+pub enum ProfilesTarget {
+    /// The default chat session (and any agent without an explicit override).
+    Default,
+    /// A specific named agent.
+    Agent(String),
+}
+
+/// One row in the target list (stage 1).
+#[derive(Debug, Clone)]
+pub struct ProfilesTargetItem {
+    pub target: ProfilesTarget,
+    /// Profile currently assigned to this target.
+    pub current_profile: String,
+    /// For the `Default` row, the primary agent that actually runs the
+    /// top-level chat (so the user sees e.g. "pm (default chat)" rather than
+    /// just "(default chat)" and knows what they're switching).
+    pub primary_agent: Option<String>,
+}
+
+/// Two-stage picker for `/profiles`.
+#[derive(Debug, Clone)]
+pub enum ProfilesPickerStage {
+    /// Stage 1: choose the target whose profile assignment to change.
+    PickTarget {
+        items: Vec<ProfilesTargetItem>,
+        cursor: usize,
+    },
+    /// Stage 2: choose the profile to assign to `target`.
+    PickProfile {
+        target: ProfilesTarget,
+        profiles: Vec<String>,
+        /// Profile currently assigned (for highlight only).
+        current_profile: String,
+        cursor: usize,
+    },
+}
 
 /// TUI Application state
 pub struct TuiApp {
@@ -214,6 +279,18 @@ pub struct TuiApp {
 
     /// Pending image/content attachments for the next message
     pub pending_content: Vec<TypedContent>,
+
+    /// Active `/profiles` picker overlay. None when the picker isn't open.
+    pub profiles_picker: Option<ProfilesPickerStage>,
+
+    // Anchors marking where to truncate display state on a mid-iteration
+    // stream retry. Without these, deltas from a failed attempt remain
+    // appended to `content` / `thinking_content` / `tool_notifications`,
+    // so the retry's regenerated output stacks on top of them and the user
+    // sees the same response repeated with subtle wording variations.
+    iteration_content_anchor: usize,
+    iteration_thinking_anchor: ThinkingSnapshot,
+    iteration_tool_notif_anchor: usize,
 }
 
 impl Default for TuiApp {
@@ -256,6 +333,10 @@ impl TuiApp {
             pending_approval: None,
             denial_reason_input: None,
             pending_content: Vec::new(),
+            profiles_picker: None,
+            iteration_content_anchor: 0,
+            iteration_thinking_anchor: ThinkingSnapshot::default(),
+            iteration_tool_notif_anchor: 0,
         }
     }
 
@@ -304,6 +385,13 @@ impl TuiApp {
         self.agent_progress = None;
         self.agent_input_bytes = 0;
         self.agent_output_bytes = 0;
+
+        // Anchor display state to "just after the Assistant header" so a stream
+        // retry on iteration 1 (before any IterationStart event arrives) rolls
+        // back only the in-progress assistant text, not the user echo or header.
+        self.iteration_content_anchor = self.content.len();
+        self.iteration_thinking_anchor = self.thinking_content.snapshot();
+        self.iteration_tool_notif_anchor = self.tool_notifications.len();
     }
 
     /// Handle a stream event
@@ -390,6 +478,11 @@ impl TuiApp {
             StreamEvent::IterationStart { iteration } => {
                 self.tool_iteration = iteration;
                 self.streaming_state = StreamingState::Asking;
+                // Re-anchor at the iteration boundary so a mid-iteration retry
+                // rolls back only this iteration's failed-attempt deltas.
+                self.iteration_content_anchor = self.content.len();
+                self.iteration_thinking_anchor = self.thinking_content.snapshot();
+                self.iteration_tool_notif_anchor = self.tool_notifications.len();
             }
             StreamEvent::ByteCount {
                 input_bytes,
@@ -404,6 +497,23 @@ impl TuiApp {
                 max_retries,
                 error,
             } => {
+                // Roll display state back to the iteration anchor so the failed
+                // attempt's deltas don't visually stack on top of the retry's
+                // regenerated output. The backend already cleared its own
+                // accumulators (see streaming_completion's stream_retry loop),
+                // so the message that ends up in session history is correct;
+                // this restores the same correctness in the display.
+                let target = self
+                    .iteration_content_anchor
+                    .min(self.content.len());
+                self.content.truncate(target);
+                self.thinking_content
+                    .restore_to(&self.iteration_thinking_anchor);
+                let notif_target = self
+                    .iteration_tool_notif_anchor
+                    .min(self.tool_notifications.len());
+                self.tool_notifications.truncate(notif_target);
+                self.content_dirty = true;
                 self.status_message = Some(format!(
                     "Transport error, retrying ({}/{})... {}",
                     attempt, max_retries, error
@@ -788,9 +898,13 @@ pub async fn run_tui(
     cli: &Cli,
     _config: &AppConfig,
     provider: Arc<dyn Provider>,
+    profile_registry: crate::profile_registry::SharedProfileRegistry,
     system_prompt: Option<String>,
     tools_registry: ToolRegistry,
-    extra_params: std::collections::HashMap<String, serde_json::Value>,
+    // Profile-level extra parameters are now read fresh from the registry on
+    // each turn, so this argument is retained only for backward signature
+    // compatibility with callers that haven't migrated.
+    _extra_params: std::collections::HashMap<String, serde_json::Value>,
     profile_name: String,
     primary_agent: String,
     agent_executor: Option<Arc<RwLock<AgentExecutor>>>,
@@ -1046,6 +1160,110 @@ pub async fn run_tui(
                         continue;
                     }
 
+                    // Handle /profiles picker overlay
+                    if app.profiles_picker.is_some() {
+                        use crossterm::event::KeyCode;
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.profiles_picker = None;
+                            }
+                            KeyCode::Up => {
+                                if let Some(ref mut stage) = app.profiles_picker {
+                                    let cursor = match stage {
+                                        ProfilesPickerStage::PickTarget { cursor, .. } => cursor,
+                                        ProfilesPickerStage::PickProfile { cursor, .. } => cursor,
+                                    };
+                                    if *cursor > 0 {
+                                        *cursor -= 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Down => {
+                                if let Some(ref mut stage) = app.profiles_picker {
+                                    let (cursor, len) = match stage {
+                                        ProfilesPickerStage::PickTarget { items, cursor } => {
+                                            (cursor, items.len())
+                                        }
+                                        ProfilesPickerStage::PickProfile { profiles, cursor, .. } => {
+                                            (cursor, profiles.len())
+                                        }
+                                    };
+                                    if *cursor + 1 < len {
+                                        *cursor += 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let stage = app.profiles_picker.take();
+                                match stage {
+                                    Some(ProfilesPickerStage::PickTarget { items, cursor }) => {
+                                        if let Some(item) = items.get(cursor) {
+                                            let target = item.target.clone();
+                                            let current = item.current_profile.clone();
+                                            let profiles = profile_registry.read().await.list_profile_names();
+                                            // Place the cursor on the currently-assigned profile
+                                            let cur = profiles
+                                                .iter()
+                                                .position(|p| p == &current)
+                                                .unwrap_or(0);
+                                            app.profiles_picker = Some(ProfilesPickerStage::PickProfile {
+                                                target,
+                                                profiles,
+                                                current_profile: current,
+                                                cursor: cur,
+                                            });
+                                        }
+                                    }
+                                    Some(ProfilesPickerStage::PickProfile { target, profiles, cursor, .. }) => {
+                                        if let Some(chosen) = profiles.get(cursor).cloned() {
+                                            let mut reg = profile_registry.write().await;
+                                            let result = match &target {
+                                                ProfilesTarget::Default => {
+                                                    reg.set_default_profile(&chosen)
+                                                }
+                                                ProfilesTarget::Agent(name) => {
+                                                    reg.set_agent_profile(name, &chosen)
+                                                }
+                                            };
+                                            drop(reg);
+                                            match result {
+                                                Ok(()) => {
+                                                    let label = match &target {
+                                                        ProfilesTarget::Default => {
+                                                            "default profile".to_string()
+                                                        }
+                                                        ProfilesTarget::Agent(name) => name.clone(),
+                                                    };
+                                                    // Re-resolve the primary agent's profile and
+                                                    // update the footer to whatever the chat will use
+                                                    // on the next turn. This is correct whether the
+                                                    // change touched the primary's override directly
+                                                    // or the fallback that the primary resolves
+                                                    // through.
+                                                    let chat_profile = profile_registry
+                                                        .read()
+                                                        .await
+                                                        .for_agent(&app.primary_agent)
+                                                        .profile_name
+                                                        .clone();
+                                                    app.profile = chat_profile;
+                                                    app.status_message =
+                                                        Some(format!("{} → {}", label, chosen));
+                                                }
+                                                Err(e) => {
+                                                    app.status_message = Some(format!("Error: {}", e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     let action = key_to_action(key, app.is_streaming);
 
                     match action {
@@ -1190,6 +1408,57 @@ pub async fn run_tui(
                                                 app.content = info;
                                                 app.content_dirty = true;
                                             }
+                                            TuiCommand::Profiles => {
+                                                // The picker has two distinct kinds of targets:
+                                                //   - `Default`: the registry-wide fallback profile.
+                                                //     Changing it affects only agents that resolve
+                                                //     through the fallback (no per-agent override).
+                                                //   - `Agent(name)`: a specific per-agent override.
+                                                // The primary agent (PM) is listed explicitly: the
+                                                // executor's `list_agents()` deliberately excludes
+                                                // it (sub-agents can't dispatch to themselves), but
+                                                // it still has a per-agent override slot in the
+                                                // registry that the user needs to be able to set.
+                                                let registry_guard = profile_registry.read().await;
+                                                let mut items: Vec<ProfilesTargetItem> = Vec::new();
+                                                items.push(ProfilesTargetItem {
+                                                    target: ProfilesTarget::Default,
+                                                    current_profile: registry_guard
+                                                        .default_profile()
+                                                        .to_string(),
+                                                    primary_agent: None,
+                                                });
+                                                items.push(ProfilesTargetItem {
+                                                    target: ProfilesTarget::Agent(app.primary_agent.clone()),
+                                                    current_profile: registry_guard
+                                                        .for_agent(&app.primary_agent)
+                                                        .profile_name
+                                                        .clone(),
+                                                    primary_agent: Some(app.primary_agent.clone()),
+                                                });
+                                                if let Some(ref exec) = agent_executor {
+                                                    let exec = exec.read().await;
+                                                    for info in exec.list_agents() {
+                                                        // Defensive: in case a future change makes
+                                                        // list_agents() include the primary, don't
+                                                        // duplicate the row added above.
+                                                        if info.name == app.primary_agent {
+                                                            continue;
+                                                        }
+                                                        let p = registry_guard.for_agent(&info.name).profile_name.clone();
+                                                        items.push(ProfilesTargetItem {
+                                                            target: ProfilesTarget::Agent(info.name.clone()),
+                                                            current_profile: p,
+                                                            primary_agent: None,
+                                                        });
+                                                    }
+                                                }
+                                                drop(registry_guard);
+                                                app.profiles_picker = Some(ProfilesPickerStage::PickTarget {
+                                                    items,
+                                                    cursor: 0,
+                                                });
+                                            }
                                             TuiCommand::Mount(path_str) => {
                                                 if path_str.is_empty() {
                                                     app.status_message = Some("Usage: /mount <path>".to_string());
@@ -1317,11 +1586,24 @@ pub async fn run_tui(
 
                                         app.start_response(&input, &attachment_display);
 
-                                        // Clone things for the spawned task
-                                        let provider = Arc::clone(&provider);
+                                        // Resolve the primary agent's profile fresh on each turn so
+                                        // a `/profiles` swap takes effect on the next user message
+                                        // (already-running streams keep their captured provider).
+                                        // Note: we look the profile up by primary-agent name, not via
+                                        // `for_default()` — otherwise changing the primary's profile
+                                        // would mutate the registry-wide fallback and silently move
+                                        // every subagent that hasn't been individually configured.
+                                        let runtime = profile_registry
+                                            .read()
+                                            .await
+                                            .for_agent(&app.primary_agent);
+                                        let provider = Arc::clone(&runtime.provider);
                                         let tools = tools_registry.clone();
-                                        let params = extra_params.clone();
-                                        let model = provider.default_model().map(|s| s.to_string());
+                                        let params = runtime.parameters.clone();
+                                        let model = runtime
+                                            .model
+                                            .clone()
+                                            .or_else(|| provider.default_model().map(|s| s.to_string()));
                                         let tx = stream_tx.clone();
                                         let messages = session.build_messages();
                                         let debug = debug_logger.clone();
@@ -1555,6 +1837,7 @@ enum TuiCommand {
     Attach(String),
     Attachments,
     ClearAttachments,
+    Profiles,
 }
 
 /// Parse TUI commands
@@ -1573,6 +1856,7 @@ fn parse_tui_command(input: &str) -> Option<TuiCommand> {
         "/mounts" => Some(TuiCommand::Mounts),
         "/attachments" => Some(TuiCommand::Attachments),
         "/clear-attachments" => Some(TuiCommand::ClearAttachments),
+        "/profiles" => Some(TuiCommand::Profiles),
         _ if trimmed.starts_with("/mount ") => {
             let path = trimmed.strip_prefix("/mount ").unwrap_or("").trim().to_string();
             Some(TuiCommand::Mount(path))
@@ -2445,5 +2729,95 @@ mod tests {
         assert!(buf.is_empty());
         assert_eq!(buf.line_count(), 0);
         assert_eq!(buf.as_str(), "");
+    }
+
+    #[test]
+    fn test_thinking_buffer_snapshot_restore() {
+        let mut buf = ThinkingBuffer::new();
+        buf.push_str("kept line 1\nkept line 2\npar");
+        let snap = buf.snapshot();
+
+        buf.push_str("tial-suffix\nlost line\nlost partial");
+        assert_eq!(buf.as_str(), "kept line 1\nkept line 2\npartial-suffix\nlost line\nlost partial");
+
+        buf.restore_to(&snap);
+        assert_eq!(buf.as_str(), "kept line 1\nkept line 2\npar");
+    }
+
+    #[test]
+    fn retry_notice_rolls_back_partial_content() {
+        let mut app = TuiApp::default();
+        app.start_response("hello", "");
+        let anchor = app.content.len();
+
+        // Simulate iteration 1 starting and the failed first attempt streaming
+        // some text and starting a tool call.
+        app.handle_stream_event(StreamEvent::IterationStart { iteration: 1 });
+        app.handle_stream_event(StreamEvent::ContentDelta("Right — let me try X".into()));
+        app.handle_stream_event(StreamEvent::ToolCallStart {
+            id: "call_a".into(),
+            name: "run".into(),
+        });
+        assert!(app.content.ends_with("Right — let me try X"));
+        assert_eq!(app.tool_notifications.len(), 1);
+
+        // Transient error → retry. Display state should rewind to the anchor
+        // captured at IterationStart.
+        app.handle_stream_event(StreamEvent::RetryNotice {
+            attempt: 1,
+            max_retries: 3,
+            error: "stream broken".into(),
+        });
+        assert_eq!(app.content.len(), anchor, "failed-attempt content was not rolled back");
+        assert_eq!(app.tool_notifications.len(), 0, "failed-attempt tool notification was not rolled back");
+
+        // The successful retry's deltas are appended cleanly.
+        app.handle_stream_event(StreamEvent::ContentDelta("Right — actually let me try Y".into()));
+        app.handle_stream_event(StreamEvent::Done {
+            usage: None,
+            content: "Right — actually let me try Y".into(),
+        });
+        assert!(app.content.ends_with("Right — actually let me try Y"));
+        assert!(!app.content.contains("Right — let me try X"));
+    }
+
+    #[test]
+    fn retry_notice_rolls_back_thinking_content() {
+        let mut app = TuiApp::default();
+        app.start_response("hello", "");
+        app.handle_stream_event(StreamEvent::IterationStart { iteration: 1 });
+
+        app.handle_stream_event(StreamEvent::ThinkingDelta("first attempt thoughts\n".into()));
+        app.handle_stream_event(StreamEvent::RetryNotice {
+            attempt: 1,
+            max_retries: 3,
+            error: "broken".into(),
+        });
+        assert!(app.thinking_content.is_empty(), "thinking from failed attempt should be cleared");
+
+        app.handle_stream_event(StreamEvent::ThinkingDelta("retry thoughts".into()));
+        assert_eq!(app.thinking_content.as_str(), "retry thoughts");
+    }
+
+    #[test]
+    fn retry_notice_preserves_prior_iteration_content() {
+        let mut app = TuiApp::default();
+        app.start_response("hello", "");
+
+        // Iteration 1 finishes successfully.
+        app.handle_stream_event(StreamEvent::IterationStart { iteration: 1 });
+        app.handle_stream_event(StreamEvent::ContentDelta("iteration-1 result".into()));
+
+        // Iteration 2 starts, suffers a retry — only iteration 2's partial
+        // output should be rolled back; iteration 1's content stays.
+        app.handle_stream_event(StreamEvent::IterationStart { iteration: 2 });
+        app.handle_stream_event(StreamEvent::ContentDelta(" iteration-2 attempt".into()));
+        app.handle_stream_event(StreamEvent::RetryNotice {
+            attempt: 1,
+            max_retries: 3,
+            error: "broken".into(),
+        });
+        assert!(app.content.contains("iteration-1 result"));
+        assert!(!app.content.contains("iteration-2 attempt"));
     }
 }

@@ -17,6 +17,7 @@ use qq_core::observation::ContextCompactor;
 use crate::agents::continuation::{execute_with_continuation, AgentExecutionResult, ContinuationConfig};
 use crate::agents::InformUserTool;
 use crate::event_bus::AgentEventBus;
+use crate::profile_registry::SharedProfileRegistry;
 use crate::ExecutionContext;
 
 /// Maximum nesting depth for agent calls.
@@ -99,6 +100,7 @@ async fn execute_agent(
     instance_id: Option<String>,
     base_tools: &Arc<ToolRegistry>,
     provider: &Arc<dyn Provider>,
+    profile_registry: &SharedProfileRegistry,
     external_agents: &AgentsConfig,
     enabled_agents: &Option<Vec<String>>,
     current_depth: u32,
@@ -169,7 +171,7 @@ async fn execute_agent(
     if next_depth < max_depth {
         let nested_agent_tools = create_agent_tools(
             base_tools,
-            Arc::clone(provider),
+            Arc::clone(profile_registry),
             external_agents,
             enabled_agents,
             next_depth,
@@ -475,6 +477,7 @@ fn spawn_background_agent(
     task_id: String,
     base_tools: Arc<ToolRegistry>,
     provider: Arc<dyn Provider>,
+    profile_registry: SharedProfileRegistry,
     external_agents: AgentsConfig,
     enabled_agents: Option<Vec<String>>,
     current_depth: u32,
@@ -499,6 +502,7 @@ fn spawn_background_agent(
             instance_id,
             &base_tools,
             &provider,
+            &profile_registry,
             &external_agents,
             &enabled_agents,
             current_depth,
@@ -564,8 +568,9 @@ pub struct InternalAgentTool {
     agent: Box<dyn InternalAgent>,
     /// Base tools (filesystem, memory, web) - used to build agent's tool set
     base_tools: Arc<ToolRegistry>,
-    /// Provider for LLM calls
-    provider: Arc<dyn Provider>,
+    /// Profile registry. Resolved at `execute()` time so `/profiles`
+    /// reassignments take effect on the next invocation.
+    profile_registry: SharedProfileRegistry,
     /// External agents config (for creating nested agent tools)
     external_agents: AgentsConfig,
     /// Enabled agents filter
@@ -600,7 +605,7 @@ impl InternalAgentTool {
     pub fn new(
         agent: Box<dyn InternalAgent>,
         base_tools: &ToolRegistry,
-        provider: Arc<dyn Provider>,
+        profile_registry: SharedProfileRegistry,
         external_agents: AgentsConfig,
         enabled_agents: Option<Vec<String>>,
         current_depth: u32,
@@ -621,7 +626,7 @@ impl InternalAgentTool {
             tool_name,
             agent,
             base_tools: Arc::new(base_tools.clone()),
-            provider,
+            profile_registry,
             external_agents,
             enabled_agents,
             current_depth,
@@ -743,6 +748,17 @@ impl Tool for InternalAgentTool {
             observation_config,
         };
 
+        // Resolve the provider for this agent right now — picks up `/profiles`
+        // reassignments made since the tool was constructed.
+        let provider = Arc::clone(
+            &self
+                .profile_registry
+                .read()
+                .await
+                .for_agent(self.agent.name())
+                .provider,
+        );
+
         // Background dispatch: spawn agent as tokio task, return immediately
         if args.background {
             let task_id = extract_task_id(&args.instance_id)?;
@@ -755,7 +771,8 @@ impl Tool for InternalAgentTool {
                 args.instance_id,
                 task_id,
                 Arc::clone(&self.base_tools),
-                Arc::clone(&self.provider),
+                provider,
+                Arc::clone(&self.profile_registry),
                 self.external_agents.clone(),
                 self.enabled_agents.clone(),
                 self.current_depth,
@@ -782,7 +799,8 @@ impl Tool for InternalAgentTool {
             args.new_instance,
             args.instance_id,
             &self.base_tools,
-            &self.provider,
+            &provider,
+            &self.profile_registry,
             &self.external_agents,
             &self.enabled_agents,
             self.current_depth,
@@ -822,8 +840,9 @@ pub struct ExternalAgentTool {
     agent_def: AgentDefinition,
     /// Base tools (filesystem, memory, web) - used to build agent's tool set
     base_tools: Arc<ToolRegistry>,
-    /// Provider for LLM calls
-    provider: Arc<dyn Provider>,
+    /// Profile registry. Resolved at `execute()` time so `/profiles`
+    /// reassignments take effect on the next invocation.
+    profile_registry: SharedProfileRegistry,
     /// External agents config (for creating nested agent tools)
     external_agents: AgentsConfig,
     /// Enabled agents filter
@@ -859,7 +878,7 @@ impl ExternalAgentTool {
         name: &str,
         definition: AgentDefinition,
         base_tools: &ToolRegistry,
-        provider: Arc<dyn Provider>,
+        profile_registry: SharedProfileRegistry,
         external_agents: AgentsConfig,
         enabled_agents: Option<Vec<String>>,
         current_depth: u32,
@@ -881,7 +900,7 @@ impl ExternalAgentTool {
             agent_name: name.to_string(),
             agent_def: definition,
             base_tools: Arc::new(base_tools.clone()),
-            provider,
+            profile_registry,
             external_agents,
             enabled_agents,
             current_depth,
@@ -987,6 +1006,17 @@ impl Tool for ExternalAgentTool {
             observation_config,
         };
 
+        // Resolve the provider for this agent right now — picks up `/profiles`
+        // reassignments made since the tool was constructed.
+        let provider = Arc::clone(
+            &self
+                .profile_registry
+                .read()
+                .await
+                .for_agent(&self.agent_name)
+                .provider,
+        );
+
         // Background dispatch: spawn agent as tokio task, return immediately
         if args.background {
             let task_id = extract_task_id(&args.instance_id)?;
@@ -999,7 +1029,8 @@ impl Tool for ExternalAgentTool {
                 args.instance_id,
                 task_id,
                 Arc::clone(&self.base_tools),
-                Arc::clone(&self.provider),
+                provider,
+                Arc::clone(&self.profile_registry),
                 self.external_agents.clone(),
                 self.enabled_agents.clone(),
                 self.current_depth,
@@ -1026,7 +1057,8 @@ impl Tool for ExternalAgentTool {
             args.new_instance,
             args.instance_id,
             &self.base_tools,
-            &self.provider,
+            &provider,
+            &self.profile_registry,
             &self.external_agents,
             &self.enabled_agents,
             self.current_depth,
@@ -1062,7 +1094,8 @@ impl Tool for ExternalAgentTool {
 ///
 /// # Arguments
 /// * `base_tools` - Base tools (filesystem, memory, web) available to agents
-/// * `provider` - LLM provider for agent calls
+/// * `profile_registry` - Shared registry resolved at each agent invocation;
+///   each agent looks up its own profile (override or default) at execute time
 /// * `external_agents` - External agent definitions from config
 /// * `enabled_agents` - Filter for which agents are enabled (None = all)
 /// * `current_depth` - Current nesting depth (0 = top level)
@@ -1076,7 +1109,7 @@ impl Tool for ExternalAgentTool {
 #[allow(clippy::too_many_arguments)]
 pub fn create_agent_tools(
     base_tools: &ToolRegistry,
-    provider: Arc<dyn Provider>,
+    profile_registry: SharedProfileRegistry,
     external_agents: &AgentsConfig,
     enabled_agents: &Option<Vec<String>>,
     current_depth: u32,
@@ -1109,7 +1142,7 @@ pub fn create_agent_tools(
             tools.push(Arc::new(InternalAgentTool::new(
                 agent,
                 base_tools,
-                Arc::clone(&provider),
+                Arc::clone(&profile_registry),
                 external_agents.clone(),
                 enabled_agents.clone(),
                 current_depth,
@@ -1134,7 +1167,7 @@ pub fn create_agent_tools(
                 name,
                 def.clone(),
                 base_tools,
-                Arc::clone(&provider),
+                Arc::clone(&profile_registry),
                 external_agents.clone(),
                 enabled_agents.clone(),
                 current_depth,

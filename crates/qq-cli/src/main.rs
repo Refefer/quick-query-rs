@@ -19,6 +19,7 @@ mod debug_log;
 mod event_bus;
 mod execution_context;
 mod markdown;
+mod profile_registry;
 mod setup;
 mod tui;
 
@@ -27,6 +28,7 @@ pub use execution_context::ExecutionContext;
 
 use agents::{create_agent_tools, AgentExecutor, InformUserTool, DEFAULT_MAX_AGENT_DEPTH};
 use config::{expand_path, AgentsConfig, Config};
+use profile_registry::{ResolvedProfileRuntime, SharedProfileRegistry};
 use qq_core::{AgentMemory, ContextCompactor};
 use qq_tools::bash::permissions::parse_config_overrides;
 
@@ -733,6 +735,13 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         )))
     };
 
+    // Build the profile registry for the session. The default profile uses
+    // the CLI-overridden `settings` and already-instantiated `provider`;
+    // every other profile in [profiles.*] is instantiated fresh so the user
+    // can pick it via `/profiles`.
+    let default_runtime = runtime_from_settings(settings.clone(), Arc::clone(&provider));
+    let profile_registry = build_profile_registry(config, &agents_config, default_runtime)?;
+
     // Create agent tools (conditionally)
     let agent_tools = if disable_agents || disable_tools {
         if disable_agents {
@@ -742,7 +751,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
     } else {
         create_agent_tools(
             &base_tools,
-            Arc::clone(&provider),
+            Arc::clone(&profile_registry),
             &agents_config,
             &settings.agents,
             0, // Start at depth 0
@@ -780,7 +789,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
         None
     } else {
         let executor = AgentExecutor::new(
-            Arc::clone(&provider),
+            Arc::clone(&profile_registry),
             base_tools,
             agents_config,
             settings.agents.clone(),
@@ -799,6 +808,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             cli,
             config,
             provider,
+            Arc::clone(&profile_registry),
             system_prompt,
             tools_registry,
             settings.parameters,
@@ -824,6 +834,7 @@ async fn chat_mode(cli: &Cli, config: &Config, system: Option<String>) -> Result
             cli,
             config,
             provider,
+            Arc::clone(&profile_registry),
             system_prompt,
             tools_registry,
             settings.parameters,
@@ -995,6 +1006,7 @@ fn show_config(config: &Config) -> Result<()> {
 }
 
 /// Resolved settings from CLI, profile, and config
+#[derive(Clone)]
 struct ResolvedSettings {
     profile_name: String,
     provider_type: String,
@@ -1166,6 +1178,97 @@ fn resolve_settings_for_provider(provider_name: &str, config: &Config) -> Result
         context_window: provider_config.context_window,
         supported_content_types: provider_config.supported_content_types.clone(),
     })
+}
+
+/// Resolve settings for an arbitrary profile name without applying any CLI
+/// flag overrides. Used by [`ProfileRegistry`] to instantiate every profile
+/// declared in `[profiles.*]` so the user can switch between them at runtime.
+fn resolve_settings_for_profile_name(profile_name: &str, config: &Config) -> Result<ResolvedSettings> {
+    let resolved_profile = config.resolve_profile(profile_name)
+        .with_context(|| format!("Profile '{}' not found or missing provider", profile_name))?;
+
+    let provider_name = resolved_profile.provider_name.clone();
+    let provider_config = config.providers.get(&provider_name);
+
+    let api_key = provider_config
+        .and_then(|p| p.api_key.clone())
+        .or_else(|| std::env::var(format!("{}_API_KEY", provider_name.to_uppercase())).ok())
+        .with_context(|| format!("API key not found for provider '{}'", provider_name))?;
+
+    let base_url = provider_config.and_then(|p| p.base_url.clone());
+
+    let model = resolved_profile.model.clone()
+        .or_else(|| provider_config.and_then(|p| p.default_model.clone()));
+
+    let provider_type = resolve_provider_type(
+        resolved_profile.provider_type.as_deref(),
+        &provider_name,
+        base_url.as_deref(),
+    );
+
+    let context_window = provider_config.and_then(|p| p.context_window);
+    let supported_content_types = provider_config.and_then(|p| p.supported_content_types.clone());
+
+    Ok(ResolvedSettings {
+        profile_name: profile_name.to_string(),
+        provider_type,
+        api_key,
+        base_url,
+        model,
+        system_prompt: resolved_profile.system_prompt.clone(),
+        parameters: resolved_profile.parameters.clone(),
+        agents: resolved_profile.agents.clone(),
+        agent: resolved_profile.agent.clone(),
+        include_tool_reasoning: resolved_profile.include_tool_reasoning.unwrap_or(false),
+        context_window,
+        supported_content_types,
+    })
+}
+
+/// Convert a `ResolvedSettings` plus its instantiated provider into the
+/// shape held by [`ProfileRegistry`].
+fn runtime_from_settings(
+    settings: ResolvedSettings,
+    provider: Arc<dyn Provider>,
+) -> ResolvedProfileRuntime {
+    ResolvedProfileRuntime {
+        profile_name: settings.profile_name,
+        provider,
+        model: settings.model,
+        parameters: settings.parameters,
+        system_prompt: settings.system_prompt,
+        include_tool_reasoning: settings.include_tool_reasoning,
+        context_window: settings.context_window,
+        supported_content_types: settings.supported_content_types,
+        agent: settings.agent,
+        agents: settings.agents,
+    }
+}
+
+/// Build the [`ProfileRegistry`] for the session.
+///
+/// `default_runtime` is the runtime for the user-selected default profile (with
+/// any CLI overrides already baked in by `resolve_settings`). Every other
+/// profile in `config.profiles` is instantiated fresh from its config so the
+/// user can pick it via `/profiles` later.
+fn build_profile_registry(
+    config: &Config,
+    agents_config: &AgentsConfig,
+    default_runtime: ResolvedProfileRuntime,
+) -> Result<SharedProfileRegistry> {
+    let default_profile_name = default_runtime.profile_name.clone();
+    let registry = profile_registry::build_registry(
+        config,
+        agents_config,
+        default_profile_name,
+        default_runtime,
+        |name, cfg| {
+            let settings = resolve_settings_for_profile_name(name, cfg)?;
+            let provider: Arc<dyn Provider> = Arc::from(create_provider_from_settings(&settings)?);
+            Ok(runtime_from_settings(settings, provider))
+        },
+    )?;
+    Ok(registry.into_shared())
 }
 
 fn create_provider_from_settings(settings: &ResolvedSettings) -> Result<Box<dyn Provider>> {
