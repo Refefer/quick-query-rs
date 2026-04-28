@@ -16,6 +16,16 @@ pub trait ContextCompactor: Send + Sync {
     async fn observe(&self, messages: &[Message]) -> Result<String, Error>;
     /// Restructure/compress an observation log into a tighter version.
     async fn reflect(&self, observation_log: &str) -> Result<String, Error>;
+
+    /// Observe messages while also seeing prior observations for deduplication.
+    /// Default impl delegates to observe() for backwards compatibility.
+    async fn observe_with_prior(
+        &self,
+        messages: &[Message],
+        _prior_observations: Option<&str>,
+    ) -> Result<String, Error> {
+        self.observe(messages).await
+    }
 }
 
 /// Configuration for the OM thresholds.
@@ -41,9 +51,10 @@ impl ObservationConfig {
     /// For a 200K-token model this produces values close to the hardcoded defaults.
     pub fn from_context_window(context_window: u32) -> Self {
         let ctx_bytes = context_window as usize * 4;
+        let obs_threshold = ctx_bytes / 4;
         Self {
             message_threshold_bytes: ctx_bytes * 6 / 100,
-            observation_threshold_bytes: ctx_bytes / 4,
+            observation_threshold_bytes: obs_threshold,
             preserve_recent: (context_window as usize / 20_000).clamp(4, 20),
             hysteresis: 1.1,
             context_budget_bytes: Some(ctx_bytes * 65 / 100),
@@ -56,9 +67,10 @@ impl ObservationConfig {
     /// and need earlier compaction.
     pub fn from_context_window_for_agents(context_window: u32) -> Self {
         let ctx_bytes = context_window as usize * 4;
+        let obs_threshold = ctx_bytes * 12 / 100;
         Self {
             message_threshold_bytes: ctx_bytes * 4 / 100,
-            observation_threshold_bytes: ctx_bytes * 12 / 100,
+            observation_threshold_bytes: obs_threshold,
             preserve_recent: (context_window as usize / 30_000).clamp(3, 10),
             hysteresis: 1.1,
             context_budget_bytes: Some(ctx_bytes / 2),
@@ -317,7 +329,8 @@ impl ObservationalMemory {
                         "Starting observation pass"
                     );
 
-                    match compactor.observe(&stripped).await {
+                    let prior_log = if self.observation_log.is_empty() { None } else { Some(self.observation_log.as_str()) };
+                    match compactor.observe_with_prior(&stripped, prior_log).await {
                         Ok(observations) if !observations.is_empty() => {
                             // Append to observation log
                             if !self.observation_log.is_empty() {

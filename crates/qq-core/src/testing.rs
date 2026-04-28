@@ -187,4 +187,12 @@ impl ContextCompactor for MockCompactor {
                 "No mock reflect response queued".to_string(),
             )))
     }
+
+    async fn observe_with_prior(
+        &self,
+        messages: &[Message],
+        _prior_observations: Option<&str>,
+    ) -> Result<String, Error> {
+        self.observe(messages).await
+    }
 }
