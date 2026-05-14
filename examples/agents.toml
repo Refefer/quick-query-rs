@@ -27,6 +27,22 @@
 # "Delegating to researcher..."). No configuration needed.
 
 # ============================================================================
+# INTERVENTIONS — agent-loop hooks for malformed LLM responses
+# ============================================================================
+# Hooks fire after each LLM response and can inject a synthetic user retry
+# when the model misbehaves. Capped at 3 consecutive interventions per run.
+#
+# Omitting the [interventions] section enables every built-in hook (the
+# safe default). Provide the section if you want to disable specific
+# interventions; both fields are required when the section exists.
+
+# [interventions]
+# empty-response-retry = true       # retry when the model returns nothing
+# fake-tool-call-retry = true       # retry when the model emits XML/text
+                                    # tool calls instead of using the
+                                    # native tool-calling API
+
+# ============================================================================
 # BUILT-IN AGENT OVERRIDES
 # ============================================================================
 # Use [builtin.<agent_name>] sections to override settings for internal agents.

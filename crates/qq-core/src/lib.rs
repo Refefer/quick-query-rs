@@ -7,6 +7,7 @@ pub mod agent;
 pub mod blocking;
 pub mod chunker;
 pub mod error;
+pub mod hooks;
 pub mod message;
 pub mod observation;
 pub mod provider;
@@ -22,6 +23,13 @@ pub use agent::{
     AgentRunResult, AgentSender, DelegationPermissions, DEFAULT_MAX_INSTANCE_BYTES,
 };
 pub use error::Error;
+pub use hooks::{
+    AgentHook, EmptyResponseHook, FakeToolCallHook,
+    PostMessageAction, PostMessageContext,
+    PostToolAction, PostToolContext,
+    PreMessageAction, PreMessageContext,
+    PreToolAction, PreToolContext,
+};
 pub use message::{Content, ContentPart, FinishReason, ImageData, IntoContent, Message, Role, StreamChunk, ToolCall, ToolResult, TypedContent, Usage, strip_thinking_tags, strip_reasoning_from_history};
 pub use provider::{
     CompletionRequest, CompletionResponse, Provider, StreamResult,

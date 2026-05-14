@@ -12,7 +12,10 @@ use serde::Deserialize;
 
 use qq_core::{AgentConfig, AgentMemory, CompletionRequest, DelegationPermissions, Error, Message, PropertySchema, Provider, Role, Tool, ToolDefinition, ToolOutput, ToolParameters, ToolRegistry};
 
-use qq_agents::{AgentDefinition, AgentMemoryStrategy, AgentsConfig, InternalAgent, InternalAgentType, DEFAULT_COMPACT_PROMPT};
+use qq_agents::{
+    build_hooks, AgentDefinition, AgentMemoryStrategy, AgentsConfig, InternalAgent,
+    InternalAgentType, DEFAULT_COMPACT_PROMPT,
+};
 use qq_core::observation::ContextCompactor;
 use crate::agents::continuation::{execute_with_continuation, AgentExecutionResult, ContinuationConfig};
 use crate::agents::InformUserTool;
@@ -304,7 +307,8 @@ async fn execute_agent(
             // Obs-memory path: compactor in the loop, no continuation
             let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
                 .with_system_prompt(&full_prompt)
-                .with_prior_observation_log(prior_observation_log);
+                .with_prior_observation_log(prior_observation_log)
+                .with_hooks(build_hooks(external_agents.interventions.as_ref()));
 
             if let Some(limits) = config.tool_limits.clone() {
                 agent_cfg = agent_cfg.with_tool_limits(
@@ -413,7 +417,8 @@ async fn execute_agent(
         AgentMemoryStrategy::Compaction => {
             // Compaction path: post-execution LLM summarization with continuation
             let mut agent_cfg = AgentConfig::new(config.agent_name.as_str())
-                .with_system_prompt(&full_prompt);
+                .with_system_prompt(&full_prompt)
+                .with_hooks(build_hooks(external_agents.interventions.as_ref()));
 
             if let Some(limits) = config.tool_limits {
                 agent_cfg = agent_cfg.with_tool_limits(

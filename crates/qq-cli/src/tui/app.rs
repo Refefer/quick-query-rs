@@ -644,6 +644,16 @@ impl TuiApp {
                     log_bytes as f64 / 1024.0
                 ));
             }
+            AgentEvent::HookFired {
+                agent_name,
+                hook_name,
+                action,
+            } => {
+                self.status_message = Some(format!(
+                    "{}: hook {} → {}",
+                    agent_name, hook_name, action
+                ));
+            }
         }
     }
 

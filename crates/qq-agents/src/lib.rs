@@ -21,7 +21,10 @@ mod writer;
 
 pub use project_manager::ProjectManagerAgent;
 pub use coder::CoderAgent;
-pub use config::{AgentDefinition, AgentMemoryStrategy, AgentsConfig, BuiltinAgentOverride};
+pub use config::{
+    build_hooks, AgentDefinition, AgentMemoryStrategy, AgentsConfig, BuiltinAgentOverride,
+    InterventionConfig,
+};
 pub use preamble::{generate_preamble, PreambleContext};
 pub use preamble::AgentContext;
 pub use explore::ExploreAgent;
