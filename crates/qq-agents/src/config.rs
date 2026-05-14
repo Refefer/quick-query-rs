@@ -2,8 +2,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
+use qq_core::{AgentHook, EmptyResponseHook, FakeToolCallHook};
 use serde::{Deserialize, Serialize};
 
 fn default_max_turns() -> usize {
@@ -163,6 +165,51 @@ pub struct AgentDefinition {
     pub context_budget_bytes: Option<usize>,
 }
 
+/** User-facing intervention toggles. When the `[interventions]` TOML
+section is absent, the consuming code (`build_hooks` below) registers all
+built-in hooks. When present, both fields are required: AGENTS.md rule 1
+forbids hidden defaults on user-facing config. */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct InterventionConfig {
+    /// Inject a synthetic user retry when the model returns an empty
+    /// response with no tool calls.
+    pub empty_response_retry: bool,
+    /// Inject a synthetic user retry when the model emits a tool call as
+    /// text/XML inside the response content (instead of using the native
+    /// tool-calling API).
+    pub fake_tool_call_retry: bool,
+}
+
+/** Build the agent hook list to pass to `AgentConfig::with_hooks`.
+
+When the user has no `[interventions]` section (`cfg == None`), every
+built-in hook is enabled — this is the consumer-side default, distinct
+from a fabricated config-file default. When the user provides a section,
+individual fields gate registration.
+
+Order matters: `FakeToolCallHook` is registered before `EmptyResponseHook`
+so a fake-tool-call response (whose content is non-empty) is correctly
+classified before falling through to the empty-response check. */
+pub fn build_hooks(cfg: Option<&InterventionConfig>) -> Vec<Arc<dyn AgentHook>> {
+    let (fake_tool_call, empty_response) = match cfg {
+        None => (true, true),
+        Some(c) => (c.fake_tool_call_retry, c.empty_response_retry),
+    };
+
+    let mut hooks: Vec<Arc<dyn AgentHook>> = Vec::new();
+
+    if fake_tool_call {
+        hooks.push(Arc::new(FakeToolCallHook));
+    }
+
+    if empty_response {
+        hooks.push(Arc::new(EmptyResponseHook));
+    }
+
+    hooks
+}
+
 /// Agents configuration file (agents.toml).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentsConfig {
@@ -173,6 +220,12 @@ pub struct AgentsConfig {
     /// Overrides for built-in agents (e.g., tool_limits)
     #[serde(default)]
     pub builtin: HashMap<String, BuiltinAgentOverride>,
+
+    /// Optional `[interventions]` TOML section. `None` when absent in the
+    /// user's TOML — `build_hooks` interprets `None` as "register every
+    /// built-in hook" so behaviour stays sensible without configuration.
+    /// `Some(cfg)` lets the user disable individual interventions.
+    pub interventions: Option<InterventionConfig>,
 }
 
 impl AgentsConfig {
@@ -717,5 +770,69 @@ system_prompt = "Simple"
         assert!(agent.message_threshold_bytes.is_none());
         assert!(agent.observation_threshold_bytes.is_none());
         assert!(agent.context_budget_bytes.is_none());
+    }
+
+    #[test]
+    fn interventions_section_absent_yields_none_and_all_hooks_enabled() {
+        let toml_content = "";
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+        assert!(config.interventions.is_none());
+
+        let hooks = build_hooks(config.interventions.as_ref());
+        assert_eq!(hooks.len(), 2, "absent section enables all built-in hooks");
+    }
+
+    #[test]
+    fn interventions_section_with_both_disabled_yields_no_hooks() {
+        let toml_content = r#"
+[interventions]
+empty-response-retry = false
+fake-tool-call-retry = false
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+        let cfg = config.interventions.expect("section was present");
+        assert!(!cfg.empty_response_retry);
+        assert!(!cfg.fake_tool_call_retry);
+
+        let hooks = build_hooks(Some(&cfg));
+        assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn interventions_section_with_one_disabled_yields_one_hook() {
+        let toml_content = r#"
+[interventions]
+empty-response-retry = true
+fake-tool-call-retry = false
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+        let hooks = build_hooks(config.interventions.as_ref());
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name(), "empty-response");
+    }
+
+    #[test]
+    fn interventions_section_requires_both_fields() {
+        let toml_content = r#"
+[interventions]
+empty-response-retry = true
+"#;
+        let result: std::result::Result<AgentsConfig, _> = toml::from_str(toml_content);
+        assert!(
+            result.is_err(),
+            "missing fake-response-retry should fail to parse (no serde defaults)"
+        );
+    }
+
+    #[test]
+    fn interventions_section_rejects_unknown_fields() {
+        let toml_content = r#"
+[interventions]
+empty-response-retry = true
+fake-tool-call-retry = true
+unknown-field = true
+"#;
+        let result: std::result::Result<AgentsConfig, _> = toml::from_str(toml_content);
+        assert!(result.is_err(), "deny_unknown_fields should reject typos");
     }
 }

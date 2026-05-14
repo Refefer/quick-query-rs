@@ -75,6 +75,13 @@ pub enum AgentEvent {
         observation_count: u32,
         log_bytes: usize,
     },
+    /// An agent hook intervened (e.g., empty-response retry,
+    /// fake-tool-call retry).
+    HookFired {
+        agent_name: String,
+        hook_name: String,
+        action: String,
+    },
 }
 
 impl From<AgentProgressEvent> for AgentEvent {
@@ -141,6 +148,15 @@ impl From<AgentProgressEvent> for AgentEvent {
                 agent_name,
                 observation_count,
                 log_bytes,
+            },
+            AgentProgressEvent::HookFired {
+                agent_name,
+                hook_name,
+                action,
+            } => AgentEvent::HookFired {
+                agent_name,
+                hook_name,
+                action,
             },
             // AssistantResponse is only used for debug logging; never broadcast
             AgentProgressEvent::AssistantResponse { .. } => {
