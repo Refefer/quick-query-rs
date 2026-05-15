@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::process::Stdio;
 
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
@@ -7,6 +8,8 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use rmcp::{RoleClient, ServiceExt};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::ChildStderr;
 
 use crate::error::McpError;
 
@@ -42,6 +45,13 @@ impl McpClient {
     }
 
     /// Connect to an MCP server via stdio (child process).
+    ///
+    /// Captures the child's stderr (rather than letting it inherit
+    /// qq's terminal — see `spawn_stderr_pump` for the why) and
+    /// forwards each line through `tracing::info!` so it lands
+    /// wherever qq's subscriber points (sink in TUI mode, the
+    /// configured file under `--log-file`, stderr in `--no-tui`
+    /// mode).
     pub async fn connect_stdio(
         name: String,
         command: &str,
@@ -54,10 +64,17 @@ impl McpClient {
             cmd.env(k, v);
         }
 
-        let process = TokioChildProcess::new(cmd).map_err(|e| McpError::Connection {
-            server: name.clone(),
-            source: Box::new(e),
-        })?;
+        let (process, child_stderr) = TokioChildProcess::builder(cmd)
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| McpError::Connection {
+                server: name.clone(),
+                source: Box::new(e),
+            })?;
+
+        if let Some(stderr) = child_stderr {
+            spawn_stderr_pump(name.clone(), stderr);
+        }
 
         let service = ().serve(process).await.map_err(|e| McpError::Connection {
             server: name.clone(),
@@ -145,4 +162,35 @@ impl McpClient {
             tracing::warn!(server = %self.name, error = ?e, "MCP server shutdown error");
         }
     }
+}
+
+/** Spawn a fire-and-forget tokio task that drains a child process's
+stderr and re-emits each line through qq's tracing pipeline.
+
+Without this, MCP server subprocesses inherit qq's stderr (rmcp's
+`TokioChildProcessBuilder::new` default is `Stdio::inherit`) and any
+`tracing::warn!` they emit — including the `rmcp::service:
+response error` lines fired when an upstream HTTP request returns
+4xx/5xx — write raw bytes onto the same TTY as the ratatui alternate
+screen and corrupt the TUI. Re-routing through `tracing::info!` at
+the `mcp_server` target keeps the diagnostics available via
+`--log-file` or `RUST_LOG=mcp_server=info` while letting the default
+TUI-mode sink writer swallow them.
+
+The handle is intentionally **not** returned. The task self-terminates
+when the subprocess exits: the kernel closes the write end of the
+stderr pipe, `BufReader::lines().next_line()` returns `Ok(None)`, the
+loop falls through, the task completes. The subprocess in turn dies
+when `McpClient::shutdown` (or `Drop`) tears down the rmcp transport,
+which kills the child via `TokioChildProcess::graceful_shutdown` /
+its `ChildWithCleanup` Drop impl. So the pump's lifetime is already
+correctly bounded by the connection's, without us tracking it.
+*/
+fn spawn_stderr_pump(server: String, stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!(target: "mcp_server", server = %server, "{}", line);
+        }
+    });
 }
