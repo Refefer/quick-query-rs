@@ -32,6 +32,7 @@ and applies the action; hooks never mutate the message vector directly.
 
 pub mod empty_response;
 pub mod fake_tool_call;
+pub mod repetition_warning;
 
 #[cfg(test)]
 mod tests;
@@ -153,3 +154,4 @@ pub trait AgentHook: Send + Sync {
 
 pub use empty_response::EmptyResponseHook;
 pub use fake_tool_call::FakeToolCallHook;
+pub use repetition_warning::RepetitionWarningHook;

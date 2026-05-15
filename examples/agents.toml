@@ -34,13 +34,16 @@
 #
 # Omitting the [interventions] section enables every built-in hook (the
 # safe default). Provide the section if you want to disable specific
-# interventions; both fields are required when the section exists.
+# interventions; every field is required when the section exists.
 
 # [interventions]
 # empty-response-retry = true       # retry when the model returns nothing
 # fake-tool-call-retry = true       # retry when the model emits XML/text
                                     # tool calls instead of using the
                                     # native tool-calling API
+# repetition-warning = true         # prepend a factual note to a tool result
+                                    # when the same (tool, args) call has
+                                    # already executed earlier in this run
 
 # ============================================================================
 # BUILT-IN AGENT OVERRIDES

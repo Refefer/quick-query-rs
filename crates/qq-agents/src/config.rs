@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use qq_core::{AgentHook, EmptyResponseHook, FakeToolCallHook};
+use qq_core::{AgentHook, EmptyResponseHook, FakeToolCallHook, RepetitionWarningHook};
 use serde::{Deserialize, Serialize};
 
 fn default_max_turns() -> usize {
@@ -167,7 +167,7 @@ pub struct AgentDefinition {
 
 /** User-facing intervention toggles. When the `[interventions]` TOML
 section is absent, the consuming code (`build_hooks` below) registers all
-built-in hooks. When present, both fields are required: AGENTS.md rule 1
+built-in hooks. When present, every field is required: AGENTS.md rule 1
 forbids hidden defaults on user-facing config. */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -179,6 +179,12 @@ pub struct InterventionConfig {
     /// text/XML inside the response content (instead of using the native
     /// tool-calling API).
     pub fake_tool_call_retry: bool,
+    /// Prepend a factual one-line note to a tool result when the same
+    /// `(tool, args)` call has already executed earlier in this run.
+    /// Informational only — the tool still executes and the agent decides
+    /// what (if anything) to do. The existing in-loop repetition detector
+    /// remains the terminal safety net at the 3rd identical call.
+    pub repetition_warning: bool,
 }
 
 /** Build the agent hook list to pass to `AgentConfig::with_hooks`.
@@ -192,9 +198,13 @@ Order matters: `FakeToolCallHook` is registered before `EmptyResponseHook`
 so a fake-tool-call response (whose content is non-empty) is correctly
 classified before falling through to the empty-response check. */
 pub fn build_hooks(cfg: Option<&InterventionConfig>) -> Vec<Arc<dyn AgentHook>> {
-    let (fake_tool_call, empty_response) = match cfg {
-        None => (true, true),
-        Some(c) => (c.fake_tool_call_retry, c.empty_response_retry),
+    let (fake_tool_call, empty_response, repetition_warning) = match cfg {
+        None => (true, true, true),
+        Some(c) => (
+            c.fake_tool_call_retry,
+            c.empty_response_retry,
+            c.repetition_warning,
+        ),
     };
 
     let mut hooks: Vec<Arc<dyn AgentHook>> = Vec::new();
@@ -205,6 +215,10 @@ pub fn build_hooks(cfg: Option<&InterventionConfig>) -> Vec<Arc<dyn AgentHook>> 
 
     if empty_response {
         hooks.push(Arc::new(EmptyResponseHook));
+    }
+
+    if repetition_warning {
+        hooks.push(Arc::new(RepetitionWarningHook::new()));
     }
 
     hooks
@@ -779,31 +793,34 @@ system_prompt = "Simple"
         assert!(config.interventions.is_none());
 
         let hooks = build_hooks(config.interventions.as_ref());
-        assert_eq!(hooks.len(), 2, "absent section enables all built-in hooks");
+        assert_eq!(hooks.len(), 3, "absent section enables all built-in hooks");
     }
 
     #[test]
-    fn interventions_section_with_both_disabled_yields_no_hooks() {
+    fn interventions_section_with_all_disabled_yields_no_hooks() {
         let toml_content = r#"
 [interventions]
 empty-response-retry = false
 fake-tool-call-retry = false
+repetition-warning = false
 "#;
         let config: AgentsConfig = toml::from_str(toml_content).unwrap();
         let cfg = config.interventions.expect("section was present");
         assert!(!cfg.empty_response_retry);
         assert!(!cfg.fake_tool_call_retry);
+        assert!(!cfg.repetition_warning);
 
         let hooks = build_hooks(Some(&cfg));
         assert!(hooks.is_empty());
     }
 
     #[test]
-    fn interventions_section_with_one_disabled_yields_one_hook() {
+    fn interventions_section_with_one_enabled_yields_one_hook() {
         let toml_content = r#"
 [interventions]
 empty-response-retry = true
 fake-tool-call-retry = false
+repetition-warning = false
 "#;
         let config: AgentsConfig = toml::from_str(toml_content).unwrap();
         let hooks = build_hooks(config.interventions.as_ref());
@@ -812,15 +829,30 @@ fake-tool-call-retry = false
     }
 
     #[test]
-    fn interventions_section_requires_both_fields() {
+    fn interventions_section_with_repetition_warning_enabled() {
+        let toml_content = r#"
+[interventions]
+empty-response-retry = false
+fake-tool-call-retry = false
+repetition-warning = true
+"#;
+        let config: AgentsConfig = toml::from_str(toml_content).unwrap();
+        let hooks = build_hooks(config.interventions.as_ref());
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name(), "repetition-warning");
+    }
+
+    #[test]
+    fn interventions_section_requires_all_fields() {
         let toml_content = r#"
 [interventions]
 empty-response-retry = true
+fake-tool-call-retry = true
 "#;
         let result: std::result::Result<AgentsConfig, _> = toml::from_str(toml_content);
         assert!(
             result.is_err(),
-            "missing fake-response-retry should fail to parse (no serde defaults)"
+            "missing repetition-warning should fail to parse (no serde defaults)"
         );
     }
 
@@ -830,6 +862,7 @@ empty-response-retry = true
 [interventions]
 empty-response-retry = true
 fake-tool-call-retry = true
+repetition-warning = true
 unknown-field = true
 "#;
         let result: std::result::Result<AgentsConfig, _> = toml::from_str(toml_content);

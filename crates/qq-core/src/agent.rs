@@ -7,7 +7,6 @@
 //! - Streaming support for real-time agent-to-agent communication
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -112,7 +111,7 @@ impl RepetitionDetector {
         *total_for_tool += 1;
 
         // Exact match detection
-        let hash = Self::canonical_hash(tool_name, arguments);
+        let hash = crate::canonical_hash::canonical_hash(tool_name, arguments);
         let count = self.call_counts.entry(hash).or_insert(0);
         *count += 1;
         if *count >= self.threshold {
@@ -134,41 +133,6 @@ impl RepetitionDetector {
         }
 
         None
-    }
-
-    /// Compute a deterministic hash of (tool_name, arguments) with sorted JSON keys.
-    fn canonical_hash(tool_name: &str, arguments: &serde_json::Value) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        tool_name.hash(&mut hasher);
-        Self::hash_value(arguments, &mut hasher);
-        hasher.finish()
-    }
-
-    /// Recursively hash a JSON value with sorted object keys for determinism.
-    fn hash_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
-        match value {
-            serde_json::Value::Null => 0u8.hash(hasher),
-            serde_json::Value::Bool(b) => { 1u8.hash(hasher); b.hash(hasher); }
-            serde_json::Value::Number(n) => { 2u8.hash(hasher); n.to_string().hash(hasher); }
-            serde_json::Value::String(s) => { 3u8.hash(hasher); s.hash(hasher); }
-            serde_json::Value::Array(arr) => {
-                4u8.hash(hasher);
-                arr.len().hash(hasher);
-                for v in arr {
-                    Self::hash_value(v, hasher);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                5u8.hash(hasher);
-                map.len().hash(hasher);
-                let mut keys: Vec<&String> = map.keys().collect();
-                keys.sort();
-                for key in keys {
-                    key.hash(hasher);
-                    Self::hash_value(&map[key], hasher);
-                }
-            }
-        }
     }
 }
 
@@ -2546,8 +2510,8 @@ mod tests {
         let args1 = serde_json::json!({"a": 1, "b": 2});
         let args2 = serde_json::json!({"b": 2, "a": 1});
         assert_eq!(
-            RepetitionDetector::canonical_hash("tool", &args1),
-            RepetitionDetector::canonical_hash("tool", &args2),
+            crate::canonical_hash::canonical_hash("tool", &args1),
+            crate::canonical_hash::canonical_hash("tool", &args2),
         );
     }
 
@@ -2556,8 +2520,8 @@ mod tests {
         let args1 = serde_json::json!({"outer": {"z": 1, "a": 2}});
         let args2 = serde_json::json!({"outer": {"a": 2, "z": 1}});
         assert_eq!(
-            RepetitionDetector::canonical_hash("tool", &args1),
-            RepetitionDetector::canonical_hash("tool", &args2),
+            crate::canonical_hash::canonical_hash("tool", &args1),
+            crate::canonical_hash::canonical_hash("tool", &args2),
         );
     }
 
@@ -2566,8 +2530,8 @@ mod tests {
         let args1 = serde_json::json!({"query": "hello"});
         let args2 = serde_json::json!({"query": "world"});
         assert_ne!(
-            RepetitionDetector::canonical_hash("tool", &args1),
-            RepetitionDetector::canonical_hash("tool", &args2),
+            crate::canonical_hash::canonical_hash("tool", &args1),
+            crate::canonical_hash::canonical_hash("tool", &args2),
         );
     }
 
@@ -3108,6 +3072,316 @@ mod tests {
         match result {
             AgentRunResult::Success { content, .. } => assert_eq!(content, ""),
             other => panic!("expected Success with empty content, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Integration: RepetitionWarningHook + in-loop RepetitionDetector
+    //
+    // The unit tests in `hooks::tests` exercise the hook in isolation. These
+    // tests run the full agent loop with a MockProvider emitting identical
+    // tool calls, verifying that:
+    //   1) The hook actually fires inside the loop and the note ends up in
+    //      the tool_result message the LLM sees on the next turn.
+    //   2) The two layers compose: hook notes the 2nd call, the existing
+    //      in-loop detector still hard-blocks the 3rd. The escalation table
+    //      in the plan is exercised end-to-end, not assumed.
+    //   3) Distinct (tool, args) tuples are not flagged.
+    // -------------------------------------------------------------------
+
+    use crate::hooks::RepetitionWarningHook;
+    use crate::message::ToolCall;
+    use crate::tool::{Tool, ToolDefinition, ToolOutput};
+    use serde_json::Value;
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echoes the input"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("echo", "echoes the input")
+        }
+        async fn execute(&self, _arguments: Value) -> Result<ToolOutput, crate::Error> {
+            Ok(ToolOutput::success("echo-result"))
+        }
+    }
+
+    fn tool_call_response(id: &str, name: &str, args: Value) -> CompletionResponse {
+        CompletionResponse {
+            message: Message::assistant_with_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments: args,
+                }],
+            ),
+            thinking: None,
+            usage: Usage::new(0, 0),
+            model: "mock".into(),
+            finish_reason: FinishReason::Stop,
+        }
+    }
+
+    fn tools_with_echo() -> Arc<ToolRegistry> {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        Arc::new(registry)
+    }
+
+    #[tokio::test]
+    async fn repetition_hook_prepends_note_on_2nd_identical_tool_call() {
+        // Sequence:
+        //   resp 1: echo({path: "foo"})  -- executes normally, no note
+        //   resp 2: echo({path: "foo"})  -- 2nd identical → hook prepends note
+        //   resp 3: "done"               -- terminal Success
+        //
+        // MockProvider is FIFO: queue order = pop order.
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_raw_response(tool_call_response(
+            "c1",
+            "echo",
+            serde_json::json!({"path": "foo"}),
+        ));
+        provider.queue_raw_response(tool_call_response(
+            "c2",
+            "echo",
+            serde_json::json!({"path": "foo"}),
+        ));
+        provider.queue_response("done");
+        let provider: Arc<dyn Provider> = provider;
+
+        let hooks: Vec<Arc<dyn AgentHook>> = vec![Arc::new(RepetitionWarningHook::new())];
+        let config = AgentConfig::new("test-agent").with_hooks(hooks);
+
+        let result = Agent::run_once_with_progress(
+            provider,
+            tools_with_echo(),
+            config,
+            vec![Message::user("ask")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        let messages = match result {
+            AgentRunResult::Success { content, messages, .. } => {
+                assert_eq!(content, "done");
+                messages
+            }
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        // Find the two tool_result messages in order.
+        let tool_results: Vec<&Message> = messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .collect();
+        assert_eq!(
+            tool_results.len(),
+            2,
+            "expected two tool_result messages (one per executed call)"
+        );
+
+        let first = tool_results[0].content.to_string_lossy();
+        let second = tool_results[1].content.to_string_lossy();
+
+        assert!(
+            !first.starts_with("[note:"),
+            "1st tool_result should not carry the note, got: {first:?}"
+        );
+        assert!(
+            first.contains("echo-result"),
+            "1st tool_result should contain the tool's actual output, got: {first:?}"
+        );
+        assert!(
+            second.starts_with("[note:"),
+            "2nd tool_result MUST start with the note prefix, got: {second:?}"
+        );
+        assert!(
+            second.contains("echo"),
+            "2nd tool_result's note should name the repeated tool, got: {second:?}"
+        );
+        assert!(
+            second.contains("echo-result"),
+            "2nd tool_result must still preserve the tool's actual output, got: {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repetition_hook_does_not_fire_for_distinct_args() {
+        // Same tool, different args: no note on either call.
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_raw_response(tool_call_response(
+            "c1",
+            "echo",
+            serde_json::json!({"path": "foo"}),
+        ));
+        provider.queue_raw_response(tool_call_response(
+            "c2",
+            "echo",
+            serde_json::json!({"path": "bar"}),
+        ));
+        provider.queue_response("done");
+        let provider: Arc<dyn Provider> = provider;
+
+        let hooks: Vec<Arc<dyn AgentHook>> = vec![Arc::new(RepetitionWarningHook::new())];
+        let config = AgentConfig::new("test-agent").with_hooks(hooks);
+
+        let result = Agent::run_once_with_progress(
+            provider,
+            tools_with_echo(),
+            config,
+            vec![Message::user("ask")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        let messages = match result {
+            AgentRunResult::Success { messages, .. } => messages,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        for m in messages.iter().filter(|m| matches!(m.role, Role::Tool)) {
+            let s = m.content.to_string_lossy();
+            assert!(
+                !s.starts_with("[note:"),
+                "no tool_result should carry the note when args differ, got: {s:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn repetition_hook_composes_with_in_loop_detector_for_terminal_block() {
+        // End-to-end escalation: 5 identical (echo, {path: "foo"}) calls queued.
+        //   Attempt 1: detector count=1, executes,            tool_result without note.
+        //   Attempt 2: detector count=2, executes, hook fires, tool_result WITH note.
+        //   Attempt 3: detector count=3, BLOCKED by in-loop detector
+        //              (the call never executes, the hook never runs for it),
+        //              every call in the turn is blocked → RepetitionDetected.
+        //
+        // This is the contract from the plan's escalation table. If the
+        // canonical-hash extraction had quietly desynchronised the two layers
+        // (e.g. agent.rs hashing one way, the hook another), this test would
+        // catch it — the layers would disagree about which calls are
+        // "identical" and the escalation would skew.
+        let provider = Arc::new(MockProvider::new());
+        // Queue more responses than we expect to be consumed — safety against
+        // off-by-one. queue_raw_response inserts at index 0; pop is FIFO.
+        for _ in 0..5 {
+            provider.queue_raw_response(tool_call_response(
+                "c",
+                "echo",
+                serde_json::json!({"path": "foo"}),
+            ));
+        }
+        let provider: Arc<dyn Provider> = provider;
+
+        let hooks: Vec<Arc<dyn AgentHook>> = vec![Arc::new(RepetitionWarningHook::new())];
+        let config = AgentConfig::new("test-agent").with_hooks(hooks);
+
+        let result = Agent::run_once_with_progress(
+            provider,
+            tools_with_echo(),
+            config,
+            vec![Message::user("ask")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        let messages = match result {
+            AgentRunResult::RepetitionDetected { messages, .. } => messages,
+            other => panic!(
+                "expected RepetitionDetected after 3rd identical call, got {other:?}"
+            ),
+        };
+
+        let tool_results: Vec<&Message> = messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .collect();
+
+        // We expect exactly three tool_result entries:
+        //   [0] attempt 1 — clean
+        //   [1] attempt 2 — noted by hook (call still ran)
+        //   [2] attempt 3 — the in-loop detector's synthetic "Error: ..." block.
+        // Beyond that the loop terminates with RepetitionDetected.
+        assert_eq!(
+            tool_results.len(),
+            3,
+            "expected 3 tool_result messages spanning the escalation, got {}",
+            tool_results.len()
+        );
+
+        let r1 = tool_results[0].content.to_string_lossy();
+        let r2 = tool_results[1].content.to_string_lossy();
+        let r3 = tool_results[2].content.to_string_lossy();
+
+        assert!(!r1.starts_with("[note:"), "attempt 1 must be clean, got {r1:?}");
+        assert!(
+            r2.starts_with("[note:"),
+            "attempt 2 must carry the hook's note, got {r2:?}"
+        );
+        assert!(
+            r2.contains("echo-result"),
+            "attempt 2 must still contain the tool output, got {r2:?}"
+        );
+        assert!(
+            r3.contains("identical arguments")
+                || r3.to_ascii_lowercase().contains("error"),
+            "attempt 3 must be the in-loop detector's synthetic error, got {r3:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_repetition_hook_2nd_call_has_no_note() {
+        // Regression guard: prove the note in the previous test is produced
+        // by the hook, not by some other layer. Same scenario, no hook.
+        let provider = Arc::new(MockProvider::new());
+        provider.queue_raw_response(tool_call_response(
+            "c1",
+            "echo",
+            serde_json::json!({"path": "foo"}),
+        ));
+        provider.queue_raw_response(tool_call_response(
+            "c2",
+            "echo",
+            serde_json::json!({"path": "foo"}),
+        ));
+        provider.queue_response("done");
+        let provider: Arc<dyn Provider> = provider;
+
+        // No hooks registered.
+        let config = AgentConfig::new("test-agent");
+        let result = Agent::run_once_with_progress(
+            provider,
+            tools_with_echo(),
+            config,
+            vec![Message::user("ask")],
+            None,
+        )
+        .await
+        .expect("agent run should not error");
+
+        let messages = match result {
+            AgentRunResult::Success { messages, .. } => messages,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        for m in messages.iter().filter(|m| matches!(m.role, Role::Tool)) {
+            let s = m.content.to_string_lossy();
+            assert!(
+                !s.starts_with("[note:"),
+                "without the hook no tool_result should carry the note, got: {s:?}"
+            );
         }
     }
 }

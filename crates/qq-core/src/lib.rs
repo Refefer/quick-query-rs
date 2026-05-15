@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod blocking;
+pub(crate) mod canonical_hash;
 pub mod chunker;
 pub mod error;
 pub mod hooks;
@@ -24,7 +25,7 @@ pub use agent::{
 };
 pub use error::Error;
 pub use hooks::{
-    AgentHook, EmptyResponseHook, FakeToolCallHook,
+    AgentHook, EmptyResponseHook, FakeToolCallHook, RepetitionWarningHook,
     PostMessageAction, PostMessageContext,
     PostToolAction, PostToolContext,
     PreMessageAction, PreMessageContext,
